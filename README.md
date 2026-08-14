@@ -7,6 +7,53 @@ textos colocados em `data/raw/<assunto>/`.
 Escopo da v1: apenas arquivos locais, sem dados sigilosos do aluno.
 Ver [arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md).
 
+## Estado atual do projeto
+
+Esqueleto da v1 implementado e executável localmente. O que existe hoje:
+
+**Ingestão** — leitura de `.pdf` (via `pypdf`), `.txt` e `.md` a partir de
+`data/raw/<assunto>/`, divisão em chunks com overlap
+(`RecursiveCharacterTextSplitter`), geração de embeddings com o Gemini e
+indexação no pgvector. A metadata de origem (`assunto`, `source_type`,
+`source_uri`, `source_path`, `source_name`, `page`, `chunk_index`) é gravada em
+todo chunk. A ingestão é idempotente: cada chunk tem id determinístico e os
+chunks antigos do arquivo são removidos antes da reindexação, então rodar o
+ingest de novo não duplica nem deixa conteúdo órfão.
+
+**Retrieval** — busca por similaridade de cosseno no pgvector, com filtro
+opcional por assunto e corte por limiar de relevância (`RELEVANCE_THRESHOLD`).
+
+**Agente** — monta o prompt com os trechos recuperados e suas citações, chama o
+Gemini e devolve a resposta com as fontes (`arquivo, página`). Quando nada passa
+do limiar, responde que não encontrou na base em vez de chamar o LLM.
+
+**Entrypoints** — `scripts/ingest.py` (indexa um ou mais assuntos) e
+`scripts/ask.py` (pergunta, com `--debug` para inspecionar os chunks e scores).
+`app/main.py` expõe `POST /ask` e `GET /health` no FastAPI, como caminho já
+pronto para plugar um front depois.
+
+**Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
+`.env` (`pydantic-settings`).
+
+**Testes** — 15 testes cobrindo chunking, ids determinísticos, corte por limiar,
+filtro por assunto, formatação de citação e o guardrail do agente. Rodam sem
+banco e sem chave de API, usando dublês de vector store e de LLM.
+
+### Ainda não executado de ponta a ponta
+
+O caminho completo `ingest → embeddings Gemini → pgvector → retrieve` ainda não
+foi rodado contra um banco real. Falta subir o Postgres e configurar a
+`GOOGLE_API_KEY`; os pontos que só ficam provados aí são a chamada de embedding
+do Gemini e o `DELETE` de `delete_by_source` em `app/db/vector_store.py`, único
+trecho acoplado ao schema interno do `langchain-postgres`.
+
+### Fora do escopo desta fase
+
+Web scraping, interpretação de print/imagem, consumo de outras APIs públicas,
+classificação de intenção/escalonamento e canais de atendimento. Nenhum deles
+está implementado — cada um tem o lugar de encaixe definido na tabela de
+[pontos de extensão](#pontos-de-extensão-features-fora-da-v1).
+
 ## Como rodar
 
 ```bash
