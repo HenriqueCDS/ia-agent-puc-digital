@@ -1,0 +1,25 @@
+# --- LangChain (núcleo + integrações) ---
+langchain-core>=0.3.0,<0.4
+langchain-text-splitters>=0.3.0,<0.4
+langchain-google-genai>=2.0.0,<3.0
+langchain-postgres>=0.0.13,<0.1
+langchain-community>=0.3.0,<0.4   # document loaders (PDF, texto)
+
+# --- Banco / pgvector ---
+psycopg[binary]>=3.1
+sqlalchemy>=2.0
+
+# --- Leitura de PDF ---
+pypdf>=4.0
+
+# --- Config e CLI ---
+pydantic-settings>=2.0
+python-dotenv>=1.0
+typer>=0.12
+
+# --- API (entrypoint opcional, ver app/main.py) ---
+fastapi>=0.110
+uvicorn>=0.29
+
+# --- Testes ---
+pytest>=8.0
