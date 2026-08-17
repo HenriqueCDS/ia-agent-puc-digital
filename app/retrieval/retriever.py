@@ -29,3 +29,13 @@ def retrieve(query: Query, store: PGVector | None = None) -> list[RetrievedChunk
         for doc, score in resultados
         if score >= settings.relevance_threshold
     ]
+
+
+def is_exact_match(chunks: list[RetrievedChunk]) -> bool:
+    """As 2 fontes do topo têm score alto o bastante para tratar como alta confiança.
+
+    Não compara o conteúdo das duas entre si: usa só o score de cada uma. Como a
+    base tem bastante informação repetida (mesmo aviso em fontes diferentes), 2
+    fontes fortes no topo já costuma indicar que a resposta é direta.
+    """
+    return len(chunks) >= 2 and all(c.score >= settings.exact_match_threshold for c in chunks[:2])

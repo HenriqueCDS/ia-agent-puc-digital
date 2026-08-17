@@ -1,7 +1,7 @@
 from langchain_core.documents import Document
 
 from app.core.config import settings
-from app.ingestion.chunker import chunk_id, split_documents
+from app.ingestion.chunker import chunk_id, content_hash, split_documents
 
 
 def _doc(texto: str, **meta) -> Document:
@@ -34,3 +34,17 @@ def test_chunk_id_e_deterministico_e_unico_por_chunk():
     assert len(set(ids)) == len(ids)
     # reingerir o mesmo arquivo gera os mesmos ids -> upsert, não duplicata
     assert ids == [chunk_id(c) for c in split_documents([_doc("conteúdo. " * 500)])]
+
+
+def test_content_hash_ignora_espaco_e_caixa():
+    assert content_hash("Envie a atividade  até sexta") == content_hash("envie a atividade até sexta")
+
+
+def test_content_hash_e_igual_para_o_mesmo_texto_em_fontes_diferentes():
+    # é essa igualdade que permite achar o mesmo aviso colado em dois PDFs
+    a = split_documents([_doc("mesmo aviso. " * 200, source_path="/data/raw/canvas/a.pdf")])
+    b = split_documents([_doc("mesmo aviso. " * 200, source_path="/data/raw/canvas/b.pdf")])
+
+    assert [c.metadata["content_hash"] for c in a] == [c.metadata["content_hash"] for c in b]
+    # mas os ids continuam distintos, porque dependem do source_path
+    assert [chunk_id(c) for c in a] != [chunk_id(c) for c in b]

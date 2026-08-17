@@ -14,7 +14,7 @@ todo loader entrega o mesmo `Document`.
 from collections.abc import Callable
 from pathlib import Path
 
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
 from langchain_core.document_loaders import BaseLoader
 
 LoaderFactory = Callable[[str], BaseLoader]
@@ -39,3 +39,4 @@ def loader_for(path: Path) -> BaseLoader | None:
 register(".pdf", lambda uri: PyPDFLoader(uri))
 register(".txt", lambda uri: TextLoader(uri, encoding="utf-8"))
 register(".md", lambda uri: TextLoader(uri, encoding="utf-8"))
+register(".docx", lambda uri: Docx2txtLoader(uri))

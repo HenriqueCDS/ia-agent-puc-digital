@@ -1,15 +1,20 @@
-"""Fábricas dos modelos Gemini.
+"""Fábricas dos modelos de IA.
 
-Único lugar do projeto que conhece o provedor de IA. Trocar Gemini por outro
-provedor = trocar este arquivo, desde que as classes devolvidas continuem
-implementando `Embeddings` e `BaseChatModel` do LangChain.
+Único lugar do projeto que conhece o provedor de IA. Trocar de provedor =
+trocar este arquivo, desde que as classes devolvidas continuem implementando
+`Embeddings` e `BaseChatModel` do LangChain.
+
+Embeddings rodam localmente (HuggingFace/sentence-transformers) para não
+depender de cota de API — o chat continua no Gemini, que é usado bem menos
+(uma chamada por pergunta do usuário, contra uma por chunk na ingestão).
 """
 
 from functools import lru_cache
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from app.core.config import settings
 
@@ -24,10 +29,24 @@ def _require_api_key() -> str:
 
 @lru_cache(maxsize=1)
 def get_embeddings() -> Embeddings:
-    return GoogleGenerativeAIEmbeddings(
-        model=settings.embedding_model,
-        google_api_key=_require_api_key(),
-    )
+    """Modelo local. Tenta primeiro em modo offline (sem bater no HF Hub) —
+
+    depois do primeiro download o modelo já está em cache, então checar a rede
+    a cada execução só custa latência. Só volta a acessar a rede (e baixa/
+    atualiza o cache) se ainda não tiver nada salvo localmente — nesse caso,
+    usa `hf_token` (se configurado) para maior rate limit no download.
+    """
+    model_kwargs = {"token": settings.hf_token} if settings.hf_token else {}
+    try:
+        return HuggingFaceEmbeddings(
+            model_name=settings.embedding_model,
+            model_kwargs={**model_kwargs, "local_files_only": True},
+        )
+    except OSError:
+        return HuggingFaceEmbeddings(
+            model_name=settings.embedding_model,
+            model_kwargs=model_kwargs,
+        )
 
 
 @lru_cache(maxsize=1)

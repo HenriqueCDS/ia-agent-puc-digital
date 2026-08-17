@@ -7,7 +7,12 @@ from pathlib import Path
 from langchain_core.documents import Document
 
 from app.core.config import DATA_RAW_DIR
-from app.db.vector_store import delete_by_source, get_vector_store
+from app.db.vector_store import (
+    delete_by_source,
+    existing_content_hashes,
+    get_vector_store,
+    list_ingested_sources,
+)
 from app.ingestion.chunker import chunk_id, split_documents
 from app.ingestion.loaders.registry import loader_for, supported_extensions
 
@@ -18,6 +23,8 @@ logger = logging.getLogger(__name__)
 class IngestionReport:
     arquivos: int = 0
     chunks: int = 0
+    duplicados: int = 0
+    pulados: int = 0
     ignorados: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -43,8 +50,14 @@ def _enrich(documents: list[Document], path: Path, assunto: str) -> list[Documen
     return documents
 
 
-def ingest_file(path: Path, assunto: str) -> int:
-    """Indexa um arquivo. Reingerir o mesmo arquivo substitui o conteúdo anterior."""
+def ingest_file(path: Path, assunto: str) -> tuple[int, int]:
+    """Indexa um arquivo. Reingerir o mesmo arquivo substitui o conteúdo anterior.
+
+    Devolve (chunks indexados, chunks descartados por já existir com o mesmo
+    conteúdo em outra fonte). O descarte evita que o mesmo texto colado em dois
+    arquivos (ex.: um aviso repetido em vários PDFs) vire duas linhas quase
+    idênticas competindo pelo `top_k` na hora da busca.
+    """
     loader = loader_for(path)
     if loader is None:
         raise ValueError(f"Sem loader para {path.suffix}")
@@ -52,16 +65,29 @@ def ingest_file(path: Path, assunto: str) -> int:
     documents = _enrich(loader.load(), path, assunto)
     chunks = split_documents(documents)
     if not chunks:
-        return 0
+        return 0, 0
 
     store = get_vector_store()
     delete_by_source(store, str(path))
-    store.add_documents(chunks, ids=[chunk_id(c) for c in chunks])
-    return len(chunks)
+
+    hashes = [c.metadata["content_hash"] for c in chunks]
+    duplicados = existing_content_hashes(store, hashes)
+    novos = [c for c in chunks if c.metadata["content_hash"] not in duplicados]
+
+    if novos:
+        store.add_documents(novos, ids=[chunk_id(c) for c in novos])
+    return len(novos), len(chunks) - len(novos)
 
 
-def ingest_assunto(assunto: str) -> IngestionReport:
-    """Indexa todos os arquivos suportados de data/raw/<assunto>/."""
+def ingest_assunto(assunto: str, apenas_novos: bool = False) -> IngestionReport:
+    """Indexa os arquivos suportados de data/raw/<assunto>/.
+
+    `apenas_novos=True` pula qualquer arquivo cujo `source_path` já apareça no
+    índice, sem reprocessar nem chamar o embedder — poupa a cota/tempo de quem
+    só quer indexar o que foi adicionado desde a última rodada. Um arquivo que
+    já existe mas mudou de conteúdo não é pego por esse modo (ele só olha o
+    caminho, não o hash); para reindexar conteúdo alterado, rode sem a flag.
+    """
     pasta = DATA_RAW_DIR / assunto
     if not pasta.is_dir():
         raise FileNotFoundError(f"Pasta não encontrada: {pasta}")
@@ -69,16 +95,29 @@ def ingest_assunto(assunto: str) -> IngestionReport:
     report = IngestionReport()
     extensoes = supported_extensions()
 
+    ja_indexados: set[str] = set()
+    if apenas_novos:
+        store = get_vector_store()
+        ja_indexados = {source_path for source_path, _ in list_ingested_sources(store)}
+
     for path in sorted(pasta.rglob("*")):
         if not path.is_file():
             continue
         if path.suffix.lower() not in extensoes:
             report.ignorados.append(path.name)
             continue
+        if apenas_novos and str(path) in ja_indexados:
+            report.pulados += 1
+            logger.info("%s -> pulado (já indexado)", path.name)
+            continue
 
-        n = ingest_file(path, assunto)
+        n, duplicados = ingest_file(path, assunto)
         report.arquivos += 1
         report.chunks += n
-        logger.info("%s -> %d chunks", path.name, n)
+        report.duplicados += duplicados
+        if duplicados:
+            logger.info("%s -> %d chunk(s), %d duplicado(s) descartado(s)", path.name, n, duplicados)
+        else:
+            logger.info("%s -> %d chunks", path.name, n)
 
     return report

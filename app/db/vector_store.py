@@ -45,3 +45,39 @@ def delete_by_source(store: PGVector, source_path: str) -> int:
         result = session.execute(stmt, {"source_path": source_path})
         session.commit()
         return result.rowcount or 0
+
+
+def list_ingested_sources(store: PGVector) -> list[tuple[str, int]]:
+    """Lista os arquivos indexados e a quantidade de chunks de cada um."""
+    stmt = text(
+        """
+        SELECT cmetadata->>'source_path' AS source_path, COUNT(*) AS chunks
+        FROM langchain_pg_embedding
+        GROUP BY 1
+        ORDER BY 1
+        """
+    )
+    with store.session_maker() as session:
+        rows = session.execute(stmt)
+        return [(row.source_path, row.chunks) for row in rows]
+
+
+def existing_content_hashes(store: PGVector, hashes: list[str]) -> set[str]:
+    """Entre os hashes dados, devolve os que já existem em QUALQUER fonte no índice.
+
+    Usado antes de indexar para não duplicar chunks cujo texto já foi indexado a
+    partir de outro arquivo (ex.: o mesmo aviso colado em dois PDFs).
+    """
+    if not hashes:
+        return set()
+
+    stmt = text(
+        """
+        SELECT DISTINCT cmetadata->>'content_hash' AS content_hash
+        FROM langchain_pg_embedding
+        WHERE cmetadata->>'content_hash' = ANY(:hashes)
+        """
+    )
+    with store.session_maker() as session:
+        rows = session.execute(stmt, {"hashes": hashes})
+        return {row.content_hash for row in rows}

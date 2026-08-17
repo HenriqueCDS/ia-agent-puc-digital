@@ -1,7 +1,9 @@
 # --- LangChain (núcleo + integrações) ---
 langchain-core>=0.3.0,<0.4
 langchain-text-splitters>=0.3.0,<0.4
-langchain-google-genai>=2.0.0,<3.0
+langchain-google-genai>=2.0.0,<3.0   # chat (Gemini)
+langchain-huggingface>=0.1,<0.2      # embeddings locais (sem cota de API)
+sentence-transformers>=3.0
 langchain-postgres>=0.0.13,<0.1
 langchain-community>=0.3.0,<0.4   # document loaders (PDF, texto)
 
@@ -11,6 +13,9 @@ sqlalchemy>=2.0
 
 # --- Leitura de PDF ---
 pypdf>=4.0
+
+# --- Leitura de DOCX ---
+docx2txt>=0.8
 
 # --- Config e CLI ---
 pydantic-settings>=2.0

@@ -23,6 +23,19 @@ PERGUNTA:
 
 ANSWER_PROMPT = ChatPromptTemplate.from_messages([("system", SYSTEM), ("human", USER)])
 
+# Usado quando retrieval.is_exact_match indica alta confiança (2 fontes fortes no
+# topo). Mesmas regras da base, só troca o tom: sem ressalvas do tipo "confirme
+# com a secretaria" quando o contexto já responde com clareza.
+SYSTEM_ALTA_CONFIANCA = SYSTEM + """
+
+- As fontes recuperadas para esta pergunta são de altíssima confiança (múltiplas \
+fontes fortes concordam). Responda de forma direta e literal ao que elas dizem, \
+sem ressalvas como "pode ser que" ou "consulte para confirmar"."""
+
+ANSWER_PROMPT_ALTA_CONFIANCA = ChatPromptTemplate.from_messages(
+    [("system", SYSTEM_ALTA_CONFIANCA), ("human", USER)]
+)
+
 SEM_CONTEXTO = (
     "Não encontrei essa informação na base de conhecimento disponível. "
     "Recomendo verificar diretamente com a secretaria acadêmica ou com o suporte da instituição."
