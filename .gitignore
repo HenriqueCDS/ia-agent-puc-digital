@@ -5,6 +5,4 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# Base de conhecimento: os arquivos ficam fora do git, só a estrutura de pastas fica
-data/raw/**/*
-!data/raw/**/.gitkeep
+

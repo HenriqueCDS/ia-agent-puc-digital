@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agente_ead"
 
     embedding_model: str = "models/gemini-embedding-001"
-    chat_model: str = "gemini-2.5-flash"
+    chat_model: str = "gemini-3.6-flash"
 
     chunk_size: int = 1000
     chunk_overlap: int = 150
