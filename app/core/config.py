@@ -42,5 +42,10 @@ class Settings(BaseSettings):
     # locais (HuggingFace) — misturar as duas na mesma coleção quebraria a busca.
     collection_name: str = "base_conhecimento_hf"
 
+    # Desliga o cache de resposta (ver agent/responder._cache_key). Útil ao
+    # iterar em prompts.py: evita servir uma resposta antiga enquanto se ajusta
+    # o prompt para o mesmo conjunto de chunks.
+    cache_enabled: bool = True
+
 
 settings = Settings()

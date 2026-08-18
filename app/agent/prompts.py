@@ -10,9 +10,10 @@ Regras:
 - Responda APENAS com base no CONTEXTO fornecido. Não use conhecimento próprio \
 sobre outras instituições nem invente procedimentos, prazos ou nomes de menus.
 - Se o contexto não cobrir a pergunta, diga com clareza que não encontrou a \
-informação na base e sugira procurar a secretaria acadêmica.
+informação na base e passar as informaçoes de contato com a secretaria.
 - Seja direto e didático. Quando for um procedimento, responda em passos numerados.
-- Escreva em português do Brasil, em tom cordial e profissional.
+- Escreva TUDO em português do Brasil, em tom cordial e profissional.
+- Faça tuturiais com relação a plataforma com essa estrutura "menu > pessoa > adicionar pessoa"
 - Ao final, cite as fontes usadas no formato: Fontes: <arquivo, página>."""
 
 USER = """CONTEXTO:
@@ -37,6 +38,6 @@ ANSWER_PROMPT_ALTA_CONFIANCA = ChatPromptTemplate.from_messages(
 )
 
 SEM_CONTEXTO = (
-    "Não encontrei essa informação na base de conhecimento disponível. "
-    "Recomendo verificar diretamente com a secretaria acadêmica ou com o suporte da instituição."
+    "Não encontrei essa informação na base de conhecimento disponível."
+    "Recomendo verificar diretamente com a secretaria acadêmica ou com o suporte da instituição (puc.digital@puc-campinas.edu.br)."
 )

@@ -21,11 +21,26 @@ class FakeLLM:
         return AIMessage(content="Resposta gerada.")
 
 
-def _chunk(texto="Para enviar a atividade, acesse Tarefas.", **meta):
+def _chunk(texto="Para enviar a atividade, acesse Tarefas.", chunk_id="c1", **meta):
     return RetrievedChunk(
-        document=Document(page_content=texto, metadata={"source_name": "guia.pdf", **meta}),
+        document=Document(
+            id=chunk_id, page_content=texto, metadata={"source_name": "guia.pdf", **meta}
+        ),
         score=0.9,
     )
+
+
+@pytest.fixture(autouse=True)
+def fake_cache(monkeypatch):
+    """Cache em memória, isolado por teste — nenhum teste toca o Postgres real."""
+    armazenado: dict[str, str] = {}
+    monkeypatch.setattr(responder, "get_cached_answer", armazenado.get)
+    monkeypatch.setattr(
+        responder,
+        "set_cached_answer",
+        lambda key, assunto, resposta: armazenado.__setitem__(key, resposta),
+    )
+    return armazenado
 
 
 def test_sem_chunks_nao_chama_o_llm(monkeypatch):
@@ -85,3 +100,42 @@ def test_fonte_unica_forte_nao_usa_alta_confianca(monkeypatch):
 
     prompt = "\n".join(str(m.content) for m in llm.mensagens)
     assert "sem ressalvas" not in prompt
+
+
+def test_pergunta_parafraseada_com_mesmos_chunks_usa_cache_e_nao_chama_llm(monkeypatch):
+    chunks = [_chunk(page=1)]
+    monkeypatch.setattr(responder, "retrieve", lambda q: chunks)
+
+    primeiro = responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+    assert primeiro.text == "Resposta gerada."
+
+    llm2 = FakeLLM()
+    segundo = responder.answer(Query(text="como faço para mandar a atividade?"), llm=llm2)
+
+    assert llm2.mensagens is None  # mesmo conjunto de chunks -> cache hit, sem chamar o LLM
+    assert segundo.text == primeiro.text
+    assert segundo.grounded is True
+    assert segundo.sources == chunks  # fontes vêm do retrieval atual, não do cache
+
+
+def test_chunks_diferentes_nao_reusam_a_mesma_entrada_de_cache(monkeypatch):
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(chunk_id="c1", page=1)])
+    responder.answer(Query(text="pergunta 1"), llm=FakeLLM())
+
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(chunk_id="c2", page=2)])
+    llm2 = FakeLLM()
+    responder.answer(Query(text="pergunta 2"), llm=llm2)
+
+    assert llm2.mensagens is not None  # chunk recuperado é outro -> não reusa cache
+
+
+def test_cache_desligado_sempre_chama_o_llm(monkeypatch):
+    monkeypatch.setattr(responder.settings, "cache_enabled", False)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+
+    responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+
+    llm2 = FakeLLM()
+    responder.answer(Query(text="como envio a atividade?"), llm=llm2)
+
+    assert llm2.mensagens is not None  # cache_enabled=False -> nunca serve do cache
