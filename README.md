@@ -13,8 +13,9 @@ Esqueleto da v1 implementado e executável localmente. O que existe hoje:
 
 **Ingestão** — leitura de `.pdf` (via `pypdf`), `.txt` e `.md` a partir de
 `data/raw/<assunto>/`, divisão em chunks com overlap
-(`RecursiveCharacterTextSplitter`), geração de embeddings com o Gemini e
-indexação no pgvector. A metadata de origem (`assunto`, `source_type`,
+(`RecursiveCharacterTextSplitter`), geração de embeddings com um modelo local
+(HuggingFace/sentence-transformers, multilíngue — sem depender de cota de API)
+e indexação no pgvector. A metadata de origem (`assunto`, `source_type`,
 `source_uri`, `source_path`, `source_name`, `page`, `chunk_index`) é gravada em
 todo chunk. A ingestão é idempotente: cada chunk tem id determinístico e os
 chunks antigos do arquivo são removidos antes da reindexação, então rodar o
@@ -27,6 +28,16 @@ opcional por assunto e corte por limiar de relevância (`RELEVANCE_THRESHOLD`).
 Gemini e devolve a resposta com as fontes (`arquivo, página`). Quando nada passa
 do limiar, responde que não encontrou na base em vez de chamar o LLM.
 
+**Cache de resposta** — perguntas que recuperam o mesmo conjunto de chunks no
+retrieval (mesmo sendo uma paráfrase uma da outra) reaproveitam a resposta já
+gerada, sem chamar o Gemini de novo. A chave não é o texto da pergunta, é
+`assunto + nível de confiança + ids dos chunks recuperados`; assim, reingerir
+um arquivo alterado muda os ids e invalida o cache sozinho, sem lógica extra de
+limpeza. Guardado numa tabela própria (`resposta_cache`) no mesmo Postgres da
+ingestão — nenhuma infra nova. Liga/desliga com `CACHE_ENABLED`
+(`app/core/config.py`); ver `app/agent/responder.py` (`_cache_key`) e
+`app/db/response_cache.py`.
+
 **Entrypoints** — `scripts/ingest.py` (indexa um ou mais assuntos) e
 `scripts/ask.py` (pergunta, com `--debug` para inspecionar os chunks e scores).
 `app/main.py` expõe `POST /ask` e `GET /health` no FastAPI, como caminho já
@@ -35,17 +46,19 @@ pronto para plugar um front depois.
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
 
-**Testes** — 15 testes cobrindo chunking, ids determinísticos, corte por limiar,
-filtro por assunto, formatação de citação e o guardrail do agente. Rodam sem
-banco e sem chave de API, usando dublês de vector store e de LLM.
+**Testes** — 25 testes cobrindo chunking, ids determinísticos, corte por
+limiar, filtro por assunto, formatação de citação, o guardrail do agente e o
+hit/miss do cache de resposta. Rodam sem banco e sem chave de API, usando
+dublês de vector store, de LLM e de cache.
 
 ### Ainda não executado de ponta a ponta
 
-O caminho completo `ingest → embeddings Gemini → pgvector → retrieve` ainda não
+O caminho completo `ingest → embeddings locais → pgvector → retrieve` ainda não
 foi rodado contra um banco real. Falta subir o Postgres e configurar a
-`GOOGLE_API_KEY`; os pontos que só ficam provados aí são a chamada de embedding
-do Gemini e o `DELETE` de `delete_by_source` em `app/db/vector_store.py`, único
-trecho acoplado ao schema interno do `langchain-postgres`.
+`GOOGLE_API_KEY`; os pontos que só ficam provados aí são o `DELETE` de
+`delete_by_source` e a criação sob demanda da tabela `resposta_cache` (ambos em
+`app/db/`), únicos trechos acoplados ao schema/SQL direto por fora do
+`langchain-postgres`.
 
 ### Fora do escopo desta fase
 
@@ -88,12 +101,19 @@ Testes: `pytest` (não precisa de banco nem de chave de API).
 data/raw/<assunto>/*.pdf|txt|md
    │  loaders/registry.py      (fonte -> Document)
    ▼
-pipeline.py ── chunker.py ── embeddings Gemini ── pgvector
-                                                     │
-pergunta ── preprocess.py ── retriever.py ───────────┘
-                                 │
-                                 ▼
-                       responder.py + prompts.py ── Gemini ── resposta + fontes
+pipeline.py ── chunker.py ── embeddings locais (HF) ── pgvector
+                                                          │
+pergunta ── preprocess.py ── retriever.py ────────────────┘
+                                  │
+                                  ▼
+                     cache? (resposta_cache: assunto+confiança+chunks)
+                     │                                    │
+                    hit                                  miss
+                     │                                    ▼
+                     │                    responder.py + prompts.py ── Gemini
+                     │                                    │
+                     ▼                                    ▼
+                          resposta + fontes  (grava no cache se miss)
 ```
 
 ## Organização
@@ -106,8 +126,9 @@ pergunta ── preprocess.py ── retriever.py ──────────
 | `app/ingestion/chunker.py` | divisão em chunks (função pura) |
 | `app/ingestion/pipeline.py` | orquestra load → chunk → embed → indexa |
 | `app/retrieval/retriever.py` | busca por similaridade + filtro por assunto |
-| `app/agent/` | pré-processamento, prompt e geração da resposta |
+| `app/agent/` | pré-processamento, prompt, cache e geração da resposta |
 | `app/db/vector_store.py` | conexão com pgvector |
+| `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |
 | `scripts/` | CLIs de ingestão e de pergunta |
 
 ## Pontos de extensão (features fora da v1)
@@ -137,6 +158,11 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
   Também serve de termômetro de quais documentos faltam na base.
 - **Passos explícitos no `responder.py`** em vez de uma chain fechada: dá para
   inspecionar o contexto recuperado (`--debug`) antes da chamada ao LLM.
+- **Cache por conjunto de chunks, não pelo texto da pergunta**: duas perguntas
+  parafraseadas que recuperam o mesmo topo do retrieval caem na mesma chave, e
+  reingerir um arquivo alterado muda os ids recuperados e invalida a chave
+  sozinho — sem tabela de invalidação nem TTL manual. Guardado no mesmo
+  Postgres da ingestão, sem infra nova.
 
 ## Próximos passos sugeridos
 
