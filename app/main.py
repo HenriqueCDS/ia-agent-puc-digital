@@ -24,6 +24,9 @@ class AskResponse(BaseModel):
     resposta: str
     fontes: list[str]
     encontrou_na_base: bool
+    # "base" | "web" | "nenhuma" — quem consome precisa saber que a resposta veio
+    # de uma página pública, e não do material interno revisado.
+    origem: str
 
 
 @app.get("/health")
@@ -42,4 +45,5 @@ def ask(req: AskRequest) -> AskResponse:
         resposta=resultado.text,
         fontes=[c.citation for c in resultado.sources],
         encontrou_na_base=resultado.grounded,
+        origem=resultado.origem,
     )

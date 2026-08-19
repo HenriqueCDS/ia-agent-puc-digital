@@ -17,6 +17,9 @@ pypdf>=4.0
 # --- Leitura de DOCX ---
 docx2txt>=0.8
 
+# --- Busca externa (fallback quando o RAG nao encontra) ---
+ddgs>=9.0,<10   # DuckDuckGo; ver app/agent/web_fallback.py
+
 # --- Config e CLI ---
 pydantic-settings>=2.0
 python-dotenv>=1.0

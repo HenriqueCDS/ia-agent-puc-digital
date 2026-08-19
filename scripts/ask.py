@@ -30,7 +30,13 @@ def main(
 
     typer.echo(resultado.text)
 
-    if not resultado.grounded:
+    if resultado.origem == "web":
+        typer.secho(
+            "\n(respondido por busca em páginas públicas oficiais — não estava "
+            "na base indexada; talvez falte documento)",
+            fg=typer.colors.YELLOW,
+        )
+    elif not resultado.grounded:
         typer.secho(
             "\n(nada acima do limiar de relevância — talvez falte documento na base)",
             fg=typer.colors.YELLOW,

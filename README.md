@@ -26,7 +26,23 @@ opcional por assunto e corte por limiar de relevância (`RELEVANCE_THRESHOLD`).
 
 **Agente** — monta o prompt com os trechos recuperados e suas citações, chama o
 Gemini e devolve a resposta com as fontes (`arquivo, página`). Quando nada passa
-do limiar, responde que não encontrou na base em vez de chamar o LLM.
+do limiar, não chama o LLM com contexto vazio: cai no fallback de busca externa
+abaixo.
+
+**Fallback de busca externa** — quando o retrieval não devolve nada, o agente
+procura a resposta em páginas públicas oficiais antes de encaminhar para a
+secretaria. A busca é restrita por uma allowlist (`WEB_ALLOWLIST` em
+`app/core/config.py`): site da PUC-Campinas e a base de conhecimento oficial do
+Canvas (`community.instructure.com/en/kb/`). A restrição tem duas camadas — uma
+query `site:<host>` por fonte, e a revalidação de **toda** URL devolvida contra
+`(host, path_prefix)`, porque o operador `site:` do buscador vaza resultado fora
+do escopo em silêncio. Os snippets ainda passam por um corte de similaridade
+(mesmo modelo de embedding local da base, sem custo de API) e por um veto final
+do LLM, que responde `INSUFICIENTE` quando os trechos não bastam. Nada relevante
+encontrado → resposta com o contato da secretaria. Assuntos de registro
+acadêmico e financeiro (nota, matrícula, boleto…) nunca vão para a busca externa
+— a resposta certa neles depende do caso do aluno. Liga/desliga com
+`WEB_FALLBACK_ENABLED`; ver `app/agent/web_fallback.py`.
 
 **Cache de resposta** — perguntas que recuperam o mesmo conjunto de chunks no
 retrieval (mesmo sendo uma paráfrase uma da outra) reaproveitam a resposta já
@@ -46,10 +62,12 @@ pronto para plugar um front depois.
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
 
-**Testes** — 25 testes cobrindo chunking, ids determinísticos, corte por
-limiar, filtro por assunto, formatação de citação, o guardrail do agente e o
-hit/miss do cache de resposta. Rodam sem banco e sem chave de API, usando
-dublês de vector store, de LLM e de cache.
+**Testes** — 47 testes cobrindo chunking, ids determinísticos, corte por
+limiar, filtro por assunto, formatação de citação, o guardrail do agente, o
+hit/miss do cache de resposta e o fallback de busca externa (allowlist, domínio
+sósia, redirect do buscador, corte por similaridade, blocklist de assunto
+sensível e degradação em caso de rate limit). Rodam sem banco, sem chave de API
+e **sem rede**, usando dublês de vector store, de LLM, de cache e de busca.
 
 ### Ainda não executado de ponta a ponta
 
@@ -62,9 +80,10 @@ foi rodado contra um banco real. Falta subir o Postgres e configurar a
 
 ### Fora do escopo desta fase
 
-Web scraping, interpretação de print/imagem, consumo de outras APIs públicas,
-classificação de intenção/escalonamento e canais de atendimento. Nenhum deles
-está implementado — cada um tem o lugar de encaixe definido na tabela de
+Ingestão por web scraping (o fallback busca em tempo real, não indexa),
+interpretação de print/imagem, consumo de outras APIs públicas, classificação de
+intenção/escalonamento e canais de atendimento. Nenhum deles está implementado —
+cada um tem o lugar de encaixe definido na tabela de
 [pontos de extensão](#pontos-de-extensão-features-fora-da-v1).
 
 ## Como rodar
@@ -105,15 +124,21 @@ pipeline.py ── chunker.py ── embeddings locais (HF) ── pgvector
                                                           │
 pergunta ── preprocess.py ── retriever.py ────────────────┘
                                   │
-                                  ▼
-                     cache? (resposta_cache: assunto+confiança+chunks)
-                     │                                    │
-                    hit                                  miss
-                     │                                    ▼
-                     │                    responder.py + prompts.py ── Gemini
-                     │                                    │
-                     ▼                                    ▼
-                          resposta + fontes  (grava no cache se miss)
+                    ┌─────────────┴─────────────┐
+                achou algo                   vazio
+                    │                           │
+                    ▼                           ▼
+      cache? (assunto+confiança+chunks)   web_fallback.py
+       │                    │             (allowlist + similaridade)
+      hit                  miss                 │
+       │                    ▼             ┌─────┴─────┐
+       │      responder.py ── Gemini   achou       nada
+       │                    │             │           │
+       │                    │             ▼           ▼
+       │                    │          Gemini    secretaria
+       ▼                    ▼          (prompt web)
+        resposta + fontes (arquivo, página)   resposta + fontes (URL)
+        origem="base"                         origem="web"
 ```
 
 ## Organização
@@ -127,6 +152,7 @@ pergunta ── preprocess.py ── retriever.py ──────────
 | `app/ingestion/pipeline.py` | orquestra load → chunk → embed → indexa |
 | `app/retrieval/retriever.py` | busca por similaridade + filtro por assunto |
 | `app/agent/` | pré-processamento, prompt, cache e geração da resposta |
+| `app/agent/web_fallback.py` | busca externa restrita à allowlist de domínios oficiais |
 | `app/db/vector_store.py` | conexão com pgvector |
 | `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |
 | `scripts/` | CLIs de ingestão e de pergunta |
@@ -138,7 +164,9 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 | Feature | Onde entra | O que muda |
 |---|---|---|
 | **Web scraping** do site da instituição | `app/ingestion/loaders/registry.py` | registrar um `WebBaseLoader`; o resto do pipeline é o mesmo |
-| **APIs públicas** (catálogo, calendário) | mesmo registry, ou fonte de contexto extra em `responder.py` | novo loader, ou tool calling tendo `retrieve` como tool |
+| **APIs públicas** (calendário acadêmico, API do Canvas) | mesmo registry, ou fonte de contexto extra em `responder.py` | novo loader; com 3+ fontes assim, o roteamento vira tool calling tendo `retrieve` e `buscar_na_web` como tools |
+| **FAQ estruturado** (match exato, sem LLM) | antes do `retrieve` em `responder.py` | responde as perguntas de altíssima frequência com texto aprovado, latência ~0 |
+| **Abertura de chamado** | onde hoje está `_encaminhar_para_secretaria` | transforma o encaminhamento em ação: abre o ticket já com a pergunta |
 | **Interpretação de print/imagem** | `app/agent/preprocess.py` | anexo → descrição textual via Gemini multimodal → mesma `Query` |
 | **Reranking / busca híbrida** | `app/retrieval/retriever.py` | entre a busca e o corte por limiar |
 | **Canal de atendimento** (portal, WhatsApp) | `app/main.py` | mais rotas; a lógica já está em `responder.py` |
@@ -154,8 +182,27 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
   dimensão, então trocar de modelo não exige migração. Em troca, o índice HNSW
   só entra depois — o que só importa acima de ~50k chunks.
 - **Guardrail de relevância** (`RELEVANCE_THRESHOLD`): abaixo do limiar o agente
-  responde que não encontrou, em vez de alucinar um procedimento acadêmico.
-  Também serve de termômetro de quais documentos faltam na base.
+  não alucina um procedimento acadêmico — tenta as páginas públicas oficiais e,
+  não achando, encaminha para a secretaria. Também serve de termômetro de quais
+  documentos faltam na base (`Answer.grounded` continua `False` mesmo quando a
+  web responde; quem precisa distinguir lê `Answer.origem`).
+- **Fallback como ramo do guardrail, não como tool do LLM**: o gatilho ("o
+  retrieval voltou vazio") é um `if`, não uma decisão ambígua. Deixar o modelo
+  escolher custaria uma chamada extra para decidir o que o código já sabe, e
+  trocaria uma condição testável por uma não-determinística. Só este ramo paga a
+  latência da busca — as perguntas que a base responde bem seguem intactas.
+- **Allowlist validada na URL, não confiada no `site:`**: o operador `site:` é
+  só direcionamento de recall; a garantia vem da revalidação de cada URL
+  devolvida. Assim, trocar de buscador (ou o buscador mudar de comportamento)
+  não afeta a restrição.
+- **Filtro de relevância da web com o embedding local**: o mesmo modelo já
+  carregado para a base decide se o snippet serve, sem gastar token para
+  descobrir que a busca não trouxe nada. Limiar calibrado em busca real
+  (acertos em 0.52–0.65, melhor falso-positivo fora de escopo em 0.37).
+- **Caminho da web sem cache**: a `_cache_key` depende de ids de chunk, que não
+  existem para resultado de web, e conteúdo externo muda sem aviso enquanto a
+  tabela `resposta_cache` não tem TTL. É o caminho raro; cachear depois, por
+  conjunto de URLs e com expiração.
 - **Passos explícitos no `responder.py`** em vez de uma chain fechada: dá para
   inspecionar o contexto recuperado (`--debug`) antes da chamada ao LLM.
 - **Cache por conjunto de chunks, não pelo texto da pergunta**: duas perguntas
@@ -171,3 +218,8 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 2. Montar um conjunto de ~20 perguntas reais de alunos como teste de regressão
    do retrieval.
 3. Fixar a dimensão do embedding e criar índice HNSW quando o corpus crescer.
+4. Medir a taxa de acionamento do fallback de busca externa: fallback frequente
+   sobre um mesmo tema é sinal de documento faltando na ingestão, não de sucesso
+   da busca.
+5. Avaliar o gatilho na "zona cinzenta" (retrieval devolve chunks fracos, entre
+   `RELEVANCE_THRESHOLD` e ~0.5), hoje fora do fallback de propósito.

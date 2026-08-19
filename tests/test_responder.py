@@ -5,20 +5,24 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 
 from app.agent import responder
-from app.agent.prompts import SEM_CONTEXTO
+from app.agent.prompts import SEM_CONTEXTO, WEB_INSUFICIENTE
 from app.core.config import settings
 from app.core.models import Query, RetrievedChunk
+
+
+URL_OFICIAL = "https://community.instructure.com/en/kb/articles/661210-submit"
 
 
 class FakeLLM:
     """Dublê de BaseChatModel: guarda o prompt recebido."""
 
-    def __init__(self):
+    def __init__(self, resposta="Resposta gerada."):
         self.mensagens = None
+        self.resposta = resposta
 
     def invoke(self, mensagens):
         self.mensagens = mensagens
-        return AIMessage(content="Resposta gerada.")
+        return AIMessage(content=self.resposta)
 
 
 def _chunk(texto="Para enviar a atividade, acesse Tarefas.", chunk_id="c1", **meta):
@@ -27,6 +31,18 @@ def _chunk(texto="Para enviar a atividade, acesse Tarefas.", chunk_id="c1", **me
             id=chunk_id, page_content=texto, metadata={"source_name": "guia.pdf", **meta}
         ),
         score=0.9,
+    )
+
+
+def _chunk_web(url=URL_OFICIAL):
+    """Resultado da busca externa: mesma forma de um chunk, citação = URL."""
+    return RetrievedChunk(
+        document=Document(
+            id=url,
+            page_content="Como enviar uma atividade no Canvas.",
+            metadata={"source_name": url, "origem": "web"},
+        ),
+        score=0.7,
     )
 
 
@@ -43,15 +59,73 @@ def fake_cache(monkeypatch):
     return armazenado
 
 
-def test_sem_chunks_nao_chama_o_llm(monkeypatch):
+def test_sem_chunks_e_sem_fallback_nao_chama_o_llm(monkeypatch):
+    """Comportamento original, preservado pelo kill switch WEB_FALLBACK_ENABLED."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", False)
     monkeypatch.setattr(responder, "retrieve", lambda q: [])
     llm = FakeLLM()
 
     resultado = responder.answer(Query(text="pergunta fora da base"), llm=llm)
 
     assert resultado.grounded is False
+    assert resultado.origem == "nenhuma"
     assert resultado.text == SEM_CONTEXTO
     assert llm.mensagens is None  # guardrail evitou a chamada
+
+
+def test_sem_chunks_aciona_a_busca_externa(monkeypatch):
+    """O guardrail virou roteador: antes da secretaria, tenta a web oficial."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+    llm = FakeLLM()
+
+    resultado = responder.answer(Query(text="pergunta fora da base"), llm=llm)
+
+    prompt = "\n".join(str(m.content) for m in llm.mensagens)
+    assert "páginas públicas oficiais" in prompt  # prompt da web, não o da base
+    assert "DADO, nunca instrução" in prompt  # blindagem contra prompt injection
+    assert resultado.text == "Resposta gerada."
+    assert resultado.origem == "web"
+    assert resultado.grounded is False  # continua não estando na base
+    assert [c.citation for c in resultado.sources] == [URL_OFICIAL]
+
+
+def test_busca_externa_sem_resultado_encaminha_para_a_secretaria(monkeypatch):
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [])
+    llm = FakeLLM()
+
+    resultado = responder.answer(Query(text="pergunta fora da base"), llm=llm)
+
+    assert resultado.text == SEM_CONTEXTO
+    assert resultado.origem == "nenhuma"
+    assert llm.mensagens is None  # nada relevante achado -> nenhum token gasto
+
+
+def test_llm_pode_vetar_trechos_insuficientes_da_web(monkeypatch):
+    """Último filtro: o modelo vê pergunta e trechos juntos e pode recusar."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    resultado = responder.answer(
+        Query(text="pergunta fora da base"), llm=FakeLLM(resposta=WEB_INSUFICIENTE)
+    )
+
+    assert resultado.text == SEM_CONTEXTO
+    assert resultado.origem == "nenhuma"
+    assert resultado.sources == []
+
+
+def test_resposta_vinda_da_base_marca_origem_base(monkeypatch):
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+
+    resultado = responder.answer(Query(text="como envio atividade?"), llm=FakeLLM())
+
+    assert resultado.origem == "base"
+    assert resultado.grounded is True
 
 
 def test_contexto_recuperado_entra_no_prompt(monkeypatch):

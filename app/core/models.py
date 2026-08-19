@@ -41,4 +41,10 @@ class RetrievedChunk:
 class Answer:
     text: str
     sources: list[RetrievedChunk] = field(default_factory=list)
-    grounded: bool = True  # False quando nada relevante foi encontrado
+    grounded: bool = True  # False quando nada relevante foi encontrado NA BASE
+    # De onde veio a resposta: "base" (RAG), "web" (fallback de busca externa,
+    # ver app/agent/web_fallback.py) ou "nenhuma" (encaminhou para a secretaria).
+    # Campo separado de `grounded` de propósito: uma resposta vinda da web tem
+    # fonte citável, mas continua sendo um caso de "não estava na base" — que é
+    # o sinal usado para descobrir que documento falta indexar.
+    origem: str = "base"
