@@ -4,7 +4,8 @@
     python -m scripts.ask "Como acesso o portal?" --assunto puc-digital
     python -m scripts.ask "Como acesso o portal?" --debug   # mostra os chunks e scores
 
-A telemetria (1 linha JSON por pergunta) sai em stderr, separada da resposta:
+A telemetria (1 linha JSON por pergunta) sai em stderr, separada da resposta, e
+vai também para a tabela `telemetria` no Postgres (retenção de 7 dias):
 
     python -m scripts.ask "..." 2>> telemetria.jsonl
 """
@@ -14,6 +15,7 @@ import typer
 from app.agent.responder import answer
 from app.core import telemetry
 from app.core.models import Query
+from app.db import telemetry_store
 
 app = typer.Typer(add_completion=False, help="Faz uma pergunta ao agente.")
 
@@ -25,6 +27,7 @@ def main(
     debug: bool = typer.Option(False, "--debug", "-d", help="Mostra os chunks recuperados."),
 ) -> None:
     telemetry.configurar_logs()
+    telemetry_store.habilitar()
     telemetry.set_canal("cli")
 
     resultado = answer(Query(text=pergunta, assunto=assunto))

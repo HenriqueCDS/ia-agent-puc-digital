@@ -116,20 +116,63 @@ Testes: `pytest` (não precisa de banco nem de chave de API).
 
 ## Observabilidade
 
-Cada pergunta respondida emite **uma linha JSON** em `stderr` (`app/core/telemetry.py`),
-separada da resposta, que sai em `stdout`:
+Cada pergunta respondida gera **um registro** (`app/core/telemetry.py`), com dois
+destinos independentes:
+
+1. **linha JSON em `stderr`** — sempre, separada da resposta (que sai em `stdout`);
+2. **tabela `telemetria` no Postgres** — a mesma base do pgvector, com **retenção
+   de 7 dias** (`app/db/telemetry_store.py`).
 
 ```bash
-python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl
+python -m scripts.ask "Como envio uma atividade?"        # registro vai para o banco
+python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl   # e/ou arquivo
 ```
 
 ```json
-{"canal":"cli","assunto":"canvas","pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash",
+{"canal":"cli","assunto":"canvas","assunto_origem":"metadata","topico":"envio de atividade",
+ "pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash",
  "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"alta_confianca":true,
  "cache_hit":false,"input_tokens":120,"output_tokens":30,
  "ms_retrieve":41.2,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
  "web_insuficiente":null,"erro":null}
 ```
+
+### `assunto` e `topico`
+
+Dois campos com papéis diferentes, e **nenhum deles custa uma chamada extra**:
+
+| Campo | Exemplo | De onde vem |
+|---|---|---|
+| `assunto` | `canvas` | derivado de graça, em 4 camadas (abaixo) |
+| `topico` | `envio de atividade com prazo expirado` | última linha da própria resposta do modelo |
+
+O `assunto` é derivado nesta ordem, e `assunto_origem` registra qual camada
+acertou — sem isso, um valor derivado ficaria indistinguível de um informado:
+
+| `assunto_origem` | Quando | Fonte |
+|---|---|---|
+| `informado` | usuário passou `--assunto` | tem precedência sobre tudo |
+| `metadata` | o retrieval achou chunks | pasta gravada na ingestão (`pipeline._enrich`) |
+| `allowlist` | respondeu pela web | `FonteWeb.assunto` do domínio (`WEB_ALLOWLIST`) |
+| `blocklist` | nada encontrado, tema sensível | termo casado da `WEB_BLOCKLIST` |
+| `null` | nada acima | pergunta fora de escopo |
+
+O `topico` vem do marcador `#TOPICO:` que os prompts pedem na **última linha** da
+resposta (`app/agent/prompts.py`). Ele é removido antes de qualquer uso do texto
+— o aluno nunca o vê, e ele não entra na citação de fontes. Custo: ~10 tokens de
+saída, contra uma segunda chamada à API que dobraria o custo que esta telemetria
+existe para medir.
+
+Detalhes que valem saber:
+
+- **O marcador vai no fim, nunca no início.** O veto da busca externa testa
+  `texto.startswith(INSUFICIENTE)`; um prefixo o quebraria em silêncio.
+- **O texto é cacheado *com* o marcador** e reprocessado na leitura: um cache hit
+  recupera o `topico` sem coluna nova e sem reclassificar.
+- **Marcador ausente** (o modelo esqueceu, ou é uma resposta cacheada de antes
+  desta versão) → `topico: null` e resposta intacta.
+- **`topico` é frase livre do modelo**, então pode conter fragmento da pergunta —
+  ao contrário de `assunto`, que é categoria fechada. Vale ao decidir a retenção.
 
 Responde às quatro perguntas que importam para eficiência:
 
@@ -140,17 +183,32 @@ Responde às quatro perguntas que importam para eficiência:
 | O guardrail dispara quanto? | `origem` = `base` / `web` / `nenhuma`, `web_insuficiente` |
 | A qualidade caiu? | `n_chunks`, `score_top`, `alta_confianca` ao longo do tempo |
 
-Consultas típicas com `jq`:
+Consultas (a coluna `dados` é `JSONB` — campo novo no registro não exige migração):
 
-```bash
-# documentos que faltam indexar: perguntas repetidas que a base não respondeu
-jq -s '[.[] | select(.origem != "base")] | group_by(.pergunta_hash)
-       | map({hash: .[0].pergunta_hash, assunto: .[0].assunto, vezes: length})
-       | sort_by(-.vezes)' telemetria.jsonl
+```sql
+-- documentos que faltam indexar: perguntas repetidas que a base não respondeu
+SELECT dados->>'pergunta_hash' AS pergunta, dados->>'assunto' AS assunto, count(*) AS vezes
+FROM telemetria
+WHERE dados->>'origem' <> 'base'
+GROUP BY 1, 2 ORDER BY vezes DESC LIMIT 20;
 
-# custo e cache
-jq -s '{tokens_in: map(.input_tokens // 0) | add,
-        cache_hit_rate: (map(select(.cache_hit == true)) | length) / length}' telemetria.jsonl
+-- custo e cache nos últimos 7 dias
+SELECT sum(COALESCE((dados->>'input_tokens')::int, 0))  AS tokens_entrada,
+       sum(COALESCE((dados->>'output_tokens')::int, 0)) AS tokens_saida,
+       avg((dados->>'cache_hit')::boolean::int)         AS cache_hit_rate
+FROM telemetria;
+
+-- onde está a lentidão, por etapa (mediana)
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY (dados->>'ms_retrieve')::float) AS p50_retrieve,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY (dados->>'ms_llm')::float)      AS p50_llm,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY (dados->>'ms_total')::float)    AS p50_total
+FROM telemetria;
+
+-- qualidade do retrieval caindo? (drift)
+SELECT date_trunc('day', criado_em) AS dia,
+       avg((dados->>'score_top')::float) AS score_medio,
+       count(*) FILTER (WHERE dados->>'origem' = 'base')::float / count(*) AS taxa_base
+FROM telemetria GROUP BY 1 ORDER BY 1;
 ```
 
 **Privacidade:** o texto da pergunta nunca é registrado — só `assunto` e um hash
@@ -158,8 +216,19 @@ truncado. Perguntas de aluno tocam assuntos sensíveis (ver `WEB_BLOCKLIST` em
 `app/core/config.py`); o hash preserva o que interessa, que é agrupar perguntas
 repetidas sem resposta.
 
-Sem dependência nova: é `logging` + `json`. O mesmo dicionário alimenta depois uma
-tabela no Postgres que já existe, ou atributos de span do OpenTelemetry, sem retrabalho.
+**Ligar/desligar:** `TELEMETRY_STDERR_ENABLED` controla o log no terminal e
+`TELEMETRY_DB_ENABLED` a gravação no banco — independentes. O par usual em uso
+normal é `false`/`true`: terminal limpo, registro no Postgres.
+
+**Retenção:** registros com mais de `TELEMETRY_RETENTION_DAYS` (7) dias são apagados
+na própria escrita, no máximo uma vez por hora por processo — sem cron, sem job. A
+janela é curta de propósito: o valor deste dado é operacional (custo, latência e
+documento faltando na semana), e guardar hash de pergunta de aluno indefinidamente
+não se justifica.
+
+**Falha isolada:** banco fora do ar não derruba a resposta — o INSERT é perdido, a
+linha em stderr continua saindo. Sem dependência nova: é `logging`, `json` e o
+Postgres que já estava lá.
 
 ## Fluxo de dados
 
@@ -200,9 +269,11 @@ pergunta ── preprocess.py ── retriever.py ──────────
 | `app/ingestion/pipeline.py` | orquestra load → chunk → embed → indexa |
 | `app/retrieval/retriever.py` | busca por similaridade + filtro por assunto |
 | `app/agent/` | pré-processamento, prompt, cache e geração da resposta |
+| `app/agent/prompts.py` | prompts + marcador `#TOPICO` lido pela telemetria |
 | `app/agent/web_fallback.py` | busca externa restrita à allowlist de domínios oficiais |
 | `app/db/vector_store.py` | conexão com pgvector |
 | `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |
+| `app/db/telemetry_store.py` | tabela `telemetria` (JSONB) + retenção de 7 dias |
 | `scripts/` | CLIs de ingestão e de pergunta |
 
 ## Pontos de extensão (features fora da v1)

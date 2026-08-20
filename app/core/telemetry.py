@@ -6,9 +6,11 @@ que qualidade o retrieval respondeu. Instrumentar módulo a módulo obrigaria a
 repetir o mesmo trabalho em cada ponto de extensão futuro (tool calling, APIs
 públicas em tempo real).
 
-Sem dependência nova de propósito: é `logging` + `json`. O mesmo dicionário
-emitido aqui é o que alimenta, depois, uma tabela `telemetria` no Postgres que
-já existe ou atributos de span do OpenTelemetry — o formato não fecha porta.
+Sem dependência nova de propósito: é `logging` + `json`. O mesmo dicionário vai
+para dois destinos independentes: a linha em stderr (sempre) e, quando o
+entrypoint liga, a tabela `telemetria` no Postgres com retenção de 7 dias (ver
+`app/db/telemetry_store.py`). O core não conhece o banco — a persistência entra
+por injeção, via `configurar_persistencia`.
 
 PRIVACIDADE — o texto da pergunta NUNCA entra no registro, só `assunto` e um
 hash truncado. Perguntas de aluno passam por assuntos sensíveis (ver
@@ -26,18 +28,29 @@ import json
 import logging
 import sys
 import time
+
+from app.core.config import settings
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from typing import Iterator
+from typing import Callable, Iterator
 
 # Logger próprio, sem propagar: o registro estruturado não se mistura com os
 # INFO em texto do resto do app, e ligar telemetria não liga log de tudo.
+#
+# Este stream contém SÓ linhas JSON — nada mais escreve nele. É o que permite
+# `2>> telemetria.jsonl` e ler o arquivo com qualquer parser sem tratar exceção.
+# Falha *da própria* telemetria vai para `logger_interno`, que é o logger comum
+# do módulo: um traceback no meio do JSONL quebraria quem lê o arquivo.
 logger = logging.getLogger("telemetria")
+logger_interno = logging.getLogger(__name__)
 
 # Quem originou a pergunta. ContextVar em vez de parâmetro porque é do
 # entrypoint, não da lógica — `answer()` não deveria precisar saber.
 _canal: ContextVar[str] = ContextVar("canal", default="desconhecido")
+
+# Destino adicional do registro (hoje: Postgres). `None` = só o log em stderr.
+_persistir: Callable[[dict], None] | None = None
 
 
 def set_canal(nome: str) -> None:
@@ -45,11 +58,33 @@ def set_canal(nome: str) -> None:
     _canal.set(nome)
 
 
+def configurar_persistencia(sink: Callable[[dict], None] | None) -> None:
+    """Registra quem guarda o registro além do log. Ver `db/telemetry_store.habilitar`.
+
+    Inversão de dependência de propósito: assim `app/core` não importa `app/db`,
+    e rodar o agente sem banco (testes, uso como biblioteca) continua sendo o
+    comportamento padrão — basta não chamar isto.
+    """
+    global _persistir
+    _persistir = sink
+
+
+def serializar(dados: dict) -> str:
+    """JSON canônico do registro. Um só lugar para o log e para o banco."""
+    return json.dumps(dados, ensure_ascii=False)
+
+
 def configurar_logs(destino=sys.stderr) -> None:
-    """Liga a saída da telemetria. stderr por padrão: na CLI, o stdout é a
-    resposta ao aluno — `python -m scripts.ask ... 2> telemetria.jsonl` separa
-    os dois sem nenhum parser."""
-    if logger.handlers:
+    """Liga a saída da telemetria no terminal. Respeita TELEMETRY_STDERR_ENABLED.
+
+    stderr por padrão: na CLI, o stdout é a resposta ao aluno — `python -m
+    scripts.ask ... 2> telemetria.jsonl` separa os dois sem nenhum parser.
+
+    Desligar aqui não desliga a persistência: com `TELEMETRY_STDERR_ENABLED=false`
+    e `TELEMETRY_DB_ENABLED=true`, o registro continua indo para o Postgres sem
+    poluir o terminal — que é o modo esperado para uso normal da CLI.
+    """
+    if not settings.telemetry_stderr_enabled or logger.handlers:
         return
     handler = logging.StreamHandler(destino)
     handler.setFormatter(logging.Formatter("%(message)s"))
@@ -75,6 +110,17 @@ class Registro:
     assunto: str | None
     pergunta_hash: str
     chat_model: str
+
+    # De onde saiu o `assunto` acima: "informado" (o usuário passou), "metadata"
+    # (pasta do documento que respondeu), "allowlist" (domínio da fonte web),
+    # "blocklist" (termo sensível reconhecido) ou None. Sem isso, um assunto
+    # derivado fica indistinguível de um informado, e a métrica perde o sentido.
+    assunto_origem: str | None = None
+    # Tema da pergunta em poucas palavras, escrito pelo próprio modelo na última
+    # linha da resposta (ver `prompts.separar_topico`). Enquanto `assunto` diz
+    # "canvas", isto diz "envio de atividade com prazo expirado" — é o que vira
+    # pauta de trabalho. Nulo quando não houve chamada ao LLM.
+    topico: str | None = None
 
     origem: str | None = None
     grounded: bool | None = None
@@ -134,6 +180,7 @@ def registrar(assunto: str | None, pergunta: str, chat_model: str) -> Iterator[R
     registro = Registro(
         canal=_canal.get(),
         assunto=assunto,
+        assunto_origem="informado" if assunto else None,
         pergunta_hash=hash_pergunta(pergunta),
         chat_model=chat_model,
     )
@@ -145,8 +192,16 @@ def registrar(assunto: str | None, pergunta: str, chat_model: str) -> Iterator[R
         raise
     finally:
         registro.ms_total = round((time.perf_counter() - inicio) * 1000, 1)
+        dados = asdict(registro)
         # Nunca deixar a telemetria derrubar uma resposta que já ficou pronta.
         try:
-            logger.info(json.dumps(asdict(registro), ensure_ascii=False))
+            logger.info(serializar(dados))
         except Exception:  # pragma: no cover
-            logger.exception("falha ao emitir telemetria")
+            logger_interno.exception("falha ao emitir telemetria")
+        # Destino separado e opcional: o log em stderr já saiu acima, então uma
+        # falha aqui não perde o registro — só a cópia consultável por SQL.
+        if _persistir is not None:
+            try:
+                _persistir(dados)
+            except Exception:
+                logger_interno.exception("falha ao persistir telemetria")

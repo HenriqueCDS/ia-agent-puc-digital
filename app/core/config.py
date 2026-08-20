@@ -109,6 +109,20 @@ class Settings(BaseSettings):
     # o prompt para o mesmo conjunto de chunks.
     cache_enabled: bool = True
 
+    # --- Telemetria (ver app/core/telemetry.py) ---
+    # Mostra (ou não) a linha JSON de cada pergunta no terminal. Desligar aqui
+    # não desliga a gravação no banco: são destinos independentes.
+    telemetry_stderr_enabled: bool = True
+    # Além da linha JSON em stderr, grava cada registro na tabela `telemetria`
+    # do Postgres que já existe. Com False, só o log — útil para rodar a CLI
+    # contra uma base indisponível ou para não sujar um banco de teste.
+    telemetry_db_enabled: bool = True
+    # Janela de retenção. Registros mais velhos são apagados na escrita (no
+    # máximo 1x/hora por processo, sem cron). Curta de propósito: o valor deste
+    # dado é operacional — custo, latência e documento faltando na semana —, e
+    # guardar hash de pergunta de aluno indefinidamente não se justifica.
+    telemetry_retention_days: int = 7
+
     # --- Fallback de busca externa (ver app/agent/web_fallback.py) ---
     # Kill switch: com False, o guardrail volta a se comportar como antes
     # (responde "não encontrei na base" sem chamar nada externo nem o LLM).

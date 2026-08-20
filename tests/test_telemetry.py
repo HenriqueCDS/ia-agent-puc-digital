@@ -12,6 +12,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 
 from app.agent import responder
+from app.agent.prompts import MARCADOR_TOPICO, SEM_CONTEXTO, WEB_INSUFICIENTE
 from app.core import telemetry
 from app.core.models import Query, RetrievedChunk
 
@@ -30,12 +31,24 @@ class FakeLLM:
         return AIMessage(content=self.resposta, usage_metadata=self.uso)
 
 
-def _chunk(score=0.95, chunk_id="c1"):
+def _chunk(score=0.95, chunk_id="c1", **meta):
     return RetrievedChunk(
         document=Document(
-            id=chunk_id, page_content="Acesse Tarefas.", metadata={"source_name": "guia.pdf"}
+            id=chunk_id,
+            page_content="Acesse Tarefas.",
+            metadata={"source_name": "guia.pdf", **meta},
         ),
         score=score,
+    )
+
+
+def _chunk_web(url="https://community.instructure.com/en/kb/articles/661210-submit"):
+    """Resultado de busca externa: a citacao e a propria URL (ver web_fallback)."""
+    return RetrievedChunk(
+        document=Document(
+            id=url, page_content="Submit an assignment", metadata={"source_name": url}
+        ),
+        score=0.6,
     )
 
 
@@ -181,3 +194,211 @@ def test_llm_sem_usage_metadata_nao_quebra(monkeypatch, registros):
 
     (reg,) = registros
     assert reg["input_tokens"] is None and reg["ms_llm"] is not None
+
+
+# --- persistência no Postgres (ver app/db/telemetry_store.py) -----------------
+
+
+def test_sem_persistencia_configurada_nada_toca_o_banco(monkeypatch, registros):
+    """Padrão do core: só o log. É o que mantém pytest e uso como lib sem banco."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+
+    assert telemetry._persistir is None
+    responder.answer(Query(text=PERGUNTA), llm=FakeLLM())
+
+    assert len(list(registros)) == 1  # a linha saiu mesmo sem banco
+
+
+def test_registro_persistido_e_o_mesmo_que_foi_logado(monkeypatch, registros):
+    gravados = []
+    monkeypatch.setattr(telemetry, "_persistir", gravados.append)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+
+    responder.answer(Query(text=PERGUNTA, assunto="canvas"), llm=FakeLLM())
+
+    (logado,) = registros
+    (gravado,) = gravados
+    assert gravado == logado
+    assert gravado["ms_total"] is not None  # completo, não um instantâneo do meio
+
+
+def test_banco_fora_do_ar_nao_derruba_a_resposta(monkeypatch, registros):
+    """A telemetria é acessória: a resposta do aluno vale mais que o registro."""
+
+    def falha(_dados):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(telemetry, "_persistir", falha)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+
+    resultado = responder.answer(Query(text=PERGUNTA), llm=FakeLLM())
+
+    assert resultado.text == "Resposta gerada."
+    # E o log em stderr não se perdeu — nem foi contaminado pelo traceback da
+    # falha, que vai para o logger interno do módulo (senão o JSONL quebra).
+    assert len(list(registros)) == 1
+
+
+def test_salvar_engole_falha_de_banco(monkeypatch):
+    """Mesma garantia, agora no módulo de banco: `salvar` nunca levanta."""
+    from app.db import telemetry_store
+
+    def sem_banco():
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(telemetry_store, "get_vector_store", sem_banco)
+
+    telemetry_store.salvar({"origem": "base"})  # não levanta
+
+
+def test_kill_switch_desliga_a_persistencia(monkeypatch):
+    from app.db import telemetry_store
+
+    monkeypatch.setattr(telemetry, "_persistir", None)
+    monkeypatch.setattr(telemetry_store.settings, "telemetry_db_enabled", False)
+
+    telemetry_store.habilitar()
+
+    assert telemetry._persistir is None
+
+
+def test_habilitar_registra_o_sink(monkeypatch):
+    """`monkeypatch` devolve `_persistir` ao valor original no teardown, então
+    ligar a persistência aqui não vaza para os outros testes."""
+    from app.db import telemetry_store
+
+    monkeypatch.setattr(telemetry, "_persistir", None)
+    monkeypatch.setattr(telemetry_store.settings, "telemetry_db_enabled", True)
+
+    telemetry_store.habilitar()
+
+    assert telemetry._persistir is telemetry_store.salvar
+
+
+# --- assunto derivado e topico (ver app/agent/prompts.separar_topico) ---------
+
+
+def _fake_llm_com_topico(topico="envio de atividade", resposta="Resposta gerada."):
+    return FakeLLM(resposta=f"{resposta}\nFontes: guia.pdf\n{MARCADOR_TOPICO} {topico}")
+
+
+def test_marcador_de_topico_nunca_chega_ao_aluno(monkeypatch, registros):
+    """A linha é do sistema: some da resposta e reaparece só na telemetria."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+
+    resultado = responder.answer(Query(text=PERGUNTA), llm=_fake_llm_com_topico())
+
+    assert MARCADOR_TOPICO not in resultado.text
+    assert resultado.text.endswith("Fontes: guia.pdf")
+    (reg,) = registros
+    assert reg["topico"] == "envio de atividade"
+
+
+def test_resposta_sem_marcador_segue_normal(monkeypatch, registros):
+    """O modelo pode esquecer: campo nulo, resposta intacta, nada quebra."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+
+    resultado = responder.answer(Query(text=PERGUNTA), llm=FakeLLM("Resposta gerada."))
+
+    assert resultado.text == "Resposta gerada."
+    assert list(registros)[0]["topico"] is None
+
+
+def test_marcador_no_fim_nao_quebra_o_veto_da_busca_externa(monkeypatch, registros):
+    """Regressão: o veto testa o INÍCIO da string. Marcador no começo o mataria
+    em silêncio, deixando trecho ruim chegar ao aluno."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+    llm = FakeLLM(resposta=f"{WEB_INSUFICIENTE}\n{MARCADOR_TOPICO} receita de bolo")
+
+    resultado = responder.answer(Query(text=PERGUNTA), llm=llm)
+
+    assert resultado.text == SEM_CONTEXTO
+    assert resultado.origem == "nenhuma"
+    (reg,) = registros
+    assert reg["web_insuficiente"] is True
+    assert reg["topico"] == "receita de bolo"
+
+
+def test_cache_hit_recupera_o_topico_sem_nova_chamada(monkeypatch, registros):
+    """O topico e guardado junto do texto cacheado: sem coluna nova e sem
+    reclassificar."""
+    guardado = {}
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+    monkeypatch.setattr(responder, "set_cached_answer", lambda k, a, r: guardado.update({k: r}))
+    monkeypatch.setattr(responder, "get_cached_answer", lambda k: guardado.get(k))
+
+    primeiro = responder.answer(Query(text=PERGUNTA), llm=_fake_llm_com_topico())
+    segundo = responder.answer(Query(text=PERGUNTA), llm=FakeLLM("NAO DEVERIA SER CHAMADO"))
+
+    assert segundo.text == primeiro.text
+    assert MARCADOR_TOPICO not in segundo.text
+    logado = list(registros)
+    assert [r["topico"] for r in logado] == ["envio de atividade"] * 2
+    assert logado[1]["cache_hit"] is True and logado[1]["input_tokens"] is None
+
+
+def test_assunto_informado_tem_precedencia_sobre_o_derivado(monkeypatch, registros):
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(assunto="canvas")])
+
+    responder.answer(Query(text=PERGUNTA, assunto="puc-digital"), llm=FakeLLM())
+
+    (reg,) = registros
+    assert (reg["assunto"], reg["assunto_origem"]) == ("puc-digital", "informado")
+
+
+def test_assunto_nulo_vem_da_metadata_do_chunk(monkeypatch, registros):
+    """Camada gratis: a pasta do documento que respondeu, gravada na ingestao."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(assunto="canvas")])
+
+    responder.answer(Query(text=PERGUNTA), llm=FakeLLM())
+
+    (reg,) = registros
+    assert (reg["assunto"], reg["assunto_origem"]) == ("canvas", "metadata")
+
+
+def test_assunto_do_caminho_web_vem_da_allowlist(monkeypatch, registros):
+    """A URL ja foi validada contra a allowlist; cada FonteWeb declara o assunto."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    responder.answer(Query(text=PERGUNTA), llm=_fake_llm_com_topico())
+
+    (reg,) = registros
+    assert (reg["assunto"], reg["assunto_origem"]) == ("canvas", "allowlist")
+
+
+def test_assunto_sensivel_e_rotulado_sem_chamar_nada(monkeypatch, registros):
+    """origem="nenhuma" nao faz chamada alguma: o termo da blocklist e o unico
+    rotulo possivel, e sai de graca."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", False)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [])
+
+    responder.answer(Query(text="meu boleto da mensalidade nao chegou"), llm=FakeLLM())
+
+    (reg,) = registros
+    assert (reg["assunto"], reg["assunto_origem"]) == ("boleto", "blocklist")
+    assert reg["topico"] is None
+    assert reg["input_tokens"] is None
+
+
+def test_pergunta_fora_de_escopo_fica_sem_assunto(monkeypatch, registros):
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", False)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [])
+
+    responder.answer(Query(text="qual a capital da mongolia?"), llm=FakeLLM())
+
+    (reg,) = registros
+    assert (reg["assunto"], reg["assunto_origem"]) == (None, None)
+
+
+def test_stderr_pode_ser_desligado_pelo_env(monkeypatch):
+    """TELEMETRY_STDERR_ENABLED=false: nenhum handler, terminal limpo."""
+    monkeypatch.setattr(telemetry.settings, "telemetry_stderr_enabled", False)
+    monkeypatch.setattr(telemetry.logger, "handlers", [])
+
+    telemetry.configurar_logs()
+
+    assert telemetry.logger.handlers == []

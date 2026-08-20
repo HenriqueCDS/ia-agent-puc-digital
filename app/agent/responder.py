@@ -12,8 +12,9 @@ from app.agent.prompts import (
     ANSWER_PROMPT_WEB,
     SEM_CONTEXTO,
     WEB_INSUFICIENTE,
+    separar_topico,
 )
-from app.agent.web_fallback import buscar_na_web
+from app.agent.web_fallback import buscar_na_web, fonte_permitida, termo_bloqueado
 from app.core import telemetry
 from app.core.config import settings
 from app.core.models import Answer, Query, RetrievedChunk
@@ -42,6 +43,38 @@ def _cache_key(query: Query, chunks: list[RetrievedChunk], alta_confianca: bool)
     ids = sorted(c.document.id or "" for c in chunks)
     base = f"{query.assunto or ''}|{alta_confianca}|{','.join(ids)}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def _assunto_dos_chunks(chunks: list[RetrievedChunk]) -> str | None:
+    """Assunto do documento que respondeu — gravado na ingestão (pipeline._enrich).
+
+    Preferido a qualquer inferência: diz qual pasta de fato respondeu, em vez de
+    um palpite sobre a pergunta. Percorre na ordem de relevância e para no
+    primeiro que tiver o campo.
+    """
+    return next((c.document.metadata.get("assunto") for c in chunks
+                 if c.document.metadata.get("assunto")), None)
+
+
+def _assunto_da_web(chunks: list[RetrievedChunk]) -> str | None:
+    """Assunto pela allowlist: cada FonteWeb declara o seu (ver config.WEB_ALLOWLIST).
+
+    A URL já foi revalidada contra a allowlist antes de chegar aqui, então isto
+    é só reler o casamento — nenhuma chamada, nenhum token.
+    """
+    for chunk in chunks:
+        fonte = fonte_permitida(chunk.document.metadata.get("source_name", ""))
+        if fonte and fonte.assunto:
+            return fonte.assunto
+    return None
+
+
+def _registrar_assunto(registro: telemetry.Registro, valor: str | None, origem: str) -> None:
+    """Só preenche se o usuário não informou — o que ele passou tem precedência."""
+    if registro.assunto_origem == "informado" or not valor:
+        return
+    registro.assunto = valor
+    registro.assunto_origem = origem
 
 
 def _encaminhar_para_secretaria() -> Answer:
@@ -74,7 +107,13 @@ def _responder_pela_web(
     with telemetry.cronometro(registro, "ms_llm"):
         resposta = llm.invoke(mensagens)
     registro.somar_tokens(resposta)
-    texto = str(resposta.content).strip()
+
+    # Antes de qualquer outro uso do texto: o marcador de tópico é do sistema e
+    # não pode chegar ao aluno nem atrapalhar o veto logo abaixo (que testa o
+    # início da string).
+    texto, topico = separar_topico(str(resposta.content))
+    registro.topico = topico
+    _registrar_assunto(registro, _assunto_da_web(resultados), "allowlist")
 
     # Último filtro, e o único que enxerga a pergunta e os trechos juntos: o
     # prompt autoriza o modelo a vetar snippets que passaram pelos cortes
@@ -133,6 +172,7 @@ def _responder(
 
     registro.n_chunks = len(chunks)
     registro.score_top = round(chunks[0].score, 4) if chunks else None
+    _registrar_assunto(registro, _assunto_dos_chunks(chunks), "metadata")
 
     # Guardrail: em suporte acadêmico, não responder é melhor que alucinar um
     # procedimento. Também sinaliza quais documentos faltam na base.
@@ -142,6 +182,10 @@ def _responder(
     # ramo paga a latência da busca externa — as perguntas que a base responde
     # bem seguem pelo caminho de sempre.
     if not chunks:
+        # Sem chunks não há metadata; o termo da blocklist é o único rótulo
+        # disponível de graça, e cobre justamente o caminho `origem="nenhuma"`,
+        # que não faz chamada nenhuma ao LLM (logo, não tem tópico).
+        _registrar_assunto(registro, termo_bloqueado(query.text), "blocklist")
         if settings.web_fallback_enabled:
             return _responder_pela_web(query, llm, registro)
         return _encaminhar_para_secretaria()
@@ -161,7 +205,8 @@ def _responder(
         registro.cache_hit = cache_hit is not None
         if cache_hit is not None:
             logger.info("cache hit (%s...)", cache_key[:8])
-            return Answer(text=cache_hit, sources=chunks, grounded=True)
+            texto, registro.topico = separar_topico(cache_hit)
+            return Answer(text=texto, sources=chunks, grounded=True)
 
     llm = llm or get_chat_model()
     mensagens = prompt.format_messages(
@@ -171,9 +216,15 @@ def _responder(
     with telemetry.cronometro(registro, "ms_llm"):
         resposta = llm.invoke(mensagens)
     registro.somar_tokens(resposta)
-    texto = str(resposta.content).strip()
 
+    bruto = str(resposta.content)
+    texto, registro.topico = separar_topico(bruto)
+
+    # Guarda o texto COM o marcador: assim um cache hit recupera o tópico junto,
+    # sem coluna nova e sem reclassificar (`separar_topico` roda de novo na
+    # leitura). Entradas gravadas antes desta versão não têm marcador e
+    # simplesmente devolvem tópico nulo.
     if cache_key:
-        set_cached_answer(cache_key, query.assunto, texto)
+        set_cached_answer(cache_key, registro.assunto, bruto)
 
     return Answer(text=texto, sources=chunks, grounded=True)

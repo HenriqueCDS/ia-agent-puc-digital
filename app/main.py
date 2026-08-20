@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from app.agent.responder import answer
 from app.core import telemetry
 from app.core.models import Query
+from app.db import telemetry_store
 
 app = FastAPI(title="Agente de Suporte Acadêmico", version="1.0.0")
 
@@ -20,6 +21,7 @@ app = FastAPI(title="Agente de Suporte Acadêmico", version="1.0.0")
 # instrumentaria metade dos caminhos. O `set_canal` no handler é o que separa
 # os dois na hora de ler o log.
 telemetry.configurar_logs()
+telemetry_store.habilitar()
 
 
 class AskRequest(BaseModel):

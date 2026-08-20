@@ -51,8 +51,18 @@ def assunto_bloqueado(pergunta: str) -> bool:
     aparente e conteúdo errado. Bloquear aqui devolve o encaminhamento para a
     secretaria, que é a resposta correta para esse grupo de perguntas.
     """
+    return termo_bloqueado(pergunta) is not None
+
+
+def termo_bloqueado(pergunta: str) -> str | None:
+    """Qual termo da blocklist a pergunta casou, ou None.
+
+    Mesma checagem de `assunto_bloqueado`, devolvendo o termo em vez de um bool:
+    é o único rótulo de assunto disponível para o caminho que não chama o LLM
+    (`origem="nenhuma"`), e sai sem custo nenhum. Ver `app/core/telemetry.py`.
+    """
     texto = _sem_acento(pergunta)
-    return any(termo in texto for termo in WEB_BLOCKLIST)
+    return next((termo for termo in WEB_BLOCKLIST if termo in texto), None)
 
 
 def _fontes_para(assunto: str | None) -> tuple[FonteWeb, ...]:
