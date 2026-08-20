@@ -10,9 +10,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from app.agent.responder import answer
+from app.core import telemetry
 from app.core.models import Query
 
 app = FastAPI(title="Agente de Suporte Acadêmico", version="1.0.0")
+
+# Telemetria por pergunta (ver app/core/telemetry.py). Ligada no import do app,
+# e não num middleware, porque a CLI é o fluxo principal da v1: middleware só
+# instrumentaria metade dos caminhos. O `set_canal` no handler é o que separa
+# os dois na hora de ler o log.
+telemetry.configurar_logs()
 
 
 class AskRequest(BaseModel):
@@ -36,6 +43,7 @@ def health() -> dict[str, str]:
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
+    telemetry.set_canal("api")
     try:
         resultado = answer(Query(text=req.pergunta, assunto=req.assunto))
     except ValueError as exc:

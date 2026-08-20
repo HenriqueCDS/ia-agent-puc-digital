@@ -14,6 +14,7 @@ from app.agent.prompts import (
     WEB_INSUFICIENTE,
 )
 from app.agent.web_fallback import buscar_na_web
+from app.core import telemetry
 from app.core.config import settings
 from app.core.models import Answer, Query, RetrievedChunk
 from app.db.response_cache import get_cached_answer, set_cached_answer
@@ -47,7 +48,9 @@ def _encaminhar_para_secretaria() -> Answer:
     return Answer(text=SEM_CONTEXTO, sources=[], grounded=False, origem="nenhuma")
 
 
-def _responder_pela_web(query: Query, llm: BaseChatModel | None) -> Answer:
+def _responder_pela_web(
+    query: Query, llm: BaseChatModel | None, registro: telemetry.Registro
+) -> Answer:
     """Fallback: sintetiza a resposta a partir de páginas públicas oficiais.
 
     `grounded` continua False mesmo quando a web responde — a informação de fato
@@ -58,7 +61,8 @@ def _responder_pela_web(query: Query, llm: BaseChatModel | None) -> Answer:
     de chunk, que não existem para resultado de web, e conteúdo externo muda sem
     aviso enquanto a tabela `resposta_cache` não tem TTL. É o caminho raro.
     """
-    resultados = buscar_na_web(query)
+    with telemetry.cronometro(registro, "ms_web"):
+        resultados = buscar_na_web(query)
     if not resultados:
         return _encaminhar_para_secretaria()
 
@@ -67,19 +71,47 @@ def _responder_pela_web(query: Query, llm: BaseChatModel | None) -> Answer:
         contexto=_format_context(resultados),
         pergunta=query.text,
     )
-    texto = str(llm.invoke(mensagens).content).strip()
+    with telemetry.cronometro(registro, "ms_llm"):
+        resposta = llm.invoke(mensagens)
+    registro.somar_tokens(resposta)
+    texto = str(resposta.content).strip()
 
     # Último filtro, e o único que enxerga a pergunta e os trechos juntos: o
     # prompt autoriza o modelo a vetar snippets que passaram pelos cortes
     # anteriores mas não respondem de fato.
     if texto.upper().startswith(WEB_INSUFICIENTE):
         logger.info("busca externa: LLM considerou os trechos insuficientes")
+        registro.web_insuficiente = True
         return _encaminhar_para_secretaria()
 
     return Answer(text=texto, sources=resultados, grounded=False, origem="web")
 
 
 def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
+    """Responde à pergunta e registra uma linha de telemetria por chamada.
+
+    A instrumentação mora aqui, e não dentro de `retrieve`/`buscar_na_web`,
+    porque só este nível vê a pergunta inteira: custo, caminho e qualidade do
+    retrieval na mesma linha. Ver `app/core/telemetry.py` — o texto da pergunta
+    nunca é registrado, só `assunto` e hash.
+
+    `_responder` faz o trabalho; este envelope existe para que `origem` e
+    `grounded` sejam gravados uma vez só, sem repetir em cada `return`.
+    """
+    query = normalize(query)
+
+    with telemetry.registrar(
+        assunto=query.assunto, pergunta=query.text, chat_model=settings.chat_model
+    ) as registro:
+        resultado = _responder(query, llm, registro)
+        registro.origem = resultado.origem
+        registro.grounded = resultado.grounded
+        return resultado
+
+
+def _responder(
+    query: Query, llm: BaseChatModel | None, registro: telemetry.Registro
+) -> Answer:
     """Responde à pergunta usando apenas o que foi recuperado da base.
 
     Os passos ficam explícitos (em vez de uma chain fechada) porque é aqui que a
@@ -96,8 +128,11 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
     concatenada aqui. Com três ou mais fontes assim, o roteamento passa a valer
     como tool calling, tendo `retrieve` e `buscar_na_web` como tools.
     """
-    query = normalize(query)
-    chunks = retrieve(query)
+    with telemetry.cronometro(registro, "ms_retrieve"):
+        chunks = retrieve(query)
+
+    registro.n_chunks = len(chunks)
+    registro.score_top = round(chunks[0].score, 4) if chunks else None
 
     # Guardrail: em suporte acadêmico, não responder é melhor que alucinar um
     # procedimento. Também sinaliza quais documentos faltam na base.
@@ -108,10 +143,11 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
     # bem seguem pelo caminho de sempre.
     if not chunks:
         if settings.web_fallback_enabled:
-            return _responder_pela_web(query, llm)
+            return _responder_pela_web(query, llm, registro)
         return _encaminhar_para_secretaria()
 
     alta_confianca = is_exact_match(chunks)
+    registro.alta_confianca = alta_confianca
     if alta_confianca:
         logger.info("alta confiança: %.2f e %.2f nas 2 fontes do topo", chunks[0].score, chunks[1].score)
     prompt = ANSWER_PROMPT_ALTA_CONFIANCA if alta_confianca else ANSWER_PROMPT
@@ -122,6 +158,7 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
     cache_key = _cache_key(query, chunks, alta_confianca) if settings.cache_enabled else None
     if cache_key:
         cache_hit = get_cached_answer(cache_key)
+        registro.cache_hit = cache_hit is not None
         if cache_hit is not None:
             logger.info("cache hit (%s...)", cache_key[:8])
             return Answer(text=cache_hit, sources=chunks, grounded=True)
@@ -131,7 +168,9 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
         contexto=_format_context(chunks),
         pergunta=query.text,
     )
-    resposta = llm.invoke(mensagens)
+    with telemetry.cronometro(registro, "ms_llm"):
+        resposta = llm.invoke(mensagens)
+    registro.somar_tokens(resposta)
     texto = str(resposta.content).strip()
 
     if cache_key:

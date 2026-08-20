@@ -3,11 +3,16 @@
     python -m scripts.ask "Como envio uma atividade no Canvas?"
     python -m scripts.ask "Como acesso o portal?" --assunto puc-digital
     python -m scripts.ask "Como acesso o portal?" --debug   # mostra os chunks e scores
+
+A telemetria (1 linha JSON por pergunta) sai em stderr, separada da resposta:
+
+    python -m scripts.ask "..." 2>> telemetria.jsonl
 """
 
 import typer
 
 from app.agent.responder import answer
+from app.core import telemetry
 from app.core.models import Query
 
 app = typer.Typer(add_completion=False, help="Faz uma pergunta ao agente.")
@@ -19,6 +24,9 @@ def main(
     assunto: str | None = typer.Option(None, "--assunto", "-a", help="Filtra por assunto."),
     debug: bool = typer.Option(False, "--debug", "-d", help="Mostra os chunks recuperados."),
 ) -> None:
+    telemetry.configurar_logs()
+    telemetry.set_canal("cli")
+
     resultado = answer(Query(text=pergunta, assunto=assunto))
 
     if debug:

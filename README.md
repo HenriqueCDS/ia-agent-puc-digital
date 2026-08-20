@@ -114,6 +114,53 @@ API HTTP (opcional): `uvicorn app.main:app --reload` → `POST /ask`.
 
 Testes: `pytest` (não precisa de banco nem de chave de API).
 
+## Observabilidade
+
+Cada pergunta respondida emite **uma linha JSON** em `stderr` (`app/core/telemetry.py`),
+separada da resposta, que sai em `stdout`:
+
+```bash
+python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl
+```
+
+```json
+{"canal":"cli","assunto":"canvas","pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash",
+ "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"alta_confianca":true,
+ "cache_hit":false,"input_tokens":120,"output_tokens":30,
+ "ms_retrieve":41.2,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
+ "web_insuficiente":null,"erro":null}
+```
+
+Responde às quatro perguntas que importam para eficiência:
+
+| Pergunta | Campos |
+|---|---|
+| Quanto custa? | `input_tokens`, `output_tokens`, `cache_hit` (hit = zero token de API) |
+| Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_llm` (rede), `ms_web` (rede lenta) |
+| O guardrail dispara quanto? | `origem` = `base` / `web` / `nenhuma`, `web_insuficiente` |
+| A qualidade caiu? | `n_chunks`, `score_top`, `alta_confianca` ao longo do tempo |
+
+Consultas típicas com `jq`:
+
+```bash
+# documentos que faltam indexar: perguntas repetidas que a base não respondeu
+jq -s '[.[] | select(.origem != "base")] | group_by(.pergunta_hash)
+       | map({hash: .[0].pergunta_hash, assunto: .[0].assunto, vezes: length})
+       | sort_by(-.vezes)' telemetria.jsonl
+
+# custo e cache
+jq -s '{tokens_in: map(.input_tokens // 0) | add,
+        cache_hit_rate: (map(select(.cache_hit == true)) | length) / length}' telemetria.jsonl
+```
+
+**Privacidade:** o texto da pergunta nunca é registrado — só `assunto` e um hash
+truncado. Perguntas de aluno tocam assuntos sensíveis (ver `WEB_BLOCKLIST` em
+`app/core/config.py`); o hash preserva o que interessa, que é agrupar perguntas
+repetidas sem resposta.
+
+Sem dependência nova: é `logging` + `json`. O mesmo dicionário alimenta depois uma
+tabela no Postgres que já existe, ou atributos de span do OpenTelemetry, sem retrabalho.
+
 ## Fluxo de dados
 
 ```
@@ -146,6 +193,7 @@ pergunta ── preprocess.py ── retriever.py ──────────
 | Caminho | Responsabilidade |
 |---|---|
 | `app/core/` | configuração e contratos (`Query`, `Answer`, `RetrievedChunk`) |
+| `app/core/telemetry.py` | 1 linha JSON por pergunta: token, latência, guardrail, qualidade |
 | `app/providers/gemini.py` | **único** ponto que conhece o provedor de IA |
 | `app/ingestion/loaders/` | fonte de dados → `Document` |
 | `app/ingestion/chunker.py` | divisão em chunks (função pura) |
