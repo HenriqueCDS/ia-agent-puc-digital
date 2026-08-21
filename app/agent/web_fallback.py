@@ -196,8 +196,14 @@ def _relevantes(pergunta: str, resultados: list[dict]) -> list[RetrievedChunk]:
                 page_content=f"{resultado['titulo']}\n{resultado['snippet']}".strip(),
                 # `source_name` é o que vira RetrievedChunk.citation — para a web,
                 # a citação é a própria URL. Assim Answer.sources e a resposta da
-                # API seguem com o mesmo formato do caminho normal.
-                metadata={"source_name": resultado["url"], "origem": "web"},
+                # API seguem com o mesmo formato do caminho normal. `titulo` só
+                # é consumido pela API (app/api/schemas.SourceOut) — o texto
+                # que o LLM lê continua sendo `page_content`, sem essa metadata.
+                metadata={
+                    "source_name": resultado["url"],
+                    "origem": "web",
+                    "titulo": resultado["titulo"],
+                },
             ),
             score=_cosseno(vetor_pergunta, vetor),
         )

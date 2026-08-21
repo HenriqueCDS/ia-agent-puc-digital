@@ -56,8 +56,9 @@ ingestão — nenhuma infra nova. Liga/desliga com `CACHE_ENABLED`
 
 **Entrypoints** — `scripts/ingest.py` (indexa um ou mais assuntos) e
 `scripts/ask.py` (pergunta, com `--debug` para inspecionar os chunks e scores).
-`app/main.py` expõe `POST /ask` e `GET /health` no FastAPI, como caminho já
-pronto para plugar um front depois.
+`app/main.py` monta a API em `app/api/` (FastAPI): `POST /v1/ask`,
+`GET /v1/health`, `GET /v1/assuntos` — caminho já pronto para plugar um front
+ou o AVA da instituição depois.
 
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
@@ -110,7 +111,9 @@ python -m scripts.ask "Como envio uma atividade no Canvas?"
 python -m scripts.ask "Como acesso o portal?" --assunto puc-digital --debug
 ```
 
-API HTTP (opcional): `uvicorn app.main:app --reload` → `POST /ask`.
+API HTTP (opcional): `uvicorn app.main:app --reload` → `POST /v1/ask`,
+`GET /v1/health`, `GET /v1/assuntos`. Warm-up (modelo de embeddings + conexão
+com o Postgres) roda no boot, não na 1ª request — ver `app/api/app.py`.
 
 Testes: `pytest` (não precisa de banco nem de chave de API).
 

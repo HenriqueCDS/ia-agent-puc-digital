@@ -141,7 +141,13 @@ flowchart TD
 ## Estrutura atual
 agente-suporte-ead/
 ├── app/
-│   ├── main.py                    # FastAPI - entrypoint, POST /ask e GET /health
+│   ├── main.py                    # entrypoint: app = create_app()
+│   ├── api/
+│   │   ├── app.py                   # create_app(), lifespan com warm-up, middleware
+│   │   ├── schemas.py                # AskRequest/AskResponse/SourceOut (Pydantic)
+│   │   ├── deps.py                   # request_id, assuntos válidos (injetáveis)
+│   │   ├── errors.py                 # envelope de erro único + exception handlers
+│   │   └── routers/v1.py             # POST /v1/ask, GET /v1/health, GET /v1/assuntos
 │   ├── core/
 │   │   ├── config.py               # configs via .env (chunk size, thresholds, CACHE_ENABLED etc.)
 │   │   └── models.py                # contratos: Query, RetrievedChunk, Answer

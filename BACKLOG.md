@@ -35,21 +35,28 @@ criação da `resposta_cache` nunca tocaram um banco real.
 
 ---
 
-## Sprint 1 — Borda HTTP: estrutura e contrato
+## Sprint 1 — Borda HTTP: estrutura e contrato ✅ concluída (2026-08-21)
 
 Refactor só na camada HTTP. `app/agent/`, `app/retrieval/` e `app/db/` não
-são tocados.
+são tocados (exceção declarada no próprio T1.7: `vector_store.py` ganhou
+`list_assuntos`).
+
+Validado de ponta a ponta contra Postgres e Gemini reais (`TestClient` com
+`lifespan`, não só testes com dublê): boot com warm-up 26,4s, `/v1/health`
+10ms, assunto inválido barrado em 12ms sem chamar retrieval/LLM, pergunta real
+completando com `request_id` batendo no header e no corpo. Suíte inteira:
+94/94.
 
 | # | Tarefa | Arquivos | Critério de aceite | Esforço |
 |---|---|---|---|---|
-| **T1.1** | Criar `app/api/` com `create_app()`, `routers/v1.py`, `schemas.py`, `deps.py` | novos + `app/main.py` | `POST /v1/ask` e `GET /v1/health` respondendo; `main.py` vira 3 linhas | 2h |
-| **T1.2** | `lifespan` com warm-up: carrega embeddings e testa conexão no startup | `app/api/app.py` | Primeira request pós-boot < 3s (hoje pode passar de 60s com download do modelo) | 1h |
-| **T1.3** | **`SourceOut` rico**: `titulo`, `tipo` (`documento`/`web`), `url`, `pagina`, `score` | `app/api/schemas.py` | Resposta com `origem="web"` traz a URL clicável — hoje ela é jogada fora | 2h |
-| **T1.4** | `origem` como `Literal["base","web","nenhuma"]` + `request_id` na resposta | `app/api/schemas.py` | OpenAPI documenta os 3 valores; cliente gerado por schema sabe o que tratar | 30min |
-| **T1.5** | Envelope de erro padronizado + exception handlers globais | `app/api/errors.py` | Pergunta vazia→422, banco fora→503, sem `GOOGLE_API_KEY`→503, anexo→501. Nenhum 500 com stack | 2h |
-| **T1.6** | Validação de entrada: `min_length=3`, `max_length=1000` na pergunta | `app/api/schemas.py` | Payload de 2 MB rejeitado antes de virar prompt | 30min |
-| **T1.7** | `GET /v1/assuntos` + validação de `assunto` contra a lista real | `app/api/routers/v1.py`, `app/db/vector_store.py` | `assunto="Canvas"` (maiúscula) → 422 explícito, não zero-chunks silencioso | 2h |
-| **T1.8** | Testes de API com `TestClient` (sem banco, com `answer` dublado) | `tests/test_api.py` | Cobre os 3 valores de `origem`, cada código de erro e a validação | 3h |
+| ✅ **T1.1** | Criar `app/api/` com `create_app()`, `routers/v1.py`, `schemas.py`, `deps.py` | novos + `app/main.py` | `POST /v1/ask` e `GET /v1/health` respondendo; `main.py` vira 3 linhas | 2h |
+| ✅ **T1.2** | `lifespan` com warm-up: carrega embeddings e testa conexão no startup | `app/api/app.py` | Primeira request pós-boot < 3s (hoje pode passar de 60s com download do modelo) | 1h |
+| ✅ **T1.3** | **`SourceOut` rico**: `titulo`, `tipo` (`documento`/`web`), `url`, `pagina`, `score` | `app/api/schemas.py` | Resposta com `origem="web"` traz a URL clicável — hoje ela é jogada fora | 2h |
+| ✅ **T1.4** | `origem` como `Literal["base","web","nenhuma"]` + `request_id` na resposta | `app/api/schemas.py` | OpenAPI documenta os 3 valores; cliente gerado por schema sabe o que tratar | 30min |
+| ✅ **T1.5** | Envelope de erro padronizado + exception handlers globais | `app/api/errors.py` | Pergunta vazia→422, banco fora→503, sem `GOOGLE_API_KEY`→503, anexo→501. Nenhum 500 com stack | 2h |
+| ✅ **T1.6** | Validação de entrada: `min_length=3`, `max_length=1000` na pergunta | `app/api/schemas.py` | Payload de 2 MB rejeitado antes de virar prompt | 30min |
+| ✅ **T1.7** | `GET /v1/assuntos` + validação de `assunto` contra a lista real | `app/api/routers/v1.py`, `app/db/vector_store.py` | `assunto="Canvas"` (maiúscula) → 422 explícito, não zero-chunks silencioso | 2h |
+| ✅ **T1.8** | Testes de API com `TestClient` (sem banco, com `answer` dublado) | `tests/test_api.py` | Cobre os 3 valores de `origem`, cada código de erro e a validação | 3h |
 
 ### Por que cada item
 
@@ -64,6 +71,14 @@ são tocados.
 - **T1.7 é maior do que parece** — hoje um `assunto` inválido não dá erro:
   passa o filtro `$eq`, retorna zero chunks e a pergunta cai no fallback
   web. Falha invisível que parece funcionamento normal.
+- **Achado ao implementar T1.7**: o Postgres tem 2 coleções (`base_conhecimento`,
+  da época do embedding via Gemini, e a ativa `base_conhecimento_hf`) — e nada
+  em `vector_store.py` filtrava por coleção. Hoje a antiga está vazia (0
+  linhas), então nunca vazou nada, mas `list_assuntos`/`list_ingested_sources`/
+  `delete_by_source`/`delete_by_assunto` misturariam as duas se ela voltasse a
+  ter dados. Corrigido com uma subquery por `collection_id` reaproveitada nas
+  4 funções; provado contra o banco real inserindo linha de teste nas duas
+  coleções e confirmando que só a ativa é lida/apagada.
 
 ---
 

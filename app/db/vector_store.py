@@ -26,6 +26,17 @@ def get_vector_store() -> PGVector:
     )
 
 
+# Subquery reaproveitada pelas três funções abaixo: escopa toda leitura/escrita
+# à coleção ATIVA (`settings.collection_name`). Sem isso, uma coleção antiga e
+# abandonada (ex.: de antes de trocar o provedor de embeddings — ver o comentário
+# sobre o sufixo "_hf" em `core/config.Settings.collection_name`) apareceria
+# misturada em `list_ingested_sources` e seria apagada junto por engano num
+# `delete_by_assunto`, mesmo nunca tendo sido usada em nenhuma busca.
+_COLLECTION_ID = (
+    "(SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name)"
+)
+
+
 def delete_by_source(store: PGVector, source_path: str) -> int:
     """Remove os chunks de um arquivo antes de reindexá-lo.
 
@@ -36,30 +47,79 @@ def delete_by_source(store: PGVector, source_path: str) -> int:
     por isso está isolado aqui: se a integração mudar o schema, só este ponto quebra.
     """
     stmt = text(
-        """
+        f"""
         DELETE FROM langchain_pg_embedding
         WHERE cmetadata->>'source_path' = :source_path
+          AND collection_id = {_COLLECTION_ID}
         """
     )
     with store.session_maker() as session:
-        result = session.execute(stmt, {"source_path": source_path})
+        result = session.execute(
+            stmt, {"source_path": source_path, "collection_name": store.collection_name}
+        )
+        session.commit()
+        return result.rowcount or 0
+
+
+def delete_by_assunto(store: PGVector, assunto: str) -> int:
+    """Remove todos os chunks de um assunto (pasta) inteiro.
+
+    Complementa `delete_by_source`: aquela apaga um arquivo por vez (uso interno
+    da reingestão), esta apaga uma pasta inteira de uma vez — o caso de uso da
+    CLI de limpeza (`scripts/remove_ingested.py`), quando um assunto sai do
+    escopo do agente.
+    """
+    stmt = text(
+        f"""
+        DELETE FROM langchain_pg_embedding
+        WHERE cmetadata->>'assunto' = :assunto
+          AND collection_id = {_COLLECTION_ID}
+        """
+    )
+    with store.session_maker() as session:
+        result = session.execute(
+            stmt, {"assunto": assunto, "collection_name": store.collection_name}
+        )
         session.commit()
         return result.rowcount or 0
 
 
 def list_ingested_sources(store: PGVector) -> list[tuple[str, int]]:
-    """Lista os arquivos indexados e a quantidade de chunks de cada um."""
+    """Lista os arquivos indexados (na coleção ativa) e a quantidade de chunks de cada um."""
     stmt = text(
-        """
+        f"""
         SELECT cmetadata->>'source_path' AS source_path, COUNT(*) AS chunks
         FROM langchain_pg_embedding
+        WHERE collection_id = {_COLLECTION_ID}
         GROUP BY 1
         ORDER BY 1
         """
     )
     with store.session_maker() as session:
-        rows = session.execute(stmt)
+        rows = session.execute(stmt, {"collection_name": store.collection_name})
         return [(row.source_path, row.chunks) for row in rows]
+
+
+def list_assuntos(store: PGVector) -> list[str]:
+    """Assuntos distintos indexados na coleção ativa.
+
+    Fonte de verdade para `GET /v1/assuntos` e para validar o parâmetro
+    `assunto` da API antes de chamar `answer()` (ver app/api/deps.py) — hoje um
+    assunto que não existe passa pelo filtro `$eq` do retrieval sem erro, dá
+    zero chunks e cai silenciosamente no fallback web.
+    """
+    stmt = text(
+        f"""
+        SELECT DISTINCT cmetadata->>'assunto' AS assunto
+        FROM langchain_pg_embedding
+        WHERE collection_id = {_COLLECTION_ID}
+          AND cmetadata->>'assunto' IS NOT NULL
+        ORDER BY 1
+        """
+    )
+    with store.session_maker() as session:
+        rows = session.execute(stmt, {"collection_name": store.collection_name})
+        return [row.assunto for row in rows]
 
 
 def existing_content_hashes(store: PGVector, hashes: list[str]) -> set[str]:
