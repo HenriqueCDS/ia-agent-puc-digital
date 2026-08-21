@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.core.models import Answer, RetrievedChunk
+from app.core.models import Answer, Origem, RetrievedChunk
 
 
 class AskRequest(BaseModel):
@@ -32,7 +32,10 @@ class AskResponse(BaseModel):
     resposta: str
     fontes: list[SourceOut]
     encontrou_na_base: bool
-    origem: Literal["base", "web", "nenhuma"]
+    # Importado de `app/core/models`, nunca reescrito aqui — ver o comentário
+    # de `Origem` lá. Um valor novo de origem no agente entra neste contrato
+    # sozinho, em vez de virar literal_error na resposta.
+    origem: Origem
     request_id: str
 
 
@@ -74,6 +77,6 @@ def ask_response_de(resultado: Answer, request_id: str) -> AskResponse:
         resposta=resultado.text,
         fontes=[_fonte_para_source_out(c) for c in resultado.sources],
         encontrou_na_base=resultado.grounded,
-        origem=resultado.origem,  # type: ignore[arg-type]
+        origem=resultado.origem,
         request_id=request_id,
     )

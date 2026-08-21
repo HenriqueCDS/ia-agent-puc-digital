@@ -24,23 +24,18 @@ com o corte por limiar do retriever.
 
 import logging
 import math
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
 from urllib.parse import parse_qs, unquote, urlparse
 
 from langchain_core.documents import Document
 
-from app.core.config import WEB_ALLOWLIST, WEB_BLOCKLIST, FonteWeb, settings
+from app.agent.triagem import classificar
+from app.core.config import WEB_ALLOWLIST, FonteWeb, settings
 from app.core.models import Query, RetrievedChunk
 from app.providers.gemini import get_embeddings
 
 logger = logging.getLogger(__name__)
-
-
-def _sem_acento(texto: str) -> str:
-    normalizado = unicodedata.normalize("NFKD", texto.lower())
-    return "".join(c for c in normalizado if not unicodedata.combining(c))
 
 
 def assunto_bloqueado(pergunta: str) -> bool:
@@ -50,19 +45,25 @@ def assunto_bloqueado(pergunta: str) -> bool:
     do caso concreto do aluno; uma página pública responderia com confiança
     aparente e conteúdo errado. Bloquear aqui devolve o encaminhamento para a
     secretaria, que é a resposta correta para esse grupo de perguntas.
+
+    Redundante com a triagem na entrada (`responder._responder` já encaminha
+    esses assuntos antes do retrieval, então eles nem chegam aqui) e mantido de
+    propósito: é defesa em profundidade para o caso de `TRIAGEM_ENABLED=false`
+    ou de um caminho futuro que chame `buscar_na_web` direto, e custa uma
+    comparação de substring.
     """
-    return termo_bloqueado(pergunta) is not None
+    return classificar(pergunta) is not None
 
 
 def termo_bloqueado(pergunta: str) -> str | None:
-    """Qual termo da blocklist a pergunta casou, ou None.
+    """Assunto fora de escopo que a pergunta casou, ou None.
 
-    Mesma checagem de `assunto_bloqueado`, devolvendo o termo em vez de um bool:
-    é o único rótulo de assunto disponível para o caminho que não chama o LLM
-    (`origem="nenhuma"`), e sai sem custo nenhum. Ver `app/core/telemetry.py`.
+    Mesma checagem de `assunto_bloqueado`, devolvendo o rótulo em vez de um
+    bool: é o único rótulo de assunto disponível para o caminho que não chama o
+    LLM (`origem="nenhuma"`), e sai sem custo nenhum. Ver `app/core/telemetry.py`.
     """
-    texto = _sem_acento(pergunta)
-    return next((termo for termo in WEB_BLOCKLIST if termo in texto), None)
+    categoria = classificar(pergunta)
+    return categoria.assunto if categoria else None
 
 
 def _fontes_para(assunto: str | None) -> tuple[FonteWeb, ...]:
@@ -215,26 +216,49 @@ def _relevantes(pergunta: str, resultados: list[dict]) -> list[RetrievedChunk]:
     return acima[: settings.web_max_chunks]
 
 
+def _buscar_nas_fontes(fontes: tuple[FonteWeb, ...], query: Query) -> list[RetrievedChunk]:
+    """Uma rodada completa (coleta + allowlist + corte por relevância) num conjunto de fontes."""
+    resultados = _validos(_coletar(fontes, query.text))
+    if not resultados:
+        logger.info(
+            "busca externa: nenhum resultado dentro da allowlist (%s)",
+            ", ".join(f.host for f in fontes),
+        )
+        return []
+
+    relevantes = _relevantes(query.text, resultados)
+    logger.info(
+        "busca externa: %d resultados na allowlist, %d acima do limiar (%s)",
+        len(resultados),
+        len(relevantes),
+        ", ".join(f.host for f in fontes),
+    )
+    return relevantes
+
+
 def buscar_na_web(query: Query) -> list[RetrievedChunk]:
     """Resultados de páginas oficiais relevantes para a pergunta, ou lista vazia.
 
     Lista vazia é resposta legítima e frequente: significa "não achei nada
     confiável", e quem chama encaminha para a secretaria.
+
+    Duas rodadas quando há assunto: a primeira restrita às fontes daquele
+    assunto (menos queries, menos latência — ver `_fontes_para`); se ela não
+    achar nada, uma segunda rodada consulta a allowlist inteira antes de
+    desistir. O assunto da pergunta pode estar errado ou a resposta pode estar
+    numa fonte de outro assunto — restringir para sempre à primeira tentativa
+    descartaria esses casos em silêncio.
     """
     if assunto_bloqueado(query.text):
         logger.info("busca externa bloqueada por assunto sensível")
         return []
 
     fontes = _fontes_para(query.assunto)
-    resultados = _validos(_coletar(fontes, query.text))
-    if not resultados:
-        logger.info("busca externa: nenhum resultado dentro da allowlist")
-        return []
+    relevantes = _buscar_nas_fontes(fontes, query)
 
-    relevantes = _relevantes(query.text, resultados)
-    logger.info(
-        "busca externa: %d resultados na allowlist, %d acima do limiar",
-        len(resultados),
-        len(relevantes),
-    )
+    if not relevantes and fontes is not WEB_ALLOWLIST:
+        logger.info("busca externa: nada em %s, ampliando para a allowlist inteira",
+                     ", ".join(f.host for f in fontes))
+        relevantes = _buscar_nas_fontes(WEB_ALLOWLIST, query)
+
     return relevantes

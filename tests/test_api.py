@@ -82,7 +82,7 @@ def test_assuntos_devolve_a_lista_dublada(client):
     assert resposta.json() == {"assuntos": ["canvas", "puc-digital"]}
 
 
-# --- /v1/ask: os 3 valores de origem --------------------------------------
+# --- /v1/ask: os 4 valores de origem --------------------------------------
 
 
 def test_ask_origem_base(client, monkeypatch):
@@ -133,6 +133,49 @@ def test_ask_origem_nenhuma(client, monkeypatch):
     corpo = resposta.json()
     assert corpo["origem"] == "nenhuma"
     assert corpo["fontes"] == []
+
+
+def test_ask_origem_encaminhado(client, monkeypatch):
+    """Regressão: `origem="encaminhado"` entrou no agente sem entrar no
+    `Literal` do schema, e a resposta virou literal_error na serialização —
+    erro 500 numa pergunta que o agente tinha respondido certo."""
+    _dublar_answer(
+        monkeypatch,
+        Answer(
+            text="Sobre esse tipo de assunto, recomendo verificar diretamente...",
+            sources=[],
+            grounded=False,
+            origem="encaminhado",
+        ),
+    )
+
+    resposta = client.post("/v1/ask", json={"pergunta": "qual o meu boleto desse mes?"})
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["origem"] == "encaminhado"
+    assert corpo["encontrou_na_base"] is False
+    assert corpo["fontes"] == []
+
+
+def test_todo_valor_de_origem_do_agente_e_aceito_pelo_schema(client, monkeypatch):
+    """A garantia estrutural: percorre os valores declarados em `Origem` (o
+    tipo que o agente usa) e prova que a API serializa todos. É o teste que
+    torna impossível a divergência entre o núcleo e o contrato HTTP."""
+    from typing import get_args
+
+    from app.core.models import Origem
+
+    for origem in get_args(Origem):
+        _dublar_answer(
+            monkeypatch,
+            Answer(text="Resposta.", sources=[], grounded=False, origem=origem),
+        )
+
+        resposta = client.post("/v1/ask", json={"pergunta": "como envio atividade?"})
+
+        assert resposta.status_code == 200, f"origem={origem} rejeitada pelo schema"
+        assert resposta.json()["origem"] == origem
 
 
 # --- validação e erros (T1.5, T1.6, T1.7) ---------------------------------

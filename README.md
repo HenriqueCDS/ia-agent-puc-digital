@@ -38,11 +38,18 @@ query `site:<host>` por fonte, e a revalidação de **toda** URL devolvida contr
 `(host, path_prefix)`, porque o operador `site:` do buscador vaza resultado fora
 do escopo em silêncio. Os snippets ainda passam por um corte de similaridade
 (mesmo modelo de embedding local da base, sem custo de API) e por um veto final
-do LLM, que responde `INSUFICIENTE` quando os trechos não bastam. Nada relevante
-encontrado → resposta com o contato da secretaria. Assuntos de registro
-acadêmico e financeiro (nota, matrícula, boleto…) nunca vão para a busca externa
-— a resposta certa neles depende do caso do aluno. Liga/desliga com
-`WEB_FALLBACK_ENABLED`; ver `app/agent/web_fallback.py`.
+do LLM, que responde com o marcador `#SEM_COBERTURA#` quando os trechos não
+bastam. Nada relevante encontrado → resposta com o contato da secretaria.
+Liga/desliga com `WEB_FALLBACK_ENABLED`; ver `app/agent/web_fallback.py`.
+
+**Triagem por assunto** — antes de qualquer coisa, a pergunta que é de outro
+departamento (cobrança, diploma, rematrícula…) é encaminhada com o contato certo,
+sem tocar no retrieval nem no LLM. É guardrail, não economia: sem ela, uma
+pergunta sobre boleto pode recuperar um chunk fraco e o LLM responderia sobre
+dinheiro a partir de um documento que não é sobre isso. `matrícula` tem exceções
+explícitas (Canvas, disciplina, plataforma) para não perder o que a base
+responde bem. Liga/desliga com `TRIAGEM_ENABLED`; as categorias e os e-mails
+estão em `ENCAMINHAMENTOS` (`app/core/config.py`); ver `app/agent/triagem.py`.
 
 **Cache de resposta** — perguntas que recuperam o mesmo conjunto de chunks no
 retrieval (mesmo sendo uma paráfrase uma da outra) reaproveitam a resposta já
@@ -157,7 +164,8 @@ acertou — sem isso, um valor derivado ficaria indistinguível de um informado:
 | `informado` | usuário passou `--assunto` | tem precedência sobre tudo |
 | `metadata` | o retrieval achou chunks | pasta gravada na ingestão (`pipeline._enrich`) |
 | `allowlist` | respondeu pela web | `FonteWeb.assunto` do domínio (`WEB_ALLOWLIST`) |
-| `blocklist` | nada encontrado, tema sensível | termo casado da `WEB_BLOCKLIST` |
+| `triagem` | assunto de outro departamento | categoria casada em `ENCAMINHAMENTOS` |
+| `blocklist` | nada encontrado, tema sensível | categoria casada, com `TRIAGEM_ENABLED=false` |
 | `null` | nada acima | pergunta fora de escopo |
 
 O `topico` vem do marcador `#TOPICO:` que os prompts pedem na **última linha** da
@@ -168,8 +176,9 @@ existe para medir.
 
 Detalhes que valem saber:
 
-- **O marcador vai no fim, nunca no início.** O veto da busca externa testa
-  `texto.startswith(INSUFICIENTE)`; um prefixo o quebraria em silêncio.
+- **O marcador vai no fim, nunca no início.** Ele é separado do texto antes do
+  veto de contexto insuficiente (`prompts.eh_insuficiente`), que examina o resto
+  da resposta.
 - **O texto é cacheado *com* o marcador** e reprocessado na leitura: um cache hit
   recupera o `topico` sem coluna nova e sem reclassificar.
 - **Marcador ausente** (o modelo esqueceu, ou é uma resposta cacheada de antes
@@ -183,7 +192,7 @@ Responde às quatro perguntas que importam para eficiência:
 |---|---|
 | Quanto custa? | `input_tokens`, `output_tokens`, `cache_hit` (hit = zero token de API) |
 | Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_llm` (rede), `ms_web` (rede lenta) |
-| O guardrail dispara quanto? | `origem` = `base` / `web` / `nenhuma`, `web_insuficiente` |
+| O guardrail dispara quanto? | `origem` = `base` / `web` / `encaminhado` / `nenhuma`, `base_insuficiente`, `web_insuficiente` |
 | A qualidade caiu? | `n_chunks`, `score_top`, `alta_confianca` ao longo do tempo |
 
 Consultas (a coluna `dados` é `JSONB` — campo novo no registro não exige migração):
@@ -215,7 +224,7 @@ FROM telemetria GROUP BY 1 ORDER BY 1;
 ```
 
 **Privacidade:** o texto da pergunta nunca é registrado — só `assunto` e um hash
-truncado. Perguntas de aluno tocam assuntos sensíveis (ver `WEB_BLOCKLIST` em
+truncado. Perguntas de aluno tocam assuntos sensíveis (ver `ENCAMINHAMENTOS` em
 `app/core/config.py`); o hash preserva o que interessa, que é agrupar perguntas
 repetidas sem resposta.
 
@@ -241,24 +250,44 @@ data/raw/<assunto>/*.pdf|txt|md
    ▼
 pipeline.py ── chunker.py ── embeddings locais (HF) ── pgvector
                                                           │
-pergunta ── preprocess.py ── retriever.py ────────────────┘
+pergunta ── preprocess.py ── triagem.py ──► outro departamento?
+                                  │              origem="encaminhado"
+                            é do agente
+                                  │
+                            retriever.py ─────────────────┘
                                   │
                     ┌─────────────┴─────────────┐
                 achou algo                   vazio
                     │                           │
-                    ▼                           ▼
-      cache? (assunto+confiança+chunks)   web_fallback.py
-       │                    │             (allowlist + similaridade)
+                    ▼                           │
+      cache? (assunto+confiança+chunks)         │
+       │                    │                   │
       hit                  miss                 │
-       │                    ▼             ┌─────┴─────┐
-       │      responder.py ── Gemini   achou       nada
-       │                    │             │           │
-       │                    │             ▼           ▼
-       │                    │          Gemini    secretaria
-       ▼                    ▼          (prompt web)
+       │                    ▼                   │
+       │      responder.py ── Gemini            │
+       │                    │                   │
+       │            contexto serve?             │
+       │              não ──┴── sim             │
+       │               │        │               │
+       │               └────────┼──────────────►│
+       │                        │               ▼
+       │                        │        web_fallback.py
+       │                        │        (allowlist + similaridade)
+       │                        │               │
+       │                        │         ┌─────┴─────┐
+       │                        │      achou       nada
+       │                        │         │           │
+       │                        │         ▼           ▼
+       │                        │      Gemini    secretaria
+       ▼                        ▼    (prompt web) origem="nenhuma"
         resposta + fontes (arquivo, página)   resposta + fontes (URL)
         origem="base"                         origem="web"
 ```
+
+O guardrail tem **três saídas** para "não respondo isso", e elas medem coisas
+diferentes: `origem="encaminhado"` é assunto de outro departamento (nunca vai
+ser indexado aqui), enquanto `origem="nenhuma"` é documento faltando na base —
+o sinal que vira pauta de ingestão.
 
 ## Organização
 
@@ -273,6 +302,7 @@ pergunta ── preprocess.py ── retriever.py ──────────
 | `app/retrieval/retriever.py` | busca por similaridade + filtro por assunto |
 | `app/agent/` | pré-processamento, prompt, cache e geração da resposta |
 | `app/agent/prompts.py` | prompts + marcador `#TOPICO` lido pela telemetria |
+| `app/agent/triagem.py` | encaminha assunto de outro departamento antes do RAG |
 | `app/agent/web_fallback.py` | busca externa restrita à allowlist de domínios oficiais |
 | `app/db/vector_store.py` | conexão com pgvector |
 | `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |

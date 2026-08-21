@@ -11,8 +11,17 @@ mudam.
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from langchain_core.documents import Document
+
+# De onde veio a resposta. Definido AQUI e importado por quem serializa
+# (`app/api/schemas.py`) de propósito: quando era uma `Literal` reescrita à mão
+# no schema HTTP, adicionar "encaminhado" no agente passou despercebido e a API
+# quebrou em runtime com literal_error, num caminho que os testes do agente
+# cobriam mas os da API não. Com uma definição só, o contrato não tem como
+# divergir do que o agente devolve.
+Origem = Literal["base", "web", "encaminhado", "nenhuma"]
 
 
 @dataclass
@@ -43,8 +52,15 @@ class Answer:
     sources: list[RetrievedChunk] = field(default_factory=list)
     grounded: bool = True  # False quando nada relevante foi encontrado NA BASE
     # De onde veio a resposta: "base" (RAG), "web" (fallback de busca externa,
-    # ver app/agent/web_fallback.py) ou "nenhuma" (encaminhou para a secretaria).
+    # ver app/agent/web_fallback.py), "encaminhado" (assunto de outro
+    # departamento, barrado na triagem antes do retrieval — ver
+    # app/agent/triagem.py) ou "nenhuma" (nada encontrado em nenhuma fonte).
     # Campo separado de `grounded` de propósito: uma resposta vinda da web tem
     # fonte citável, mas continua sendo um caso de "não estava na base" — que é
     # o sinal usado para descobrir que documento falta indexar.
-    origem: str = "base"
+    #
+    # "encaminhado" e "nenhuma" são separados pelo mesmo motivo: os dois mandam
+    # o aluno para outro contato, mas só "nenhuma" significa documento faltando
+    # na base. Misturar os dois estragaria essa métrica, porque assunto de outro
+    # departamento nunca vai ser indexado aqui.
+    origem: Origem = "base"

@@ -12,7 +12,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 
 from app.agent import responder
-from app.agent.prompts import MARCADOR_TOPICO, SEM_CONTEXTO, WEB_INSUFICIENTE
+from app.agent.prompts import CONTEXTO_INSUFICIENTE, MARCADOR_TOPICO, SEM_CONTEXTO
 from app.core import telemetry
 from app.core.models import Query, RetrievedChunk
 
@@ -153,6 +153,42 @@ def test_caminho_da_web_registra_origem_e_latencia_da_busca(monkeypatch, registr
     assert reg["web_insuficiente"] is None
 
 
+def test_base_insuficiente_aciona_a_busca_externa_e_registra_o_veto(monkeypatch, registros):
+    """A base achou chunk acima do limiar, mas o LLM decide que ele não cobre a
+    pergunta: o roteador tenta a web antes da secretaria (ver responder._tentar_base)."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    class LLMBaseInsuficienteDepoisWeb:
+        def __init__(self):
+            self.chamadas = 0
+
+        def invoke(self, mensagens):
+            self.chamadas += 1
+            if self.chamadas == 1:
+                return AIMessage(
+                    content=f"{CONTEXTO_INSUFICIENTE}\n{MARCADOR_TOPICO} topico base",
+                    usage_metadata={"input_tokens": 50, "output_tokens": 5, "total_tokens": 55},
+                )
+            return AIMessage(
+                content=f"Resposta da web.\n{MARCADOR_TOPICO} topico web",
+                usage_metadata={"input_tokens": 80, "output_tokens": 20, "total_tokens": 100},
+            )
+
+    resultado = responder.answer(Query(text=PERGUNTA), llm=LLMBaseInsuficienteDepoisWeb())
+
+    assert resultado.text == "Resposta da web."
+    assert resultado.origem == "web"
+    (reg,) = registros
+    assert reg["base_insuficiente"] is True
+    assert reg["web_insuficiente"] is None  # a web respondeu; só a base vetou
+    assert reg["n_chunks"] == 1  # a base tinha chunk, só não respondia
+    assert reg["topico"] == "topico web"  # tópico da resposta que de fato saiu
+    assert (reg["input_tokens"], reg["output_tokens"]) == (130, 25)  # soma das 2 chamadas
+    assert reg["ms_llm"] is not None
+
+
 def test_encaminhamento_para_a_secretaria_registra_origem_nenhuma(monkeypatch, registros):
     monkeypatch.setattr(responder.settings, "web_fallback_enabled", False)
     monkeypatch.setattr(responder, "retrieve", lambda q: [])
@@ -162,6 +198,25 @@ def test_encaminhamento_para_a_secretaria_registra_origem_nenhuma(monkeypatch, r
     (reg,) = registros
     assert (reg["origem"], reg["n_chunks"]) == ("nenhuma", 0)
     assert reg["input_tokens"] is None  # guardrail: nenhum token gasto
+
+
+def test_encaminhamento_por_assunto_registra_origem_e_categoria(monkeypatch, registros):
+    """`origem="encaminhado"` é separado de `"nenhuma"` de propósito: só
+    `"nenhuma"` significa documento faltando na base. Ver app/agent/triagem.py."""
+
+    def nao_deveria_ser_chamado(_query):
+        raise AssertionError("retrieval não pode rodar para assunto encaminhado")
+
+    monkeypatch.setattr(responder, "retrieve", nao_deveria_ser_chamado)
+
+    responder.answer(Query(text="Não recebi meu boleto deste mês"), llm=FakeLLM())
+
+    (reg,) = registros
+    assert reg["origem"] == "encaminhado"
+    assert (reg["assunto"], reg["assunto_origem"]) == ("financeiro", "triagem")
+    assert reg["input_tokens"] is None  # nenhum token gasto
+    assert reg["ms_retrieve"] is None  # etapa que nem aconteceu
+    assert reg["n_chunks"] is None
 
 
 def test_falha_no_meio_do_fluxo_ainda_emite_o_registro(monkeypatch, registros):
@@ -310,7 +365,7 @@ def test_marcador_no_fim_nao_quebra_o_veto_da_busca_externa(monkeypatch, registr
     monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
     monkeypatch.setattr(responder, "retrieve", lambda q: [])
     monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
-    llm = FakeLLM(resposta=f"{WEB_INSUFICIENTE}\n{MARCADOR_TOPICO} receita de bolo")
+    llm = FakeLLM(resposta=f"{CONTEXTO_INSUFICIENTE}\n{MARCADOR_TOPICO} receita de bolo")
 
     resultado = responder.answer(Query(text=PERGUNTA), llm=llm)
 
@@ -371,15 +426,18 @@ def test_assunto_do_caminho_web_vem_da_allowlist(monkeypatch, registros):
 
 
 def test_assunto_sensivel_e_rotulado_sem_chamar_nada(monkeypatch, registros):
-    """origem="nenhuma" nao faz chamada alguma: o termo da blocklist e o unico
-    rotulo possivel, e sai de graca."""
+    """Assunto sensível sai rotulado e de graça — agora pela triagem, que roda
+    antes do retrieval e encaminha para o departamento certo (ver
+    app/agent/triagem.py). Antes da triagem este caso saía como
+    `origem="nenhuma"` e rótulo `"blocklist"`, depois de tentar o RAG."""
     monkeypatch.setattr(responder.settings, "web_fallback_enabled", False)
     monkeypatch.setattr(responder, "retrieve", lambda q: [])
 
     responder.answer(Query(text="meu boleto da mensalidade nao chegou"), llm=FakeLLM())
 
     (reg,) = registros
-    assert (reg["assunto"], reg["assunto_origem"]) == ("boleto", "blocklist")
+    assert (reg["assunto"], reg["assunto_origem"]) == ("financeiro", "triagem")
+    assert reg["origem"] == "encaminhado"
     assert reg["topico"] is None
     assert reg["input_tokens"] is None
 

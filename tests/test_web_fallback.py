@@ -122,7 +122,7 @@ def test_assunto_sensivel_nao_chega_a_buscar(monkeypatch):
     monkeypatch.setattr(web_fallback, "_buscar_em", nao_deveria_ser_chamado)
 
     assert web_fallback.buscar_na_web(Query(text="Como faço a rematrícula?")) == []
-    assert web_fallback.buscar_na_web(Query(text="qual minha nota final?")) == []
+    assert web_fallback.buscar_na_web(Query(text="Não recebi meu boleto")) == []
 
 
 def test_falha_da_busca_vira_lista_vazia_e_nao_excecao(monkeypatch):
@@ -151,6 +151,39 @@ def test_assunto_limita_as_fontes_consultadas():
 
 def test_sem_assunto_consulta_todas_as_fontes():
     assert web_fallback._fontes_para(None) == web_fallback.WEB_ALLOWLIST
+
+
+def test_assunto_sem_resultado_amplia_para_allowlist_inteira(monkeypatch):
+    """A rodada restrita ao assunto (canvas -> só community.instructure.com) não
+    acha nada; a resposta está em puc-campinas.edu.br, fora do assunto detectado
+    — uma 2a rodada com a allowlist inteira deve achar."""
+
+    def buscar(fonte, pergunta):
+        if fonte.host == "puc-campinas.edu.br":
+            return [_resultado("https://www.puc-campinas.edu.br/pagina")]
+        return []
+
+    monkeypatch.setattr(web_fallback, "_buscar_em", buscar)
+
+    chunks = web_fallback.buscar_na_web(Query(text="como envio atividade?", assunto="canvas"))
+
+    assert len(chunks) == 1
+    assert chunks[0].citation == "https://www.puc-campinas.edu.br/pagina"
+
+
+def test_assunto_com_resultado_nao_amplia_a_busca(monkeypatch):
+    """Achou algo na 1a rodada: não tenta as demais fontes da allowlist."""
+    chamadas = []
+
+    def buscar(fonte, pergunta):
+        chamadas.append(fonte.host)
+        return [_resultado("https://community.instructure.com/en/kb/articles/1-x")]
+
+    monkeypatch.setattr(web_fallback, "_buscar_em", buscar)
+
+    web_fallback.buscar_na_web(Query(text="como envio atividade?", assunto="canvas"))
+
+    assert chamadas == ["community.instructure.com"]
 
 
 def test_no_maximo_web_max_chunks_chegam_ao_llm(monkeypatch):

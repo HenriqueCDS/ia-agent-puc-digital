@@ -50,23 +50,104 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
     ),
 )
 
-# Assuntos que nunca vão para a busca externa, mesmo com o RAG vazio: registro
-# acadêmico e financeiro dependem do caso concreto do aluno, e responder isso a
-# partir de uma página pública é pior que encaminhar para a secretaria.
-WEB_BLOCKLIST: tuple[str, ...] = (
-    "boleto",
-    "bolsa",
-    "cobranca",
-    "diploma",
-    "fies",
-    "financeiro",
-    "historico escolar",
-    "matricula",
-    "mensalidade",
-    "minha nota",
-    "prouni",
-    "rematricula",
-    "trancamento",
+@dataclass(frozen=True)
+class CategoriaEncaminhada:
+    """Assunto que não é do agente, e para onde ele deve ser encaminhado.
+
+    `termos` são casados como substring contra a pergunta sem acento e em caixa
+    baixa (ver `app/agent/triagem.py`), então "matricula" também casa
+    "Matrícula" e "matriculas".
+
+    `excecoes` desarmam o encaminhamento quando a pergunta também traz um desses
+    termos, e existem para o termo que é ambíguo por natureza. "minha nota" é o
+    caso: pedir o valor da nota é da secretaria, mas "onde vejo minhas notas no
+    Canvas" é procedimento que a base responde bem. A exceção é o que permite
+    listar o termo sem perder essas perguntas.
+
+    Termo ambíguo vai em entrada PRÓPRIA, nunca junto de termos inequívocos: as
+    exceções valem para a categoria inteira, e desarmariam os outros termos
+    junto. Alternativa mais simples, quando serve: não listar o termo ambíguo —
+    é o que se faz com "matrícula", em que só "rematricula" é listado.
+    """
+
+    assunto: str  # rótulo na telemetria (Registro.assunto)
+    resposta: str
+    termos: tuple[str, ...]
+    excecoes: tuple[str, ...] = ()
+
+
+_CONTATO = "Sobre esse tipo de assunto, recomendo verificar diretamente com a \
+secretaria acadêmica ou com o suporte da instituição ({email})."
+
+# Assuntos que o agente NÃO trata: dependem do caso concreto do aluno e são de
+# outro departamento. A pergunta é encaminhada antes do retrieval, sem gastar
+# RAG nem LLM (ver `app/agent/triagem.py` e `responder._responder`).
+#
+# A ORDEM IMPORTA — primeiro match vence: "boleto da rematrícula" casa
+# financeiro e acadêmico, que têm e-mails diferentes, e financeiro vem primeiro
+# porque quem cobra responde por cobrança.
+#
+# A regra vale para termo que seja substring de outro. Se um dia "matricula"
+# entrar aqui, ele tem que vir DEPOIS de "rematricula" (e com `excecoes`),
+# senão toda rematrícula cairia na entrada errada.
+ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
+    CategoriaEncaminhada(
+        assunto="financeiro",
+        resposta=_CONTATO.format(email="dcr@puc-campinas.edu.br"),
+        termos=(
+            "boleto",
+            "bolsa",
+            "cobranca",
+            "fies",
+            "financeiro",
+            "mensalidade",
+            "prouni",
+        ),
+    ),
+    CategoriaEncaminhada(
+        assunto="diplomas",
+        resposta=_CONTATO.format(email="diplomas@puc-campinas.edu.br"),
+        termos=("diploma", "certificado"),
+    ),
+    CategoriaEncaminhada(
+        assunto="academico",
+        resposta=_CONTATO.format(email="puc.digital@puc-campinas.edu.br"),
+        termos=("rematricula", "historico escolar", "trancamento"),
+    ),
+    # Ambígua, por isso em entrada PRÓPRIA (mesmo assunto e mesmo e-mail da
+    # anterior, e não termo dela): "minha nota" tanto pede o valor da nota, que
+    # depende do registro do aluno e é da secretaria, quanto pergunta como vê-la
+    # no Canvas ou na área do aluno — procedimento que os guias oficiais
+    # documentam e o agente responde bem.
+    #
+    # Entrada separada porque `excecoes` vale para a categoria inteira: se
+    # estivesse junto de "rematricula", "como faço a rematrícula no portal do
+    # aluno" seria desarmado por engano — e rematrícula é da secretaria
+    # independente da plataforma citada.
+    #
+    # As exceções são de dois tipos, porque o que desfaz a ambiguidade também é:
+    # a plataforma citada, e o verbo de procedimento ("onde vejo") em oposição
+    # ao pedido do valor ("qual é").
+    CategoriaEncaminhada(
+        assunto="academico",
+        resposta=_CONTATO.format(email="puc.digital@puc-campinas.edu.br"),
+        # "minhas notas" não contém "minha nota" (o `s` quebra a substring),
+        # por isso as duas formas.
+        termos=("minha nota", "minhas notas"),
+        excecoes=(
+            "canvas",
+            "area do aluno",
+            "portal do aluno",
+            "plataforma",
+            "onde vejo",
+            "onde encontro",
+            "onde consulto",
+            "como vejo",
+            "como ver",
+            "como acesso",
+            "como consulto",
+        ),
+    ),
 )
 
 
@@ -123,6 +204,13 @@ class Settings(BaseSettings):
     # guardar hash de pergunta de aluno indefinidamente não se justifica.
     telemetry_retention_days: int = 7
 
+    # --- Triagem por assunto (ver app/agent/triagem.py) ---
+    # Kill switch de rollback: com False, a pergunta de assunto fora de escopo
+    # volta a seguir para o RAG em vez de ser encaminhada na entrada. Existe
+    # para desarmar rápido um termo mal calibrado em ENCAMINHAMENTOS sem
+    # precisar de deploy.
+    triagem_enabled: bool = True
+
     # --- Fallback de busca externa (ver app/agent/web_fallback.py) ---
     # Kill switch: com False, o guardrail volta a se comportar como antes
     # (responde "não encontrei na base" sem chamar nada externo nem o LLM).
@@ -144,7 +232,10 @@ class Settings(BaseSettings):
     web_search_backend: str = "duckduckgo,brave,mojeek,startpage,yahoo"
     # Resultados pedidos por fonte da allowlist.
     web_search_max_results: int = 4
-    # Orçamento total da busca, em segundos. Estourou, usa o que já chegou.
+    # Orçamento por rodada de busca, em segundos. Estourou, usa o que já chegou.
+    # Pergunta com assunto cuja primeira rodada (fontes daquele assunto) não
+    # acha nada paga até 2x isso: `buscar_na_web` tenta de novo com a allowlist
+    # inteira antes de desistir (ver app/agent/web_fallback.py).
     web_search_timeout: float = 8.0
     # Similaridade mínima (embeddings locais) entre pergunta e snippet para o
     # resultado chegar ao LLM. Espelha `relevance_threshold`, mas em escala

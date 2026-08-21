@@ -5,9 +5,9 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 
 from app.agent import responder
-from app.agent.prompts import SEM_CONTEXTO, WEB_INSUFICIENTE
+from app.agent.prompts import CONTEXTO_INSUFICIENTE, SEM_CONTEXTO
 from app.core.config import settings
-from app.core.models import Query, RetrievedChunk
+from app.core.models import Answer, Query, RetrievedChunk
 
 
 URL_OFICIAL = "https://community.instructure.com/en/kb/articles/661210-submit"
@@ -111,12 +111,161 @@ def test_llm_pode_vetar_trechos_insuficientes_da_web(monkeypatch):
     monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
 
     resultado = responder.answer(
-        Query(text="pergunta fora da base"), llm=FakeLLM(resposta=WEB_INSUFICIENTE)
+        Query(text="pergunta fora da base"), llm=FakeLLM(resposta=CONTEXTO_INSUFICIENTE)
     )
 
     assert resultado.text == SEM_CONTEXTO
     assert resultado.origem == "nenhuma"
     assert resultado.sources == []
+
+
+def test_base_insuficiente_aciona_a_busca_externa(monkeypatch):
+    """A base tinha chunk acima do limiar, mas o LLM decide que ele não cobre a
+    pergunta: em vez de devolver esse veto como texto livre, o roteador tenta a
+    web antes da secretaria — mesmo papel que `if not chunks` já cumpria."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    respostas = iter([CONTEXTO_INSUFICIENTE, "Resposta da web."])
+    llm = FakeLLM()
+    llm.invoke = lambda mensagens: AIMessage(content=next(respostas))
+
+    resultado = responder.answer(Query(text="como envio atividade?"), llm=llm)
+
+    assert resultado.text == "Resposta da web."
+    assert resultado.origem == "web"
+    assert resultado.grounded is False
+    assert [c.citation for c in resultado.sources] == [URL_OFICIAL]
+
+
+def test_marcador_traduzido_pelo_modelo_ainda_aciona_a_busca_externa(monkeypatch):
+    """Regressão do bug real (pergunta sobre horário da praça de alimentação): o
+    modelo traduziu o marcador para INSUFFICIENT, o veto não casou e esse texto
+    cru virou a resposta — sem nunca tentar a web, que tinha a informação."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    respostas = iter(["INSUFFICIENT", "A praça de alimentação abre das 7h30 às 18h."])
+    llm = FakeLLM()
+    llm.invoke = lambda mensagens: AIMessage(content=next(respostas))
+
+    resultado = responder.answer(
+        Query(text="Qual horario de funcionamento da Praças de Alimentação?"), llm=llm
+    )
+
+    assert resultado.text == "A praça de alimentação abre das 7h30 às 18h."
+    assert resultado.origem == "web"
+
+
+def test_caminho_que_esquece_o_veto_ainda_nao_vaza_o_marcador(monkeypatch):
+    """Rede de segurança de `answer()`: um caminho que devolva o marcador sem
+    vetar (uma fonte de contexto nova que esqueça o veto) ainda assim resulta no
+    encaminhamento para a secretaria, nunca no marcador cru na tela do aluno."""
+
+    def responder_sem_vetar(query, llm, registro):
+        return Answer(text=CONTEXTO_INSUFICIENTE, sources=[], grounded=True, origem="base")
+
+    monkeypatch.setattr(responder, "_responder", responder_sem_vetar)
+
+    resultado = responder.answer(Query(text="pergunta qualquer"), llm=FakeLLM())
+
+    assert resultado.text == SEM_CONTEXTO
+    assert resultado.origem == "nenhuma"
+    assert resultado.grounded is False
+
+
+def test_marcador_embrulhado_em_frase_ainda_aciona_o_veto(monkeypatch):
+    """O prompt pede 'responda só a palavra', mas o modelo nem sempre obedece —
+    se ele embrulhar o marcador num pedido de desculpas, o veto ainda tem que
+    disparar e rotear para a web, nunca deixar esse texto vazar como resposta."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    respostas = iter(
+        [
+            "Peço desculpas, mas o contexto fornecido é INSUFICIENTE para responder.",
+            "Resposta da web.",
+        ]
+    )
+    llm = FakeLLM()
+    llm.invoke = lambda mensagens: AIMessage(content=next(respostas))
+
+    resultado = responder.answer(Query(text="como envio atividade?"), llm=llm)
+
+    assert resultado.text == "Resposta da web."
+    assert resultado.origem == "web"
+
+
+def test_base_insuficiente_e_web_sem_resultado_encaminha_para_a_secretaria(monkeypatch):
+    """Base vetou e a web não achou nada dentro da allowlist: o aluno recebe a
+    orientação de procurar a secretaria (SEM_CONTEXTO), nunca o marcador cru."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [])
+
+    resultado = responder.answer(
+        Query(text="como envio atividade?"), llm=FakeLLM(resposta=CONTEXTO_INSUFICIENTE)
+    )
+
+    assert resultado.text == SEM_CONTEXTO
+    assert resultado.origem == "nenhuma"
+    assert resultado.grounded is False
+
+
+def test_base_e_web_insuficientes_encaminha_para_a_secretaria(monkeypatch):
+    """A web achou trechos, mas o LLM também os vetou: os dois vetos em cadeia
+    (base -> web) terminam no mesmo lugar, a orientação de procurar a secretaria."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    # Mesma resposta fixa nas 2 chamadas ao LLM (base e web): simula o modelo
+    # vetando o contexto nas duas tentativas.
+    llm = FakeLLM(resposta=CONTEXTO_INSUFICIENTE)
+
+    resultado = responder.answer(Query(text="como envio atividade?"), llm=llm)
+
+    assert resultado.text == SEM_CONTEXTO
+    assert resultado.origem == "nenhuma"
+    assert resultado.sources == []
+
+
+def test_base_insuficiente_sem_fallback_habilitado_encaminha_para_a_secretaria(monkeypatch):
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", False)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+
+    resultado = responder.answer(
+        Query(text="como envio atividade?"), llm=FakeLLM(resposta=CONTEXTO_INSUFICIENTE)
+    )
+
+    assert resultado.text == SEM_CONTEXTO
+    assert resultado.origem == "nenhuma"
+
+
+def test_cache_de_veto_insuficiente_repete_o_roteamento_para_a_web(monkeypatch):
+    """O texto cacheado para um conjunto de chunks pode ser CONTEXTO_INSUFICIENTE
+    (ver `_tentar_base`). Um cache hit nesse valor não pode virar o marcador cru
+    na resposta do aluno: precisa repetir o mesmo roteamento para a web, sem
+    chamar o LLM da base de novo."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    respostas = iter([CONTEXTO_INSUFICIENTE, "Resposta da web (1a chamada)."])
+    llm1 = FakeLLM()
+    llm1.invoke = lambda mensagens: AIMessage(content=next(respostas))
+    primeiro = responder.answer(Query(text="como envio atividade?"), llm=llm1)
+    assert primeiro.text == "Resposta da web (1a chamada)."
+
+    # Pergunta parafraseada recupera o mesmo chunk -> mesma cache_key.
+    llm2 = FakeLLM(resposta="Resposta da web (2a chamada).")
+    segundo = responder.answer(Query(text="como faço para mandar a atividade?"), llm=llm2)
+
+    assert segundo.text == "Resposta da web (2a chamada)."
+    assert segundo.origem == "web"
 
 
 def test_resposta_vinda_da_base_marca_origem_base(monkeypatch):

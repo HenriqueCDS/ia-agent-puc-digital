@@ -14,7 +14,7 @@ por injeção, via `configurar_persistencia`.
 
 PRIVACIDADE — o texto da pergunta NUNCA entra no registro, só `assunto` e um
 hash truncado. Perguntas de aluno passam por assuntos sensíveis (ver
-`WEB_BLOCKLIST` em app/core/config.py: boleto, matrícula, bolsa). O hash ainda
+`ENCAMINHAMENTOS` em app/core/config.py: boleto, matrícula, bolsa). O hash ainda
 serve ao propósito principal: agrupar perguntas repetidas que a base não
 respondeu, para descobrir qual documento falta indexar.
 
@@ -113,6 +113,7 @@ class Registro:
 
     # De onde saiu o `assunto` acima: "informado" (o usuário passou), "metadata"
     # (pasta do documento que respondeu), "allowlist" (domínio da fonte web),
+    # "triagem" (categoria de outro departamento, ver app/agent/triagem.py),
     # "blocklist" (termo sensível reconhecido) ou None. Sem isso, um assunto
     # derivado fica indistinguível de um informado, e a métrica perde o sentido.
     assunto_origem: str | None = None
@@ -141,8 +142,20 @@ class Registro:
     ms_web: float | None = None
     ms_total: float | None = None
 
-    # LLM vetou os snippets da web (M7): ver WEB_INSUFICIENTE em prompts.py.
+    # LLM vetou o contexto recuperado (M7): achou chunks/snippets acima do
+    # limiar, mas nenhum de fato respondia — ver CONTEXTO_INSUFICIENTE em
+    # prompts.py. `base_insuficiente=True` é o que aciona o fallback de busca
+    # externa em `responder._responder`; `web_insuficiente=True` é o mesmo veto
+    # já do lado da web, que encaminha para a secretaria.
+    base_insuficiente: bool | None = None
     web_insuficiente: bool | None = None
+
+    # A rede de segurança de `responder.answer` teve que agir: um marcador de
+    # recusa passou pelos vetos e só foi barrado no fim. Sempre nulo em operação
+    # normal — se aparecer, o modelo está emitindo o marcador numa forma que os
+    # vetos não reconhecem (foi assim que "INSUFFICIENT" traduzido apareceu), e
+    # a resposta virou encaminhamento à secretaria sem tentar a busca externa.
+    veto_escapou: bool | None = None
 
     erro: str | None = None
 
@@ -162,12 +175,19 @@ class Registro:
 
 @contextmanager
 def cronometro(registro: Registro, campo: str) -> Iterator[None]:
-    """Mede uma etapa e grava em `registro.<campo>`, mesmo se ela levantar."""
+    """Mede uma etapa e ACRESCENTA em `registro.<campo>`, mesmo se ela levantar.
+
+    Soma em vez de atribuir pelo mesmo motivo de `Registro.somar_tokens`: uma
+    resposta pode passar pela mesma etapa mais de uma vez (`ms_llm` no caminho
+    base -> insuficiente -> web faz duas chamadas ao LLM na mesma resposta) — a
+    segunda passagem não pode apagar o custo da primeira.
+    """
     inicio = time.perf_counter()
     try:
         yield
     finally:
-        setattr(registro, campo, round((time.perf_counter() - inicio) * 1000, 1))
+        decorrido = round((time.perf_counter() - inicio) * 1000, 1)
+        setattr(registro, campo, round((getattr(registro, campo) or 0) + decorrido, 1))
 
 
 @contextmanager
