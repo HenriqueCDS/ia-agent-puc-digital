@@ -32,17 +32,40 @@ def _format_context(chunks: list[RetrievedChunk]) -> str:
     )
 
 
+# Diferenças que não mudam a resposta: caixa, espaço repetido e a pontuação
+# final. Normalizar isso preserva o cache hit entre "Como envio a tarefa?" e
+# "como envio a tarefa" sem misturar perguntas de fato diferentes.
+_PONTUACAO_FINAL = " ?!.,;:"
+
+
+def _normalizar_pergunta(texto: str) -> str:
+    return " ".join(texto.split()).casefold().rstrip(_PONTUACAO_FINAL)
+
+
 def _cache_key(query: Query, chunks: list[RetrievedChunk], alta_confianca: bool) -> str:
-    """Chave pelo conjunto de chunks recuperados, não pelo texto da pergunta.
+    """Chave pelo TEXTO da pergunta + o conjunto de chunks recuperados.
 
     `document.id` é o id determinístico gravado na ingestão (`chunk_id` em
     ingestion/chunker.py) — o PGVector devolve esse mesmo id em cada busca.
-    Perguntas parafraseadas que recuperam o mesmo topo caem na mesma chave, e
-    reingerir um arquivo alterado muda os ids recuperados e invalida a chave
+    Reingerir um arquivo alterado muda os ids recuperados e invalida a chave
     sozinho, sem precisar de nenhuma limpeza manual de cache.
+
+    T2.4 — a pergunta normalizada entra na chave. Antes, a chave era só
+    `assunto + alta_confiança + ids`, apostando em "mesmo conjunto de chunks ⇒
+    mesma resposta". Isso vale para paráfrase, e SÓ para paráfrase: com
+    `top_k=5` e limiar 0.35, "como envio uma tarefa no Canvas?" e "onde vejo a
+    nota da tarefa no Canvas?" plausivelmente recuperam os mesmos 5 chunks — e
+    a segunda recebia a resposta da primeira. Servir a resposta de outra
+    pergunta é o pior modo de falha possível num agente de suporte: parece
+    certo e não deixa rastro.
+
+    O custo é hit rate: paráfrase que não sobrevive à normalização acima passa
+    a pagar uma chamada ao LLM. Trade escolhido de propósito — a alternativa
+    considerada (cachear só no ramo `alta_confianca`) preservaria mais hits mas
+    deixaria o mesmo erro de pé no ramo comum, que é onde ele acontece.
     """
     ids = sorted(c.document.id or "" for c in chunks)
-    base = f"{query.assunto or ''}|{alta_confianca}|{','.join(ids)}"
+    base = f"{_normalizar_pergunta(query.text)}|{query.assunto or ''}|{alta_confianca}|{','.join(ids)}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 

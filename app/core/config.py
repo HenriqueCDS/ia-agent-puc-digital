@@ -151,6 +151,11 @@ ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
 )
 
 
+def _csv(valor: str) -> list[str]:
+    """Divide uma lista separada por vírgula do .env, ignorando espaços e vazios."""
+    return [item.strip() for item in valor.split(",") if item.strip()]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
@@ -246,6 +251,57 @@ class Settings(BaseSettings):
     web_relevance_threshold: float = 0.45
     # Quantos resultados no máximo entram no prompt.
     web_max_chunks: int = 4
+
+    # --- Borda HTTP: autenticação (T2.1) ---
+    # Kill switch para desenvolvimento local. Em produção fica `true`: cada
+    # `/ask` que não bate cache é uma chamada paga ao Gemini mais até 5 buscas
+    # web, então o endpoint aberto é um proxy grátis para a cota da instituição.
+    api_auth_enabled: bool = True
+    # Uma chave POR INTEGRAÇÃO, no formato `nome:chave,outro:chave`. O nome vai
+    # para a telemetria (`canal`), que é o que permite atribuir custo por canal
+    # e, depois, revogar só o consumidor que abusou — com uma chave única para
+    # todo mundo, revogar derruba todas as integrações de uma vez.
+    api_keys: str = ""
+
+    # --- Borda HTTP: CORS (T2.2) ---
+    # Origens permitidas, separadas por vírgula (ex.: https://ava.puc-campinas.edu.br).
+    # Vazio = nenhuma origem cruzada; a demo servida pela própria API não precisa
+    # de CORS. "*" é ignorado de propósito — ver `cors_origins_lista`.
+    cors_origins: str = ""
+
+    # --- Borda HTTP: rate limit (T2.3) ---
+    # Janela deslizante de 60s por consumidor. Protege a cota do Gemini e evita
+    # que o buscador externo comece a devolver 429 (ver web_search_backend).
+    rate_limit_por_minuto: int = 20
+    # Teto do processo inteiro, por dia (UTC). É o limite de custo: mesmo com
+    # várias integrações bem-comportadas, a soma não passa disto.
+    rate_limit_diario_global: int = 2000
+
+    # --- Chamada ao LLM (T2.5) ---
+    # Sem isto, uma request pendurada no Gemini segura uma thread do pool do
+    # uvicorn indefinidamente (as rotas são `def`, não `async def`) — poucas
+    # dessas e o servidor inteiro para de responder.
+    gemini_timeout: float = 30.0
+    # A lib tenta 6 vezes por padrão; com timeout, isso vira 6x o tempo de
+    # espera no pior caso. 2 cobre a falha transitória sem virar um bloqueio.
+    gemini_max_retries: int = 2
+
+    @property
+    def api_keys_por_chave(self) -> dict[str, str]:
+        """`{chave: nome do consumidor}` — a busca é sempre pela chave recebida."""
+        mapa: dict[str, str] = {}
+        for entrada in _csv(self.api_keys):
+            nome, _, chave = entrada.partition(":")
+            if chave:
+                mapa[chave.strip()] = nome.strip()
+        return mapa
+
+    @property
+    def cors_origins_lista(self) -> list[str]:
+        """Origens explícitas. "*" é descartado: com autenticação por header,
+        liberar qualquer origem significa que qualquer página pode gastar a
+        chave de quem a estiver usando. Origem nova entra no .env, uma a uma."""
+        return [origem for origem in _csv(self.cors_origins) if origem != "*"]
 
 
 settings = Settings()

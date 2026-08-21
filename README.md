@@ -64,18 +64,29 @@ ingestão — nenhuma infra nova. Liga/desliga com `CACHE_ENABLED`
 **Entrypoints** — `scripts/ingest.py` (indexa um ou mais assuntos) e
 `scripts/ask.py` (pergunta, com `--debug` para inspecionar os chunks e scores).
 `app/main.py` monta a API em `app/api/` (FastAPI): `POST /v1/ask`,
-`GET /v1/health`, `GET /v1/assuntos` — caminho já pronto para plugar um front
-ou o AVA da instituição depois.
+`GET /v1/assuntos`, `GET /v1/health` (liveness) e `GET /v1/ready` (readiness) —
+caminho já pronto para plugar um front ou o AVA da instituição depois.
+
+**Segurança da borda** — `/ask` e `/assuntos` exigem `X-API-Key`, com uma chave
+por integração (`API_KEYS=nome:chave,...`): é o que permite atribuir o custo do
+Gemini por canal e revogar um consumidor sem derrubar os outros. Cada `/ask`
+que não bate cache é uma chamada paga mais até 5 buscas web, então o endpoint
+aberto seria um proxy grátis para a cota da instituição. Sobre isso vêm rate
+limit por consumidor (janela deslizante de 60s) e um teto diário do processo,
+CORS restrito às origens do `.env`, e timeout na chamada ao Gemini. Ver
+`app/api/deps.py`, `app/api/ratelimit.py` e `app/api/app.py`.
 
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
 
-**Testes** — 47 testes cobrindo chunking, ids determinísticos, corte por
+**Testes** — 174 testes cobrindo chunking, ids determinísticos, corte por
 limiar, filtro por assunto, formatação de citação, o guardrail do agente, o
-hit/miss do cache de resposta e o fallback de busca externa (allowlist, domínio
+hit/miss do cache de resposta, o fallback de busca externa (allowlist, domínio
 sósia, redirect do buscador, corte por similaridade, blocklist de assunto
-sensível e degradação em caso de rate limit). Rodam sem banco, sem chave de API
-e **sem rede**, usando dublês de vector store, de LLM, de cache e de busca.
+sensível e degradação em caso de rate limit) e a borda HTTP inteira — contrato
+de resposta, cada código de erro, autenticação, CORS, a janela deslizante do
+rate limit e liveness vs. readiness. Rodam sem banco, sem chave de API e **sem
+rede**, usando dublês de vector store, de LLM, de cache, de busca e de relógio.
 
 ### Ainda não executado de ponta a ponta
 
@@ -118,9 +129,35 @@ python -m scripts.ask "Como envio uma atividade no Canvas?"
 python -m scripts.ask "Como acesso o portal?" --assunto puc-digital --debug
 ```
 
-API HTTP (opcional): `uvicorn app.main:app --reload` → `POST /v1/ask`,
-`GET /v1/health`, `GET /v1/assuntos`. Warm-up (modelo de embeddings + conexão
-com o Postgres) roda no boot, não na 1ª request — ver `app/api/app.py`.
+API HTTP (opcional): `uvicorn app.main:app --reload`. Warm-up (modelo de
+embeddings + conexão com o Postgres) roda no boot, não na 1ª request — ver
+`app/api/app.py`.
+
+| Rota | Auth | Rate limit | Para quê |
+|---|---|---|---|
+| `POST /v1/ask` | `X-API-Key` | sim | A pergunta. É a rota que custa dinheiro |
+| `GET /v1/assuntos` | `X-API-Key` | não | Popula o `<select>` de assunto; DISTINCT barato |
+| `GET /v1/health` | público | não | Liveness: o processo responde. Não checa dependência |
+| `GET /v1/ready` | público | não | Readiness: Postgres + chave do LLM. 503 se algo faltar |
+
+`/health` e `/ready` são coisas diferentes de propósito: reiniciar a app porque
+o Postgres caiu não conserta o Postgres — só derruba junto o que ainda saía do
+cache. Quem decide reiniciar lê `/health`; quem decide mandar tráfego lê `/ready`.
+
+```bash
+# cadastre ao menos uma chave no .env antes (API_KEYS=demo:...); gere com:
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+curl -s localhost:8000/v1/ready
+curl -s -X POST localhost:8000/v1/ask \
+  -H "X-API-Key: $CHAVE" -H "Content-Type: application/json" \
+  -d '{"pergunta": "Como envio uma atividade no Canvas?"}'
+```
+
+Em desenvolvimento local, `API_AUTH_ENABLED=false` desliga a autenticação. Com
+ela ligada e `API_KEYS` vazia, as rotas protegidas respondem **503**, nunca
+liberam o acesso: um erro de configuração que abre o endpoint não aparece em
+teste nenhum — só na fatura.
 
 Testes: `pytest` (não precisa de banco nem de chave de API).
 

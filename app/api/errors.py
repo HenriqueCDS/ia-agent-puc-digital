@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError
 
+from app.api.ratelimit import RateLimitExcedido
 from app.api.schemas import ErroOut
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,28 @@ class AssuntoInvalido(ValueError):
         super().__init__(f'Assunto "{assunto}" não existe. Válidos: {opcoes}')
 
 
-def _envelope(request: Request, status: int, erro: str, detalhe: str) -> JSONResponse:
+class NaoAutenticado(Exception):
+    """Chave de API ausente ou inválida (ver `deps.get_consumidor`).
+
+    401 e não 403: a diferença importa para quem integra. 401 diz "identifique-se
+    / sua credencial não vale" — reenviar com outra chave pode funcionar. 403
+    diria "identificamos você e você não pode", que não é o caso aqui.
+
+    A mensagem NUNCA diz se a chave existe mas está errada ou se não existe:
+    isso transformaria o endpoint num oráculo para enumerar chaves válidas.
+    """
+
+
+def _envelope(
+    request: Request,
+    status: int,
+    erro: str,
+    detalhe: str,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None)
     corpo = ErroOut(erro=erro, detalhe=detalhe, request_id=request_id)
-    return JSONResponse(status_code=status, content=corpo.model_dump())
+    return JSONResponse(status_code=status, content=corpo.model_dump(), headers=headers)
 
 
 def registrar_handlers(app: FastAPI) -> None:
@@ -54,6 +73,25 @@ def registrar_handlers(app: FastAPI) -> None:
         # Ex.: pergunta vazia (app/agent/preprocess.normalize). AssuntoInvalido
         # já foi pego pelo handler mais específico acima.
         return _envelope(request, 422, "pergunta_invalida", str(exc))
+
+    @app.exception_handler(NaoAutenticado)
+    async def _nao_autenticado(request: Request, exc: NaoAutenticado) -> JSONResponse:
+        # `WWW-Authenticate` não se aplica: o esquema é uma chave em header
+        # próprio, não HTTP Authentication — anunciar `Basic`/`Bearer` faria o
+        # navegador abrir a caixa de login errada.
+        return _envelope(request, 401, "nao_autenticado", str(exc))
+
+    @app.exception_handler(RateLimitExcedido)
+    async def _rate_limit(request: Request, exc: RateLimitExcedido) -> JSONResponse:
+        # `Retry-After` é o que separa um cliente que espera do que entra em
+        # loop de retry e piora o congestionamento que causou o 429.
+        return _envelope(
+            request,
+            429,
+            "rate_limit",
+            str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        )
 
     @app.exception_handler(NotImplementedError)
     async def _nao_suportado(request: Request, exc: NotImplementedError) -> JSONResponse:

@@ -6,12 +6,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api.errors import registrar_handlers
+from app.api.ratelimit import reset_rate_limiter
 from app.api.routers.v1 import router as v1_router
+from app.core.config import settings
 from app.core import telemetry
 from app.db import telemetry_store
 from app.db.vector_store import get_vector_store
@@ -75,6 +78,33 @@ class _RequestIdMiddleware:
         await self.app(scope, receive, _send_com_header)
 
 
+def _configurar_cors(app: FastAPI) -> None:
+    """CORS só para as origens declaradas no .env (T2.2).
+
+    Sem origem configurada, o middleware NÃO entra: a ausência de cabeçalho
+    CORS é o que já bloqueia a chamada cruzada no navegador, e a demo servida
+    pela própria API (T3.1) é mesma origem — não precisa de nada disto.
+
+    `allow_credentials=False` de propósito: a autenticação daqui é uma chave em
+    header, não cookie de sessão. Ligar credentials sem precisar é o que torna
+    um CORS mal configurado explorável de verdade. `*` é filtrado antes, em
+    `settings.cors_origins_lista`.
+    """
+    origens = settings.cors_origins_lista
+    if not origens:
+        return
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origens,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],  # o que a v1 expõe; não abrir o resto
+        allow_headers=["Content-Type", "X-API-Key"],
+        expose_headers=["X-Request-Id", "Retry-After"],  # inúteis se o JS não puder lê-los
+    )
+    logger.info("CORS habilitado para: %s", ", ".join(origens))
+
+
 def create_app() -> FastAPI:
     telemetry.configurar_logs()
     telemetry_store.habilitar()
@@ -85,8 +115,23 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
+    _configurar_cors(app)
     app.add_middleware(_RequestIdMiddleware)
     registrar_handlers(app)
     app.include_router(v1_router)
+
+    # Contadores de rate limit são por processo (ver ratelimit.py). Dois apps
+    # criados no mesmo processo — o que só acontece em teste — não podem herdar
+    # o balde um do outro, senão a ordem dos testes muda o resultado.
+    reset_rate_limiter()
+
+    if settings.api_auth_enabled and not settings.api_keys_por_chave:
+        # Visível no boot, não na primeira request: as rotas protegidas vão
+        # responder 503 (ver deps.get_consumidor) e o motivo precisa estar no
+        # log antes de alguém abrir um chamado.
+        logger.error(
+            "API_AUTH_ENABLED=true e nenhuma chave em API_KEYS: /v1/ask e "
+            "/v1/assuntos vão responder 503 até o .env ser corrigido."
+        )
 
     return app

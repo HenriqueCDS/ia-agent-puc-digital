@@ -246,9 +246,9 @@ def test_base_insuficiente_sem_fallback_habilitado_encaminha_para_a_secretaria(m
 
 
 def test_cache_de_veto_insuficiente_repete_o_roteamento_para_a_web(monkeypatch):
-    """O texto cacheado para um conjunto de chunks pode ser CONTEXTO_INSUFICIENTE
-    (ver `_tentar_base`). Um cache hit nesse valor não pode virar o marcador cru
-    na resposta do aluno: precisa repetir o mesmo roteamento para a web, sem
+    """O texto cacheado para uma pergunta pode ser CONTEXTO_INSUFICIENTE (ver
+    `_tentar_base`). Um cache hit nesse valor não pode virar o marcador cru na
+    resposta do aluno: precisa repetir o mesmo roteamento para a web, sem
     chamar o LLM da base de novo."""
     monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
     monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
@@ -260,9 +260,10 @@ def test_cache_de_veto_insuficiente_repete_o_roteamento_para_a_web(monkeypatch):
     primeiro = responder.answer(Query(text="como envio atividade?"), llm=llm1)
     assert primeiro.text == "Resposta da web (1a chamada)."
 
-    # Pergunta parafraseada recupera o mesmo chunk -> mesma cache_key.
+    # MESMA pergunta (só a pontuação muda) -> mesma cache_key depois de T2.4.
+    # O cache devolve CONTEXTO_INSUFICIENTE e o roteamento para a web se repete.
     llm2 = FakeLLM(resposta="Resposta da web (2a chamada).")
-    segundo = responder.answer(Query(text="como faço para mandar a atividade?"), llm=llm2)
+    segundo = responder.answer(Query(text="Como envio atividade"), llm=llm2)
 
     assert segundo.text == "Resposta da web (2a chamada)."
     assert segundo.origem == "web"
@@ -325,7 +326,9 @@ def test_fonte_unica_forte_nao_usa_alta_confianca(monkeypatch):
     assert "sem ressalvas" not in prompt
 
 
-def test_pergunta_parafraseada_com_mesmos_chunks_usa_cache_e_nao_chama_llm(monkeypatch):
+def test_mesma_pergunta_com_mesmos_chunks_usa_cache_e_nao_chama_llm(monkeypatch):
+    """A pergunta entra na chave (T2.4), mas normalizada: caixa, espaço
+    repetido e pontuação final não podem custar uma chamada nova ao LLM."""
     chunks = [_chunk(page=1)]
     monkeypatch.setattr(responder, "retrieve", lambda q: chunks)
 
@@ -333,12 +336,51 @@ def test_pergunta_parafraseada_com_mesmos_chunks_usa_cache_e_nao_chama_llm(monke
     assert primeiro.text == "Resposta gerada."
 
     llm2 = FakeLLM()
-    segundo = responder.answer(Query(text="como faço para mandar a atividade?"), llm=llm2)
+    segundo = responder.answer(Query(text="  Como  envio a Atividade  "), llm=llm2)
 
-    assert llm2.mensagens is None  # mesmo conjunto de chunks -> cache hit, sem chamar o LLM
+    assert llm2.mensagens is None  # mesma pergunta normalizada -> cache hit
     assert segundo.text == primeiro.text
     assert segundo.grounded is True
     assert segundo.sources == chunks  # fontes vêm do retrieval atual, não do cache
+
+
+def test_perguntas_diferentes_com_os_mesmos_chunks_nao_compartilham_cache(monkeypatch):
+    """T2.4 — o bug que esta tarefa existe para corrigir.
+
+    Antes, `_cache_key` era `assunto + alta_confiança + ids dos chunks`: o
+    texto da pergunta não entrava. Com `top_k=5` e limiar 0.35, duas perguntas
+    DIFERENTES sobre o mesmo tema recuperam plausivelmente os mesmos 5 chunks —
+    e a segunda recebia, do cache, a resposta da primeira. Este é o teste que
+    trava o comportamento: mesmo top-5, perguntas distintas, respostas
+    distintas.
+    """
+    chunks = [_chunk(page=1)]
+    monkeypatch.setattr(responder, "retrieve", lambda q: chunks)
+
+    primeira = responder.answer(
+        Query(text="como envio uma tarefa no Canvas?"),
+        llm=FakeLLM(resposta="Para enviar, clique em Enviar tarefa."),
+    )
+
+    llm2 = FakeLLM(resposta="A nota aparece em Notas, no menu do curso.")
+    segunda = responder.answer(Query(text="onde vejo a nota da tarefa no Canvas?"), llm=llm2)
+
+    assert llm2.mensagens is not None  # pergunta nova -> chamou o LLM, não serviu do cache
+    assert segunda.text != primeira.text
+    assert "nota" in segunda.text
+
+
+def test_assunto_diferente_nao_compartilha_cache(monkeypatch):
+    """O `assunto` continua na chave: a mesma pergunta filtrada por outra pasta
+    é outra pergunta (o retrieval pode devolver chunks de escopo diferente)."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+
+    responder.answer(Query(text="como envio a atividade?", assunto="canvas"), llm=FakeLLM())
+
+    llm2 = FakeLLM()
+    responder.answer(Query(text="como envio a atividade?", assunto="puc-digital"), llm=llm2)
+
+    assert llm2.mensagens is not None
 
 
 def test_chunks_diferentes_nao_reusam_a_mesma_entrada_de_cache(monkeypatch):

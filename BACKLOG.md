@@ -82,16 +82,28 @@ completando com `request_id` batendo no header e no corpo. Suíte inteira:
 
 ---
 
-## Sprint 2 — Segurança e correção
+## Sprint 2 — Segurança e correção ✅ concluída (2026-08-21)
+
+Tudo na borda (`app/api/`), exceto duas exceções declaradas: `_cache_key` em
+`app/agent/responder.py` (T2.4, que é correção de bug, não de borda) e
+`get_chat_model` em `app/providers/gemini.py` (T2.5).
+
+Validado contra o Postgres real com `lifespan` (não só com dublê): boot com
+warm-up 31,8s, `/v1/ready` 200 em 10ms com o banco de pé, `/v1/assuntos` sem
+chave e com chave errada barrado em 2-3ms **sem abrir conexão** (com chave
+válida a mesma rota leva 407ms — a diferença é a prova de que a autenticação
+roda antes do banco), CORS devolvendo o cabeçalho só para a origem declarada,
+4ª chamada acima do limite bloqueada com `Retry-After: 61`, e `APIKeyHeader`
+aparecendo no OpenAPI de `/v1/ask`. Suíte inteira: 174/174.
 
 | # | Tarefa | Arquivos | Critério de aceite | Esforço |
 |---|---|---|---|---|
-| **T2.1** | Auth por API key (`X-API-Key`), chaves por integração no `.env` | `app/api/deps.py`, `app/core/config.py` | Sem chave→401; chave inválida→401; `/health` continua público | 2h |
-| **T2.2** | CORS com origens por env (nunca `*` junto com auth por header) | `app/api/app.py`, `.env.example` | Front em outra origem chama a API; origem não listada é bloqueada | 1h |
-| **T2.3** | Rate limit por API key + teto global diário | `app/api/deps.py` | Estourou→429 com `Retry-After`. Protege cota do Gemini e o buscador do 429 | 3h |
-| **T2.4** | ⚠️ **Corrigir `_cache_key`** — hash da pergunta normalizada na chave | `app/agent/responder.py`, `tests/test_responder.py` | Duas perguntas distintas com o mesmo top-5 recebem respostas distintas | 1h |
-| **T2.5** | Timeout na chamada ao Gemini | `app/providers/gemini.py` | Request pendurada não segura thread do pool indefinidamente | 30min |
-| **T2.6** | `/v1/health` (liveness) + `/v1/ready` (checa Postgres + chave) | `app/api/routers/v1.py` | Com o banco derrubado, `/ready` responde 503 — hoje `/health` mente "ok" | 1h |
+| ✅ **T2.1** | Auth por API key (`X-API-Key`), chaves por integração no `.env` | `app/api/deps.py`, `app/api/errors.py`, `app/core/config.py` | Sem chave→401; chave inválida→401; `/health` continua público | 2h |
+| ✅ **T2.2** | CORS com origens por env (nunca `*` junto com auth por header) | `app/api/app.py`, `.env.example` | Front em outra origem chama a API; origem não listada é bloqueada | 1h |
+| ✅ **T2.3** | Rate limit por API key + teto global diário | `app/api/ratelimit.py`, `app/api/deps.py` | Estourou→429 com `Retry-After`. Protege cota do Gemini e o buscador do 429 | 3h |
+| ✅ **T2.4** | **Corrigir `_cache_key`** — pergunta normalizada na chave | `app/agent/responder.py`, `tests/test_responder.py` | Duas perguntas distintas com o mesmo top-5 recebem respostas distintas | 1h |
+| ✅ **T2.5** | Timeout na chamada ao Gemini | `app/providers/gemini.py` | Request pendurada não segura thread do pool indefinidamente | 30min |
+| ✅ **T2.6** | `/v1/health` (liveness) + `/v1/ready` (checa Postgres + chave) | `app/api/routers/v1.py`, `app/api/schemas.py` | Com o banco derrubado, `/ready` responde 503 — hoje `/health` mente "ok" | 1h |
 
 ### Por que cada item
 
@@ -100,13 +112,52 @@ completando com `request_id` batendo no header e no corpo. Suíte inteira:
   instituição. Sem identificar o consumidor também não há como aplicar
   quota nem atribuir custo por canal, e rate limit só por IP é inútil numa
   rede institucional atrás de NAT.
-- **T2.4** — `_cache_key` é `assunto + alta_confiança + ids dos chunks`; o
-  **texto da pergunta não entra na chave**. Duas perguntas *diferentes* que
-  recuperam o mesmo top-5 recebem a mesma resposta — ex.: "como envio uma
+- **T2.4** — `_cache_key` era `assunto + alta_confiança + ids dos chunks`; o
+  **texto da pergunta não entrava na chave**. Duas perguntas *diferentes* que
+  recuperam o mesmo top-5 recebiam a mesma resposta — ex.: "como envio uma
   tarefa no Canvas?" e "onde vejo a nota da tarefa no Canvas?"
   plausivelmente recuperam os mesmos 5 chunks com `top_k=5` e limiar 0.35.
-  A invalidação por id continua valendo; o que quebra é a premissa "mesmo
+  A invalidação por id continua valendo; o que quebrava é a premissa "mesmo
   conjunto de chunks ⇒ mesma resposta", verdadeira só para paráfrases.
+
+### Achados ao implementar
+
+- **T2.1 — a ordem das dependências na assinatura da rota é de segurança, não
+  de estilo.** O FastAPI resolve os `Depends` na ordem em que aparecem: com
+  `get_assuntos_validos` antes da autenticação, uma request sem chave ainda
+  abria conexão e rodava o `DISTINCT` antes de tomar 401 — o endpoint fechado
+  continuava servindo de carga grátis ao banco. Medido no smoke contra o
+  Postgres real: 2-3ms sem chave contra 407ms com chave válida. Há teste
+  travando isso (`test_assuntos_sem_chave_da_401_sem_tocar_no_banco`).
+
+- **T2.1 — `auto_error=False` no `APIKeyHeader`.** O default do FastAPI devolve
+  um 403 próprio, fora do envelope de `errors.py` — a mesma API passaria a ter
+  dois formatos de erro. Com `auto_error=False`, a ausência do header vira
+  `None` e o 401 sai pelo mesmo caminho de todo o resto. (401 e não 403 de
+  propósito: 401 diz "sua credencial não vale, tente outra"; 403 diria
+  "identificamos você e você não pode", que não é o caso.)
+
+- **T2.3 — janela deslizante, não contador que zera no minuto cheio.** Com
+  janela fixa, um limite de 20/min aceita 40 chamadas em 2 segundos em volta da
+  virada — exatamente o pico que o limite deveria conter. Há teste de regressão
+  para isso (`test_janela_fixa_seria_o_dobro_do_limite_na_virada`).
+
+- **T2.5 — timeout sem limitar retry não resolve nada.** O default de
+  `max_retries` da lib do Gemini é **6**: um timeout de 30s viraria 180s de
+  thread presa no pior caso, que é o problema que T2.5 existe para evitar. Os
+  dois viraram config (`GEMINI_TIMEOUT`, `GEMINI_MAX_RETRIES`).
+
+- **T2.6 — `/ready` é público de propósito.** Exigir chave nele impediria
+  justamente quem monitora de monitorar. O corpo diz *qual* dependência caiu
+  (`{"banco": false}`) e nada além disso — sem host, sem porta, sem mensagem do
+  driver. E a checagem da chave do LLM é só de presença: validar de verdade
+  custaria uma chamada paga ao Gemini a cada probe.
+
+**Limite conhecido do rate limit (T2.3):** o estado é em memória do processo.
+Com mais de um worker do uvicorn, cada um tem o seu contador e os tetos viram
+`N * limite`. Está documentado em `app/api/ratelimit.py` e amarrado a **T4.3**,
+que é onde a decisão de workers vs. RAM do modelo aparece — quando ela for
+tomada, só `RateLimiter` muda (`get_rate_limiter()` já é o único acesso).
 
 ---
 
@@ -165,8 +216,8 @@ Um arquivo HTML estático com `fetch`, sem framework e sem build (~150 linhas):
 | Sprint | Esforço | Destrava |
 |---|---|---|
 | S0 — Fundação | ~5h | Tudo |
-| S1 — Borda HTTP | ~13h | Integração multi-plataforma |
-| S2 — Segurança | ~8h | Exposição fora da máquina de desenvolvimento |
+| ✅ S1 — Borda HTTP | ~13h | Integração multi-plataforma |
+| ✅ S2 — Segurança | ~8h | Exposição fora da máquina de desenvolvimento |
 | S3 — Demo + sinal | ~11h | Demonstração e roadmap de conteúdo |
 
 **Caminho mais curto até uma demo defensável:**
@@ -177,17 +228,28 @@ Cerca de 12h, e já dá para mostrar funcionando com fontes clicáveis.
 
 ## Decisões pendentes
 
-1. **T2.4 — como corrigir a `_cache_key`?**
-   - (a) somar hash da pergunta normalizada à chave — perde hit rate,
-     elimina o erro, comportamento previsível;
-   - (b) cachear só no ramo `alta_confianca` — preserva mais hits e também
-     elimina o erro.
+1. ~~**T2.4 — como corrigir a `_cache_key`?**~~ **Resolvido em (a)**: a
+   pergunta normalizada (caixa, espaço repetido e pontuação final descartados)
+   entra na chave. (b) — cachear só no ramo `alta_confianca` — foi descartada
+   porque preservaria mais hits deixando o erro de pé justamente no ramo comum,
+   que é onde ele acontece. A normalização recupera parte do hit rate perdido
+   sem misturar perguntas de fato diferentes.
 
-   Sem decisão em contrário, seguir com **(a)**.
+2. **Ordem entre S2 e S3.** ~~Como está, S2 vem antes.~~ Resolvido pelos fatos:
+   S2 foi feita antes. **T2.2 (CORS) já está pronto para o front de T3.1**, que
+   de todo modo será servido da mesma origem (`StaticFiles`).
 
-2. **Ordem entre S2 e S3.** Como está, S2 vem antes. Se a prioridade for
-   demonstrar rápido para alguém, inverter — mas **T2.2 (CORS) sobe junto
-   com S3 de qualquer forma**, porque sem ele o front não chama a API.
+3. **NOVA — a demo (T3.1) precisa de uma chave de API no navegador.** Com T2.1
+   no lugar, um HTML estático que chama `/v1/ask` via `fetch` teria que carregar
+   a chave no JS, onde ela é pública para qualquer um que abra o DevTools.
+   Opções:
+   - (a) a rota `/demo` (mesma origem) injeta a chave no HTML no servidor e usa
+     uma chave própria, de baixo teto diário, revogável sem afetar o AVA;
+   - (b) sessão de demo: um cookie de curta duração emitido por `/demo`,
+     aceito como alternativa à `X-API-Key` só para essa origem.
+
+   Sem decisão em contrário, seguir com **(a)**: mantém a demo como um arquivo
+   estático e não cria um segundo mecanismo de autenticação para manter.
 
 ---
 
@@ -201,16 +263,16 @@ multi-plataforma. Cada item virou uma tarefa acima.
 | Contrato de resposta perde a URL da fonte web e o score | T1.3 |
 | `origem: str` sem `Literal` — OpenAPI não documenta os valores | T1.4 |
 | Erro tem formato diferente do sucesso; falhas de infra viram 500 | T1.5 |
-| Sem autenticação — endpoint aberto é proxy grátis para o Gemini | T2.1 |
+| Sem autenticação — endpoint aberto é proxy grátis para o Gemini | ✅ T2.1 |
 | Sem versionamento de rota — a primeira melhoria de contrato quebra quem integrou | T1.1 |
-| CORS ausente — o front de demo não consegue chamar a API | T2.2 |
+| CORS ausente — o front de demo não consegue chamar a API | ✅ T2.2 |
 | Sem limite de tamanho na pergunta; `assunto` é texto livre | T1.6, T1.7 |
-| `/health` retorna "ok" incondicionalmente | T2.6 |
+| `/health` retorna "ok" incondicionalmente | ✅ T2.6 |
 | Embeddings carregam lazy no primeiro request (modelo de ~1 GB) | T1.2 |
-| `llm.invoke()` sem timeout | T2.5 |
-| Rate limiting ausente | T2.3 |
+| `llm.invoke()` sem timeout | ✅ T2.5 |
+| Rate limiting ausente | ✅ T2.3 |
 | Interações não são registradas — sinal de lacuna é descartado | T3.2, T3.3 |
-| Cache pode servir a resposta de outra pergunta | T2.4 |
+| Cache pode servir a resposta de outra pergunta | ✅ T2.4 |
 | Sem memória — follow-up quebra o retrieval | T4.1 |
 
 **A estrutura atual do FastAPI comporta isso?** O núcleo sim, a borda não —

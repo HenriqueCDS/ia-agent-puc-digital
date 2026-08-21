@@ -43,6 +43,15 @@ class AssuntosOut(BaseModel):
     assuntos: list[str]
 
 
+class ProntidaoOut(BaseModel):
+    """Resposta de `/v1/ready` (T2.6). `checagens` diz QUAL dependência caiu —
+    sem isso, um 503 obriga quem opera a ir no log da app para saber se o
+    problema é o Postgres ou a chave do LLM."""
+
+    status: Literal["ok", "indisponivel"]
+    checagens: dict[str, bool]
+
+
 class ErroOut(BaseModel):
     """Envelope único para toda resposta de erro — ver app/api/errors.py.
 

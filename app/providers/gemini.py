@@ -51,8 +51,21 @@ def get_embeddings() -> Embeddings:
 
 @lru_cache(maxsize=1)
 def get_chat_model() -> BaseChatModel:
+    """T2.5 — `timeout` e `max_retries` explícitos.
+
+    As rotas da API são síncronas (`def`), então o FastAPI as roda no
+    threadpool: uma chamada pendurada no Gemini segura uma thread até o socket
+    morrer sozinho. Poucas dessas e o pool acaba — o servidor inteiro para de
+    responder, inclusive as perguntas que sairiam do cache sem tocar no LLM.
+
+    `max_retries` também é explícito porque o default da lib é 6, e timeout sem
+    limitar retry não resolve nada: o pior caso vira `6 * timeout`. Com 2 e 30s,
+    o teto de espera é o dobro do orçamento, não doze vezes.
+    """
     return ChatGoogleGenerativeAI(
         model=settings.chat_model,
         google_api_key=_require_api_key(),
         temperature=0.1,  # suporte acadêmico: previsibilidade > criatividade
+        timeout=settings.gemini_timeout,
+        max_retries=settings.gemini_max_retries,
     )
