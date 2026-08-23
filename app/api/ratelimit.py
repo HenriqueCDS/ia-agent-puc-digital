@@ -39,12 +39,21 @@ class RateLimitExcedido(Exception):
 
 
 class RateLimiter:
-    def __init__(self, por_minuto: int, teto_diario: int):
+    def __init__(
+        self,
+        por_minuto: int,
+        teto_diario: int,
+        tetos_diarios: dict[str, int] | None = None,
+    ):
         self.por_minuto = por_minuto
         self.teto_diario = teto_diario
+        # Teto diário próprio de alguns consumidores (T3.1). Quem não está aqui
+        # responde só ao teto global.
+        self.tetos_diarios = tetos_diarios or {}
         self._chamadas: dict[str, deque[float]] = defaultdict(deque)
         self._dia = self._hoje()
         self._total_do_dia = 0
+        self._total_por_consumidor: dict[str, int] = defaultdict(int)
         # As rotas são `def` (síncronas), então o FastAPI as executa no
         # threadpool: dois consumidores podem estar aqui de verdade ao mesmo
         # tempo. Sem o lock, `deque` e contador viram corrida.
@@ -63,19 +72,32 @@ class RateLimiter:
     def verificar(self, consumidor: str) -> None:
         """Registra uma chamada ou levanta `RateLimitExcedido`.
 
-        O teto diário é checado ANTES do limite por consumidor: estourado o
+        Os tetos DIÁRIOS são checados antes do limite por minuto: estourado o
         orçamento do dia, o `Retry-After` correto é o da virada do dia, não o
-        dos 60 segundos da janela.
+        dos 60 segundos da janela. Entre os dois diários, o global vem primeiro
+        — é o limite de custo do serviço inteiro, e nenhum consumidor deve
+        conseguir passar dele por ter um teto próprio maior.
         """
         agora = time.monotonic()
         with self._lock:
             dia = self._hoje()
             if dia != self._dia:
                 self._dia, self._total_do_dia = dia, 0
+                self._total_por_consumidor.clear()
 
             if self._total_do_dia >= self.teto_diario:
                 raise RateLimitExcedido(
                     f"Teto diário do serviço ({self.teto_diario} chamadas) atingido.",
+                    self._segundos_ate_amanha(),
+                )
+
+            teto_proprio = self.tetos_diarios.get(consumidor)
+            if teto_proprio is not None and self._total_por_consumidor[consumidor] >= teto_proprio:
+                # Não diz o nome do consumidor na mensagem: ela chega ao
+                # navegador na demo, e o rótulo interno da integração não é
+                # informação que precise sair daqui.
+                raise RateLimitExcedido(
+                    f"Teto diário desta integração ({teto_proprio} chamadas) atingido.",
                     self._segundos_ate_amanha(),
                 )
 
@@ -93,6 +115,7 @@ class RateLimiter:
 
             janela.append(agora)
             self._total_do_dia += 1
+            self._total_por_consumidor[consumidor] += 1
 
     def esquecer(self, consumidor: str) -> None:
         """Só para teste: zera a janela de um consumidor."""
@@ -114,6 +137,7 @@ def get_rate_limiter() -> RateLimiter:
             _limiter = RateLimiter(
                 por_minuto=settings.rate_limit_por_minuto,
                 teto_diario=settings.rate_limit_diario_global,
+                tetos_diarios=settings.tetos_diarios_por_consumidor,
             )
         return _limiter
 

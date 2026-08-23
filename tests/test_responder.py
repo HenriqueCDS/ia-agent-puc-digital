@@ -342,6 +342,10 @@ def test_mesma_pergunta_com_mesmos_chunks_usa_cache_e_nao_chama_llm(monkeypatch)
     assert segundo.text == primeiro.text
     assert segundo.grounded is True
     assert segundo.sources == chunks  # fontes vêm do retrieval atual, não do cache
+    # T3.1 — o cache deixa de ser só um detalhe de telemetria e vira propriedade
+    # da resposta: é o que a demo mostra ao lado da latência para explicar por
+    # que a mesma pergunta voltou em milissegundos.
+    assert (primeiro.cached, segundo.cached) == (False, True)
 
 
 def test_perguntas_diferentes_com_os_mesmos_chunks_nao_compartilham_cache(monkeypatch):

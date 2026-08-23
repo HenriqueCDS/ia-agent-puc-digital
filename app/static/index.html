@@ -1,0 +1,677 @@
+<!doctype html>
+<!--
+  Demo do Agente de Suporte Acadêmico (T3.1).
+
+  Um arquivo, sem build, sem framework e sem NENHUM recurso externo: nada de CDN,
+  nada de fonte remota. Não é minimalismo por estética — é o que permite abrir a
+  demo numa máquina sem internet (a banca, a sala de aula) e o que garante que a
+  página não vaza a pergunta do aluno para um terceiro.
+
+  A chave de API é injetada pelo servidor em `__API_KEY__` (ver
+  app/api/routers/demo.py). No arquivo em disco fica só o placeholder.
+
+  O que esta página existe para demonstrar, em ordem de importância:
+    1. o BADGE DE ORIGEM — o guardrail funcionando. É o que separa este agente
+       de um chatbot genérico: dá para ver, em cada resposta, se ela veio do
+       material interno, de uma página pública oficial, ou se o agente se
+       recusou a responder e encaminhou;
+    2. as FONTES clicáveis — confiança na resposta;
+    3. latência e cache hit — o custo por trás de cada pergunta;
+    4. o JSON cru — para quem quiser ver o contrato da API sem abrir o Swagger.
+-->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agente de Suporte Acadêmico</title>
+<link rel="icon" href="/static/puc-brasao.png">
+<style>
+  /*
+    Paleta institucional da PUC-Campinas, lida do CSS do tema oficial do site
+    (wp-content/themes/puc-2020/css/custom.css), não de memória:
+
+      #003383  azul institucional — a cor dominante (32 ocorrências no tema)
+      #93050D  bordô              — acento, usado aqui nos avisos de erro
+      #F7FAFD  fundo azulado claro
+      #161615  quase-preto do texto
+
+    (O dourado #D4A23F do tema não entra: o logotipo institucional já traz o
+    ouro do brasão, e repeti-lo na interface competiria com ele.)
+
+    Tokens: o tema escuro redefine só as variáveis, nunca as regras. E o escuro
+    NÃO reusa #003383 — azul de 4% de luminância sobre fundo escuro é ilegível;
+    ele vira um azul claro derivado, que é a leitura correta da mesma marca.
+  */
+  :root {
+    --marca: #003383;
+    --marca-forte: #00276a;      /* hover/pressionado */
+    --marca-suave: #e2eaf7;
+    --fundo: #f7fafd;
+    --superficie: #ffffff;
+    --superficie-2: #eef2f8;
+    --borda: #dbe3ee;
+    --texto: #161615;
+    --texto-fraco: #5d6675;
+    --base: #2f7d4f;
+    --base-fundo: #e6f2ea;
+    --web: #8a6410;
+    --web-fundo: #faf1dc;
+    /* Teal (#2B969E, também do tema) e não azul: "encaminhado" precisa ser
+       distinguível do azul da marca, senão o badge some dentro da interface. */
+    --encaminhado: #1f6d74;
+    --encaminhado-fundo: #e2f1f2;
+    --nenhuma: #5d6675;
+    --nenhuma-fundo: #eceef2;
+    --erro: #93050d;             /* o bordô institucional; aqui vale como erro */
+    --erro-fundo: #fbeaea;
+    --raio: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --marca: #7ba7e8;
+      --marca-forte: #9cbef0;
+      --marca-suave: #16264a;
+      --fundo: #12151c;
+      --superficie: #1a1f2b;
+      --superficie-2: #232a38;
+      --borda: #2f3848;
+      --texto: #e6eaf2;
+      --texto-fraco: #98a2b5;
+      --base: #7fc79b;
+      --base-fundo: #1a3a29;
+      --web: #dfb256;
+      --web-fundo: #3a2f16;
+      --encaminhado: #6fc3cb;
+      --encaminhado-fundo: #12363a;
+      --nenhuma: #98a2b5;
+      --nenhuma-fundo: #2a3140;
+      --erro: #f0959b;
+      --erro-fundo: #3a1518;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--fundo);
+    color: var(--texto);
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---------- cabeçalho ---------- */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--borda);
+    background: var(--superficie);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .titulo { font-weight: 600; letter-spacing: -0.01em; }
+  .subtitulo { font-size: 12px; color: var(--texto-fraco); }
+  header .direita { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+
+  #estado {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--texto-fraco);
+  }
+  #estado .ponto {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--nenhuma);
+  }
+  #estado[data-pronto="sim"] .ponto { background: var(--base); }
+  #estado[data-pronto="nao"] .ponto { background: var(--erro); }
+
+  select {
+    font: inherit; font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 9px;
+    border: 1px solid var(--borda);
+    background: var(--superficie-2);
+    color: var(--texto);
+    max-width: 190px;
+  }
+
+  /* ---------- identidade visual ----------
+     Dois recortes do logotipo institucional, servidos de `/static` (mesma
+     origem — a página continua sem depender de host externo):
+
+       puc-campinas.png  brasão + assinatura "PUC CAMPINAS" — o cabeçalho
+       puc-brasao.png    só o brasão, quadrado — o avatar e o estado vazio
+
+     O lockup horizontal não serve como avatar de 28px (a assinatura vira um
+     borrão), e o brasão sozinho no cabeçalho perderia o nome da instituição.
+     Por isso os dois, cada um onde é legível. Ambos têm canal alpha, então
+     funcionam nos dois temas sem placa branca por baixo. */
+  .logo { height: 44px; width: auto; flex: none; }
+  .divisor { width: 1px; height: 30px; background: var(--borda); flex: none; }
+  .brasao { width: 28px; height: 28px; flex: none; object-fit: contain; }
+
+  /* ---------- conversa ---------- */
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 20px 8px;
+  }
+  .conversa { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+
+  .msg { display: flex; gap: 12px; }
+  .msg.aluno { justify-content: flex-end; }
+  .msg.aluno .conteudo {
+    background: var(--marca);
+    color: #fff;
+    padding: 10px 15px;
+    border-radius: var(--raio) var(--raio) 4px var(--raio);
+    max-width: 78%;
+    white-space: pre-wrap;
+  }
+  .msg.agente .conteudo { min-width: 0; flex: 1; }
+  .resposta { white-space: normal; }
+  .resposta p { margin: 0 0 10px; }
+  .resposta ul, .resposta ol { margin: 0 0 10px; padding-left: 22px; }
+  .resposta li { margin-bottom: 4px; }
+  .resposta code {
+    background: var(--superficie-2);
+    padding: 1px 5px; border-radius: 5px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em;
+  }
+  .resposta a { color: var(--marca); }
+
+  /* ---------- badge de origem: o item nº 1 da demo ---------- */
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600;
+    padding: 3px 10px; border-radius: 999px;
+    border: 1px solid transparent;
+  }
+  .badge[data-origem="base"]        { color: var(--base);        background: var(--base-fundo); }
+  .badge[data-origem="web"]         { color: var(--web);         background: var(--web-fundo); }
+  .badge[data-origem="encaminhado"] { color: var(--encaminhado); background: var(--encaminhado-fundo); }
+  .badge[data-origem="nenhuma"]     { color: var(--nenhuma);     background: var(--nenhuma-fundo); }
+  .chip {
+    font-size: 12px; color: var(--texto-fraco);
+    padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--borda);
+  }
+
+  .fontes { margin-top: 12px; font-size: 13px; }
+  .fontes h4 {
+    margin: 0 0 6px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.07em; color: var(--texto-fraco);
+  }
+  .fontes ol { margin: 0; padding-left: 20px; }
+  .fontes li { margin-bottom: 4px; color: var(--texto-fraco); }
+  .fontes a { color: var(--marca); }
+  .score { font-size: 11px; opacity: 0.75; }
+
+  details { margin-top: 12px; font-size: 12px; }
+  details summary { cursor: pointer; color: var(--texto-fraco); }
+  details pre {
+    margin: 8px 0 0; padding: 12px;
+    background: var(--superficie-2); border: 1px solid var(--borda);
+    border-radius: 10px; overflow-x: auto;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11.5px;
+    line-height: 1.5;
+  }
+
+  .aviso {
+    border: 1px solid var(--borda); border-left: 3px solid var(--erro);
+    background: var(--erro-fundo); color: var(--erro);
+    padding: 10px 14px; border-radius: 10px; font-size: 14px;
+  }
+  .aviso strong { display: block; margin-bottom: 2px; }
+
+  /* ---------- estado vazio ---------- */
+  #vazio { text-align: center; padding: 46px 0 20px; }
+  #vazio h1 { font-size: 22px; font-weight: 600; margin: 18px 0 6px; letter-spacing: -0.02em; }
+  #vazio p { color: var(--texto-fraco); margin: 0 auto 22px; max-width: 460px; }
+  .sugestoes { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  .sugestoes button {
+    font: inherit; font-size: 13px; cursor: pointer;
+    padding: 8px 14px; border-radius: 999px;
+    border: 1px solid var(--borda); background: var(--superficie); color: var(--texto);
+  }
+  .sugestoes button:hover { border-color: var(--marca); color: var(--marca); }
+
+  /* ---------- "processando" ---------- */
+  .pensando { display: flex; gap: 9px; align-items: center; min-height: 28px; flex-wrap: wrap; }
+  .pontos { display: inline-flex; gap: 5px; }
+  .pontos i {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--marca);
+    animation: pulsa 1.3s ease-in-out infinite;
+  }
+  .pontos i:nth-child(2) { animation-delay: 0.18s; }
+  .pontos i:nth-child(3) { animation-delay: 0.36s; }
+  @keyframes pulsa { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .pontos i { animation: none; opacity: 0.6; } }
+
+  .pensando .rotulo { color: var(--texto-fraco); font-size: 14px; }
+  /* Tabular para o número não "pular" de largura a cada segundo. */
+  .pensando .cronometro {
+    color: var(--texto-fraco); font-size: 12.5px; opacity: 0.8;
+    font-variant-numeric: tabular-nums;
+  }
+  .pensando .nota {
+    flex-basis: 100%; font-size: 12px; color: var(--texto-fraco); opacity: 0.85;
+  }
+
+  /* ---------- composer ---------- */
+  footer {
+    padding: 12px 20px 18px;
+    background: linear-gradient(to top, var(--fundo) 65%, transparent);
+    position: sticky; bottom: 0;
+  }
+  .composer {
+    max-width: 760px; margin: 0 auto;
+    display: flex; gap: 10px; align-items: flex-end;
+    background: var(--superficie);
+    border: 1px solid var(--borda);
+    border-radius: var(--raio);
+    padding: 8px 8px 8px 14px;
+  }
+  .composer:focus-within { border-color: var(--marca); }
+  textarea {
+    flex: 1; border: 0; outline: 0; resize: none;
+    background: transparent; color: var(--texto);
+    font: inherit; line-height: 1.5;
+    max-height: 180px; padding: 6px 0;
+  }
+  #enviar {
+    flex: none; width: 34px; height: 34px;
+    border: 0; border-radius: 9px; cursor: pointer;
+    background: var(--marca); color: #fff;
+    display: grid; place-items: center;
+  }
+  #enviar:hover:not(:disabled) { background: var(--marca-forte); }
+  #enviar:disabled { opacity: 0.35; cursor: default; }
+  .rodape-dica {
+    max-width: 760px; margin: 8px auto 0;
+    font-size: 11.5px; color: var(--texto-fraco); text-align: center;
+  }
+
+  @media (max-width: 560px) {
+    header { flex-wrap: wrap; }
+    header .direita { width: 100%; margin-left: 0; }
+    select { max-width: none; flex: 1; }
+    .msg.aluno .conteudo { max-width: 88%; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Definições SVG reaproveitadas por <use>. Nada é renderizado daqui. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="seta" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
+            stroke-linejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header>
+  <img class="logo" src="/static/puc-campinas.png" alt="PUC-Campinas" width="67" height="44">
+  <span class="divisor" aria-hidden="true"></span>
+  <div>
+    <div class="titulo">Agente de Suporte Acadêmico</div>
+    <div class="subtitulo">PUC Digital &middot; EAD</div>
+  </div>
+  <div class="direita">
+    <span id="estado" title="Resultado de GET /v1/ready"><span class="ponto"></span><span id="estado-texto">verificando…</span></span>
+    <select id="assunto" aria-label="Filtrar por assunto">
+      <option value="">Todos os assuntos</option>
+    </select>
+  </div>
+</header>
+
+<main>
+  <div class="conversa" id="conversa" aria-live="polite">
+    <div id="vazio">
+      <img src="/static/puc-brasao.png" alt="" width="66" height="66" style="opacity:.95">
+      <h1>Como posso ajudar?</h1>
+      <p>
+        Respondo com base no material da instituição. Quando a resposta não está na
+        base, digo de onde ela veio — ou encaminho para quem resolve.
+      </p>
+      <div class="sugestoes" id="sugestoes">
+        <button type="button">Como envio uma atividade no Canvas?</button>
+        <button type="button">Onde vejo minhas notas na plataforma?</button>
+        <button type="button">Esqueci minha senha de acesso</button>
+        <button type="button">Como faço a rematrícula?</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <form class="composer" id="form">
+    <textarea id="pergunta" rows="1" maxlength="1000" placeholder="Escreva sua pergunta…"
+              aria-label="Pergunta"></textarea>
+    <button id="enviar" type="submit" aria-label="Enviar pergunta" disabled>
+      <svg width="19" height="19" aria-hidden="true"><use href="#seta"/></svg>
+    </button>
+  </form>
+  <div class="rodape-dica">Enter envia &middot; Shift+Enter quebra linha</div>
+</footer>
+
+<script>
+"use strict";
+
+// Injetada pelo servidor em app/api/routers/demo.py. Vazia quando a API está
+// com autenticação desligada (desenvolvimento local).
+const API_KEY = "__API_KEY__";
+
+const $ = (id) => document.getElementById(id);
+const conversa = $("conversa");
+const campo = $("pergunta");
+const botao = $("enviar");
+
+const ORIGENS = {
+  base:        { rotulo: "material interno",  titulo: "A resposta saiu da base indexada da instituição (RAG)." },
+  web:         { rotulo: "página oficial",    titulo: "A base não cobria a pergunta; a resposta veio de um domínio público oficial da allowlist." },
+  encaminhado: { rotulo: "encaminhado",       titulo: "Assunto de outro departamento: barrado na triagem, antes de gastar RAG ou LLM." },
+  nenhuma:     { rotulo: "sem resposta",      titulo: "Nada relevante em nenhuma fonte — o agente prefere não responder a inventar um procedimento." },
+};
+
+function cabecalhos() {
+  const h = { "Content-Type": "application/json" };
+  if (API_KEY) h["X-API-Key"] = API_KEY;
+  return h;
+}
+
+function escapar(txt) {
+  return txt.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/*
+ * Renderização mínima do markdown que o modelo de fato produz: listas, negrito,
+ * `código` e URL solta. Não é um parser — é o subconjunto que aparece nas
+ * respostas de procedimento ("1. Acesse... 2. Clique...") e cuja ausência faria
+ * a demo parecer pior do que o agente é.
+ *
+ * Escapa ANTES de aplicar qualquer regra: o texto vem do LLM, que por sua vez
+ * viu conteúdo de páginas externas. Nenhuma marcação do modelo pode virar HTML.
+ */
+function renderizarResposta(texto) {
+  const linhas = escapar(texto).split("\n");
+  let html = "", lista = null, paragrafo = [];
+
+  const fecharParagrafo = () => {
+    if (paragrafo.length) { html += "<p>" + inline(paragrafo.join(" ")) + "</p>"; paragrafo = []; }
+  };
+  const fecharLista = () => { if (lista) { html += `</${lista}>`; lista = null; } };
+
+  for (const bruta of linhas) {
+    const linha = bruta.trim();
+    if (!linha) { fecharParagrafo(); fecharLista(); continue; }
+
+    const marcador = linha.match(/^[-*•]\s+(.*)$/);
+    const numerada = linha.match(/^\d+[.)]\s+(.*)$/);
+    const tipo = marcador ? "ul" : numerada ? "ol" : null;
+
+    if (tipo) {
+      fecharParagrafo();
+      if (lista !== tipo) { fecharLista(); html += `<${tipo}>`; lista = tipo; }
+      html += "<li>" + inline((marcador || numerada)[1]) + "</li>";
+    } else {
+      fecharLista();
+      paragrafo.push(linha);
+    }
+  }
+  fecharParagrafo();
+  fecharLista();
+  return html;
+}
+
+function inline(txt) {
+  return txt
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    // A pontuação final fica de fora do link: "veja em https://x.br." não deve
+    // levar o ponto para dentro do href.
+    .replace(/(https?:\/\/[^\s<]+[^\s<.,;:)])/g,
+             '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+function bloco(classe, html) {
+  const div = document.createElement("div");
+  div.className = classe;
+  div.innerHTML = html;
+  return div;
+}
+
+function adicionar(el) {
+  $("vazio")?.remove();
+  conversa.appendChild(el);
+  el.scrollIntoView({ behavior: "smooth", block: "end" });
+  return el;
+}
+
+function avatar() {
+  // `alt=""` e não "PUC-Campinas": o brasão se repete em cada resposta e é
+  // decorativo aqui. Um leitor de tela anunciando o nome da instituição a cada
+  // mensagem seria ruído — quem lê a página já ouviu o logotipo no cabeçalho.
+  return '<img class="brasao" src="/static/puc-brasao.png" alt="" width="28" height="28">';
+}
+
+function mensagemDoAluno(texto) {
+  return adicionar(bloco("msg aluno", `<div class="conteudo">${escapar(texto)}</div>`));
+}
+
+/*
+ * O estado de carregamento. Os três pontos sozinhos não bastam aqui: uma
+ * pergunta que cai no fallback de busca externa leva 30-60s, e nesse tempo uma
+ * animação muda sem texto é indistinguível de uma tela travada — ainda mais em
+ * apresentação, onde ninguém vai abrir o DevTools para conferir.
+ *
+ * Por isso três camadas, cada uma aparecendo quando a anterior deixa de bastar:
+ *   - "Processando" desde o início;
+ *   - o cronômetro a partir de 3s (antes disso o número piscando é só ruído, e
+ *     a espera curta é a normal);
+ *   - a partir de 15s, uma nota dizendo que resposta fora da base demora mais.
+ *
+ * A nota é um fato geral sobre o sistema, não um diagnóstico DESTA pergunta: o
+ * navegador não tem como saber por qual caminho ela está indo, e afirmar isso
+ * seria inventar. Quem quiser o caminho de verdade lê o badge de origem quando
+ * a resposta chega.
+ */
+function mensagemPensando() {
+  const elemento = adicionar(bloco("msg agente", avatar() + `<div class="conteudo">
+      <div class="pensando" role="status">
+        <span class="pontos" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="rotulo">Processando</span>
+        <span class="cronometro"></span>
+      </div></div>`));
+
+  const inicio = performance.now();
+  const cronometro = elemento.querySelector(".cronometro");
+  const painel = elemento.querySelector(".pensando");
+
+  const timer = setInterval(() => {
+    const segundos = Math.round((performance.now() - inicio) / 1000);
+    if (segundos >= 3) cronometro.textContent = `${segundos}s`;
+    if (segundos === 15) {
+      painel.insertAdjacentHTML("beforeend",
+        '<span class="nota">Respostas que não estão na base indexada exigem consulta a '
+        + 'páginas oficiais e podem levar até um minuto.</span>');
+    }
+  }, 1000);
+
+  // Guardado no próprio nó: quem o substitui não precisa saber que existe um
+  // intervalo rodando, só chamar `encerrar`.
+  elemento.pararContagem = () => clearInterval(timer);
+  return elemento;
+}
+
+function encerrar(pensando, mensagem) {
+  pensando.pararContagem();
+  pensando.replaceWith(mensagem);
+  mensagem.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+function listaDeFontes(fontes) {
+  if (!fontes.length) return "";
+  const itens = fontes.map((f) => {
+    const score = `<span class="score">${(f.score * 100).toFixed(0)}%</span>`;
+    const pagina = f.pagina ? `, p. ${f.pagina}` : "";
+    const titulo = escapar(f.titulo || "(sem título)");
+    const rotulo = f.url
+      ? `<a href="${escapar(f.url)}" target="_blank" rel="noopener noreferrer">${titulo}</a>`
+      : titulo;
+    return `<li>${rotulo}${pagina} ${score}</li>`;
+  }).join("");
+  return `<div class="fontes"><h4>Fontes</h4><ol>${itens}</ol></div>`;
+}
+
+function mensagemDoAgente(dados, ms) {
+  const origem = ORIGENS[dados.origem] || { rotulo: dados.origem, titulo: "" };
+  const chips = [`<span class="chip">${ms} ms</span>`];
+  // O cache hit é o que explica uma resposta de 20 ms sem parecer mágica: a
+  // mesma pergunta já tinha sido respondida e nenhum token foi gasto de novo.
+  if (dados.cache_hit) chips.push('<span class="chip" title="Resposta servida da resposta_cache — nenhuma chamada paga ao LLM">cache hit</span>');
+
+  const html = `<div class="conteudo">
+      <div class="resposta">${renderizarResposta(dados.resposta)}</div>
+      <div class="meta">
+        <span class="badge" data-origem="${escapar(dados.origem)}" title="${escapar(origem.titulo)}">${origem.rotulo}</span>
+        ${chips.join("")}
+      </div>
+      ${listaDeFontes(dados.fontes || [])}
+      <details>
+        <summary>Ver JSON da resposta</summary>
+        <pre>${escapar(JSON.stringify(dados, null, 2))}</pre>
+      </details>
+    </div>`;
+  return bloco("msg agente", avatar() + html);
+}
+
+function mensagemDeErro(titulo, detalhe) {
+  return bloco("msg agente",
+    avatar() + `<div class="conteudo"><div class="aviso">
+      <strong>${escapar(titulo)}</strong>${escapar(detalhe)}</div></div>`);
+}
+
+/* Traduz o envelope de erro da API (app/api/errors.py) para uma frase que o
+ * aluno entende. O `erro` é a chave estável — é exatamente para isto que T1.5
+ * padronizou o envelope, em vez de fazer parsing do texto de `detalhe`. */
+function descreverErro(status, corpo, retryAfter) {
+  const codigo = corpo && corpo.erro;
+  if (codigo === "rate_limit") {
+    const espera = retryAfter ? ` Tente de novo em ${retryAfter}s.` : "";
+    return ["Limite de uso atingido", `Esta demo tem um teto próprio de chamadas.${espera}`];
+  }
+  if (codigo === "nao_autenticado") {
+    return ["Demo sem chave de API",
+      "A integração da demo não está cadastrada em API_KEYS no .env do servidor."];
+  }
+  if (codigo === "assunto_invalido") return ["Assunto inválido", corpo.detalhe];
+  if (codigo === "validacao" || codigo === "pergunta_invalida") {
+    return ["Pergunta inválida", "Escreva entre 3 e 1000 caracteres."];
+  }
+  if (status === 503) return ["Serviço indisponível", corpo?.detalhe || "Uma dependência do agente está fora do ar."];
+  return [`Erro ${status}`, corpo?.detalhe || "Não foi possível completar a pergunta."];
+}
+
+async function perguntar(texto) {
+  mensagemDoAluno(texto);
+  const pensando = mensagemPensando();
+  campo.value = "";
+  ajustarAltura();
+  atualizarBotao();
+
+  const assunto = $("assunto").value || null;
+  const inicio = performance.now();
+  let resposta;
+  try {
+    resposta = await fetch("/v1/ask", {
+      method: "POST",
+      headers: cabecalhos(),
+      body: JSON.stringify({ pergunta: texto, assunto }),
+    });
+  } catch (e) {
+    encerrar(pensando, mensagemDeErro("Sem conexão com a API", String(e)));
+    return;
+  }
+  // Medido no cliente e por isso inclui a rede: é a latência que o aluno
+  // sente, que é a que importa numa demonstração.
+  const ms = Math.round(performance.now() - inicio);
+
+  let corpo = null;
+  try { corpo = await resposta.json(); } catch { /* resposta sem corpo JSON */ }
+
+  if (!resposta.ok) {
+    const [titulo, detalhe] = descreverErro(resposta.status, corpo, resposta.headers.get("Retry-After"));
+    encerrar(pensando, mensagemDeErro(titulo, detalhe));
+    return;
+  }
+  encerrar(pensando, mensagemDoAgente(corpo, ms));
+}
+
+/* ---------- estado do serviço e lista de assuntos ---------- */
+
+async function verificarProntidao() {
+  const estado = $("estado");
+  try {
+    const r = await fetch("/v1/ready");
+    const corpo = await r.json();
+    const ok = r.status === 200;
+    estado.dataset.pronto = ok ? "sim" : "nao";
+    $("estado-texto").textContent = ok
+      ? "no ar"
+      : "indisponível: " + Object.entries(corpo.checagens || {})
+          .filter(([, v]) => !v).map(([k]) => k).join(", ");
+  } catch {
+    estado.dataset.pronto = "nao";
+    $("estado-texto").textContent = "sem resposta";
+  }
+}
+
+async function carregarAssuntos() {
+  try {
+    const r = await fetch("/v1/assuntos", { headers: cabecalhos() });
+    if (!r.ok) return;  // 401 aqui já aparece na primeira pergunta, com explicação
+    const { assuntos } = await r.json();
+    for (const a of assuntos) {
+      $("assunto").insertAdjacentHTML("beforeend", `<option value="${escapar(a)}">${escapar(a)}</option>`);
+    }
+  } catch { /* o seletor continua em "todos os assuntos" */ }
+}
+
+/* ---------- composer ---------- */
+
+function ajustarAltura() {
+  campo.style.height = "auto";
+  campo.style.height = Math.min(campo.scrollHeight, 180) + "px";
+}
+function atualizarBotao() {
+  botao.disabled = campo.value.trim().length < 3;
+}
+
+campo.addEventListener("input", () => { ajustarAltura(); atualizarBotao(); });
+campo.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("form").requestSubmit(); }
+});
+$("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const texto = campo.value.trim();
+  if (texto.length >= 3) perguntar(texto);
+});
+$("sugestoes")?.addEventListener("click", (e) => {
+  const alvo = e.target.closest("button");
+  if (alvo) perguntar(alvo.textContent.trim());
+});
+
+campo.focus();
+verificarProntidao();
+carregarAssuntos();
+</script>
+</body>
+</html>

@@ -64,3 +64,11 @@ class Answer:
     # na base. Misturar os dois estragaria essa métrica, porque assunto de outro
     # departamento nunca vai ser indexado aqui.
     origem: Origem = "base"
+
+    # Esta resposta saiu da `resposta_cache` (nenhum token de API foi gasto).
+    # Já existia na telemetria (`Registro.cache_hit`), que é um destino de
+    # observabilidade e não é lido por quem chama; aqui é propriedade da própria
+    # resposta, e a borda HTTP a expõe (T3.1) — na demo é o que torna o cache
+    # visível: a mesma pergunta repetida volta em milissegundos e o front diz
+    # por quê, em vez de parecer que o agente ficou magicamente rápido.
+    cached: bool = False

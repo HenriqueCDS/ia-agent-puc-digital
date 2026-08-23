@@ -544,3 +544,46 @@ def test_health_nao_checa_dependencia(client, monkeypatch):
     _dublar_banco(monkeypatch, ok=False)
 
     assert client.get("/v1/health").status_code == 200
+
+
+# --- Sprint 3: cache_hit no contrato e request_id na telemetria ------------
+
+
+def test_ask_expoe_cache_hit(client, monkeypatch):
+    """T3.1 — sem este campo, um cache hit de 20ms é indistinguível de "o
+    servidor estava rápido hoje", e a demo não consegue mostrar o custo zero."""
+    _dublar_answer(
+        monkeypatch,
+        Answer(text="Resposta.", sources=[_chunk_base()], origem="base", cached=True),
+    )
+
+    corpo = client.post("/v1/ask", json={"pergunta": "como envio atividade?"}).json()
+
+    assert corpo["cache_hit"] is True
+
+
+def test_ask_sem_cache_reporta_cache_hit_falso(client, monkeypatch):
+    _dublar_answer(monkeypatch, Answer(text="Resposta.", sources=[], origem="base"))
+
+    corpo = client.post("/v1/ask", json={"pergunta": "como envio atividade?"}).json()
+
+    assert corpo["cache_hit"] is False
+
+
+def test_o_request_id_da_resposta_chega_a_telemetria(client, monkeypatch):
+    """T3.2 — o MESMO id no header, no corpo e no registro. É a ponte entre uma
+    reclamação pontual e a linha da tabela `telemetria`."""
+    from app.core import telemetry
+
+    visto = {}
+
+    def espiar(query):
+        visto["request_id"] = telemetry._request_id.get()
+        return Answer(text="Resposta.", sources=[], origem="base")
+
+    _dublar_answer_direta(monkeypatch, espiar)
+
+    resposta = client.post("/v1/ask", json={"pergunta": "como envio atividade?"})
+
+    assert visto["request_id"] == resposta.json()["request_id"]
+    assert visto["request_id"] == resposta.headers["X-Request-Id"]

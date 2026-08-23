@@ -75,6 +75,11 @@ def registros(caplog, monkeypatch):
     monkeypatch.setattr(telemetry.logger, "propagate", True)
     monkeypatch.setattr(responder, "get_cached_answer", lambda key: None)
     monkeypatch.setattr(responder, "set_cached_answer", lambda key, assunto, resposta: None)
+    # `canal` e `request_id` são ContextVars de processo: sem zerar aqui, o
+    # valor posto por um teste vaza para os seguintes e a ordem da suíte passa
+    # a mudar o resultado.
+    telemetry.set_canal("desconhecido")
+    telemetry.set_request_id(None)
 
     with caplog.at_level(logging.INFO, logger="telemetria"):
         yield _Registros(caplog)
@@ -460,3 +465,80 @@ def test_stderr_pode_ser_desligado_pelo_env(monkeypatch):
     telemetry.configurar_logs()
 
     assert telemetry.logger.handlers == []
+
+
+# --- Sprint 3: correlação por request_id e contenção de PII ---------------
+
+
+def test_request_id_da_borda_http_entra_no_registro(monkeypatch, registros):
+    """T3.2 — é o que liga uma reclamação pontual à linha exata da tabela.
+
+    Sem isto, correlacionar "recebi resposta errada às 14h32" com o registro
+    dependia de casar horário com hash de pergunta na mão.
+    """
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+    telemetry.set_request_id("3f2a-uuid-da-request")
+
+    responder.answer(Query(text=PERGUNTA), llm=FakeLLM())
+
+    (reg,) = registros
+    assert reg["request_id"] == "3f2a-uuid-da-request"
+
+
+def test_sem_http_o_request_id_fica_nulo(monkeypatch, registros):
+    """A CLI não tem request. `None` é informação ("não veio de HTTP"), não falta dela."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+    telemetry.set_request_id(None)
+
+    responder.answer(Query(text=PERGUNTA), llm=FakeLLM())
+
+    (reg,) = registros
+    assert reg["request_id"] is None
+
+
+def test_pii_da_pergunta_vira_rotulo_e_o_valor_nao_aparece(monkeypatch, registros):
+    """T3.4 — o alerta guarda a categoria; o identificador não entra em lugar nenhum."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+
+    responder.answer(Query(text="meu RA é 12345678, como acesso o Canvas?"), llm=FakeLLM())
+
+    (reg,) = registros
+    assert reg["pii"] == ["ra"]
+    assert "12345678" not in json.dumps(reg, ensure_ascii=False)
+
+
+def test_pergunta_sem_identificador_nao_marca_pii(monkeypatch, registros):
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+
+    responder.answer(Query(text=PERGUNTA), llm=FakeLLM())
+
+    (reg,) = registros
+    assert reg["pii"] is None
+
+
+def test_topico_escrito_pelo_llm_e_mascarado_antes_de_persistir(monkeypatch, registros):
+    """O buraco que T3.4 fecha: a pergunta não é gravada, mas o `topico` é — e
+    ele é escrito PELO MODELO a partir dela, então pode repetir o RA."""
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
+    llm = _fake_llm_com_topico(topico="acesso ao Canvas do RA 12345678")
+
+    responder.answer(Query(text="meu RA é 12345678, como acesso?"), llm=llm)
+
+    (reg,) = registros
+    assert reg["topico"] == "acesso ao Canvas do RA [ra]"
+
+
+def test_erro_tambem_passa_pelo_mascaramento(monkeypatch, registros):
+    """`erro` carrega `str(exc)`, e a exceção pode trazer o valor que a causou."""
+
+    def explode(_):
+        raise RuntimeError("falha ao consultar o aluno de cpf 529.982.247-25")
+
+    monkeypatch.setattr(responder, "retrieve", explode)
+
+    with pytest.raises(RuntimeError):
+        responder.answer(Query(text=PERGUNTA), llm=FakeLLM())
+
+    (reg,) = registros
+    assert "529.982.247-25" not in reg["erro"]
+    assert "[cpf]" in reg["erro"]

@@ -7,12 +7,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api.errors import registrar_handlers
 from app.api.ratelimit import reset_rate_limiter
+from app.api.routers.demo import IMAGENS as demo_imagens
+from app.api.routers.demo import router as demo_router
 from app.api.routers.v1 import router as v1_router
 from app.core.config import settings
 from app.core import telemetry
@@ -105,6 +108,40 @@ def _configurar_cors(app: FastAPI) -> None:
     logger.info("CORS habilitado para: %s", ", ".join(origens))
 
 
+def _conferir_chave_da_demo() -> None:
+    """Avisa no BOOT se a demo não tem chave — não na primeira pergunta do aluno.
+
+    Sem uma integração com o nome de `DEMO_CONSUMIDOR` em `API_KEYS`, a página
+    carrega normalmente e só o `fetch` toma 401: o sintoma aparece longe da
+    causa (uma linha faltando no `.env`). Não é fatal de propósito — a v1
+    continua servindo o AVA, que é o que não pode cair por causa da demo.
+    """
+    if not settings.api_auth_enabled:
+        logger.warning(
+            "demo em /demo com API_AUTH_ENABLED=false: a API está aberta. "
+            "Aceitável só em desenvolvimento local."
+        )
+        return
+
+    if settings.chave_do_consumidor(settings.demo_consumidor) is None:
+        logger.error(
+            "demo habilitada mas API_KEYS não tem a integração '%s': /demo vai "
+            "carregar e todo /v1/ask dela vai tomar 401. Cadastre "
+            "`%s:<chave>` em API_KEYS ou desligue com DEMO_ENABLED=false.",
+            settings.demo_consumidor,
+            settings.demo_consumidor,
+        )
+        return
+
+    if settings.demo_consumidor not in settings.tetos_diarios_por_consumidor:
+        logger.warning(
+            "a integração '%s' não tem teto diário próprio "
+            "(RATE_LIMIT_DIARIO_POR_CONSUMIDOR): a chave da demo é pública no "
+            "HTML e hoje responde ao teto global, o mesmo do AVA.",
+            settings.demo_consumidor,
+        )
+
+
 def create_app() -> FastAPI:
     telemetry.configurar_logs()
     telemetry_store.habilitar()
@@ -119,6 +156,13 @@ def create_app() -> FastAPI:
     app.add_middleware(_RequestIdMiddleware)
     registrar_handlers(app)
     app.include_router(v1_router)
+    if settings.demo_enabled:
+        app.include_router(demo_router)
+        # A identidade visual da demo (logo institucional). Mesma origem, então
+        # a página continua sem depender de nenhum host externo — que é o que
+        # permite abri-la numa máquina sem internet.
+        app.mount("/static", StaticFiles(directory=demo_imagens), name="static")
+        _conferir_chave_da_demo()
 
     # Contadores de rate limit são por processo (ver ratelimit.py). Dois apps
     # criados no mesmo processo — o que só acontece em teste — não podem herdar

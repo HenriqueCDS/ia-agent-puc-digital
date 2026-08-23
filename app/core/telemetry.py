@@ -18,6 +18,14 @@ hash truncado. Perguntas de aluno passam por assuntos sensíveis (ver
 serve ao propósito principal: agrupar perguntas repetidas que a base não
 respondeu, para descobrir qual documento falta indexar.
 
+Não basta não gravar a pergunta (T3.4): `topico` é escrito pelo LLM A PARTIR
+dela e pode repetir um RA ou CPF que estava lá. Todo campo derivado passa por
+`pii.mascarar` no momento da emissão — um funil só, em `registrar`, pelo mesmo
+motivo da rede de segurança em `responder.answer`: cada ponto de extensão futuro
+é mais um lugar onde dá para esquecer. `Registro.pii` guarda só o RÓTULO do que
+foi encontrado ("cpf", "ra"), nunca o valor, e é o que torna o vazamento
+contável em vez de invisível.
+
 Ler os registros:
     python -m scripts.ask "..." 2> telemetria.jsonl
     jq -s 'map(select(.origem=="nenhuma")) | group_by(.pergunta_hash)' telemetria.jsonl
@@ -29,6 +37,7 @@ import logging
 import sys
 import time
 
+from app.core import pii
 from app.core.config import settings
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -49,6 +58,11 @@ logger_interno = logging.getLogger(__name__)
 # entrypoint, não da lógica — `answer()` não deveria precisar saber.
 _canal: ContextVar[str] = ContextVar("canal", default="desconhecido")
 
+# Id da request HTTP que originou a pergunta (T3.2). Mesma razão do `_canal`
+# para ser ContextVar: é do entrypoint, e a CLI simplesmente não tem um.
+# Default `None` significa "não veio de HTTP", que é informação, não falta dela.
+_request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
+
 # Destino adicional do registro (hoje: Postgres). `None` = só o log em stderr.
 _persistir: Callable[[dict], None] | None = None
 
@@ -56,6 +70,17 @@ _persistir: Callable[[dict], None] | None = None
 def set_canal(nome: str) -> None:
     """Chamado pelos entrypoints (CLI, /ask)."""
     _canal.set(nome)
+
+
+def set_request_id(valor: str | None) -> None:
+    """Chamado pela borda HTTP (T3.2).
+
+    É o que liga uma reclamação pontual ("recebi resposta errada, o id era
+    a3f2...") à linha exata da tabela `telemetria`: o mesmo id sai no header
+    `X-Request-Id`, no corpo da resposta e no registro. Sem ele, correlacionar
+    dependia de casar horário com hash de pergunta na mão.
+    """
+    _request_id.set(valor)
 
 
 def configurar_persistencia(sink: Callable[[dict], None] | None) -> None:
@@ -110,6 +135,18 @@ class Registro:
     assunto: str | None
     pergunta_hash: str
     chat_model: str
+
+    # Id da request HTTP (T3.2). O MESMO valor que sai no header `X-Request-Id`
+    # e no corpo da resposta — é a ponte entre a reclamação do aluno e a linha
+    # do banco. `None` quando a pergunta não veio de HTTP (CLI).
+    request_id: str | None = None
+
+    # Categorias de identificador pessoal encontradas NA PERGUNTA (T3.4):
+    # ["cpf"], ["ra", "email"]... Só o rótulo, nunca o valor — ver app/core/pii.py.
+    # `None` quando não havia nenhum. Serve para dois usos: medir quanto do
+    # tráfego traz dado pessoal (e justificar a política de retenção) e provar,
+    # numa auditoria, que o alerta existe e que o valor não foi guardado.
+    pii: list[str] | None = None
 
     # De onde saiu o `assunto` acima: "informado" (o usuário passou), "metadata"
     # (pasta do documento que respondeu), "allowlist" (domínio da fonte web),
@@ -197,12 +234,24 @@ def registrar(assunto: str | None, pergunta: str, chat_model: str) -> Iterator[R
     Uma falha é justamente o caso em que a telemetria mais importa, então o
     `finally` emite igual — com `erro` preenchido e as etapas que chegaram a
     rodar já cronometradas."""
+    encontrado = pii.detectar(pergunta)
+    if encontrado:
+        # WARNING e não INFO: é a linha que uma auditoria procura, e o operador
+        # precisa vê-la sem ligar log verboso. Só as categorias — o valor não
+        # aparece aqui pela mesma razão que não vai para o banco.
+        logger_interno.warning(
+            "pergunta contém identificador pessoal (%s); nada disso é persistido",
+            ", ".join(encontrado),
+        )
+
     registro = Registro(
         canal=_canal.get(),
         assunto=assunto,
         assunto_origem="informado" if assunto else None,
         pergunta_hash=hash_pergunta(pergunta),
         chat_model=chat_model,
+        request_id=_request_id.get(),
+        pii=encontrado or None,
     )
     inicio = time.perf_counter()
     try:
@@ -212,6 +261,13 @@ def registrar(assunto: str | None, pergunta: str, chat_model: str) -> Iterator[R
         raise
     finally:
         registro.ms_total = round((time.perf_counter() - inicio) * 1000, 1)
+        # Último ponto antes de o registro sair para qualquer destino, e por
+        # isso o único lugar onde o mascaramento precisa existir (T3.4).
+        # `topico` é escrito pelo LLM a partir da pergunta e é o campo que pode
+        # repetir o RA que o aluno digitou; `erro` carrega `str(exc)`, e uma
+        # exceção do driver pode trazer o valor que a causou.
+        registro.topico = pii.mascarar(registro.topico)
+        registro.erro = pii.mascarar(registro.erro)
         dados = asdict(registro)
         # Nunca deixar a telemetria derrubar uma resposta que já ficou pronta.
         try:

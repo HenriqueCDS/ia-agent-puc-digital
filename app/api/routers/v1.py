@@ -92,6 +92,10 @@ def ask(
     # O nome da integração (não a chave) vira o `canal` da telemetria: é o que
     # permite atribuir custo por consumidor, que é metade da razão de T2.1.
     telemetry.set_canal(f"api:{consumidor}")
+    # T3.2 — o mesmo id que sai no header e no corpo entra no registro. Aqui, e
+    # não num middleware: a telemetria é aberta dentro de `answer()`, e é este o
+    # ponto em que o id já existe e o contexto ainda é o desta request.
+    telemetry.set_request_id(request_id)
 
     # Hoje um assunto inválido não dá erro: passa o filtro $eq do retrieval,
     # devolve zero chunks e cai silenciosamente no fallback web — falha

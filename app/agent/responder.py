@@ -332,4 +332,4 @@ def _tentar_base(
         registro.base_insuficiente = True
         return None
 
-    return Answer(text=texto, sources=chunks, grounded=True)
+    return Answer(text=texto, sources=chunks, grounded=True, cached=bool(registro.cache_hit))

@@ -36,6 +36,10 @@ class AskResponse(BaseModel):
     # de `Origem` lá. Um valor novo de origem no agente entra neste contrato
     # sozinho, em vez de virar literal_error na resposta.
     origem: Origem
+    # A resposta veio da `resposta_cache` — nenhuma chamada paga ao LLM. É o
+    # dado que a demo (T3.1) mostra ao lado da latência: sem ele, um cache hit
+    # de 20ms é indistinguível de "o servidor estava rápido hoje".
+    cache_hit: bool
     request_id: str
 
 
@@ -87,5 +91,6 @@ def ask_response_de(resultado: Answer, request_id: str) -> AskResponse:
         fontes=[_fonte_para_source_out(c) for c in resultado.sources],
         encontrou_na_base=resultado.grounded,
         origem=resultado.origem,
+        cache_hit=resultado.cached,
         request_id=request_id,
     )

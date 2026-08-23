@@ -139,6 +139,7 @@ embeddings + conexão com o Postgres) roda no boot, não na 1ª request — ver
 | `GET /v1/assuntos` | `X-API-Key` | não | Popula o `<select>` de assunto; DISTINCT barato |
 | `GET /v1/health` | público | não | Liveness: o processo responde. Não checa dependência |
 | `GET /v1/ready` | público | não | Readiness: Postgres + chave do LLM. 503 se algo faltar |
+| `GET /demo` | pública | — | Frontend de demonstração (ver abaixo) |
 
 `/health` e `/ready` são coisas diferentes de propósito: reiniciar a app porque
 o Postgres caiu não conserta o Postgres — só derruba junto o que ainda saía do
@@ -161,6 +162,31 @@ teste nenhum — só na fatura.
 
 Testes: `pytest` (não precisa de banco nem de chave de API).
 
+### Demo web (`/demo`)
+
+Suba a API e abra <http://localhost:8000/demo> (a raiz `/` redireciona para lá).
+É um arquivo HTML estático (`app/static/index.html`), sem build, sem framework e
+**sem nenhum recurso externo** — abre numa máquina sem internet e não manda a
+pergunta do aluno para terceiro nenhum.
+
+O que a demo mostra, e por que cada coisa está lá:
+
+- **badge de origem** — o guardrail ficando visível. `base` (verde, material
+  interno), `web` (amarelo, página pública oficial), `encaminhado` (azul, outro
+  departamento) e `nenhuma` (cinza, o agente preferiu não responder). É o que
+  separa este agente de um chatbot genérico;
+- **fontes com link e score** — de onde a resposta saiu;
+- **latência e cache hit** — o custo por trás de cada pergunta;
+- **JSON cru** num `<details>` — o contrato da API sem abrir o Swagger.
+
+A demo usa uma integração **própria** em `API_KEYS` (`DEMO_CONSUMIDOR`, default
+`demo`), cuja chave o servidor injeta no HTML. Ela é pública para quem abrir o
+DevTools — isso não tem solução dentro de um arquivo estático, então o que se
+controla é o estrago: revogá-la não afeta o AVA, e ela tem teto diário próprio
+(`RATE_LIMIT_DIARIO_POR_CONSUMIDOR=demo:200`), de modo que o pior caso de abuso
+é a demo parar em vez de gastar o orçamento do dia inteiro. `DEMO_ENABLED=false`
+tira a rota do ar sem mexer em nada da v1.
+
 ## Observabilidade
 
 Cada pergunta respondida gera **um registro** (`app/core/telemetry.py`), com dois
@@ -176,13 +202,47 @@ python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl   # e/ou 
 ```
 
 ```json
-{"canal":"cli","assunto":"canvas","assunto_origem":"metadata","topico":"envio de atividade",
+{"canal":"api:ava","request_id":"78bbd705-e16c-417b-a546-b8b08f6b5e13","pii":null,
+ "assunto":"canvas","assunto_origem":"metadata","topico":"envio de atividade",
  "pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash",
  "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"alta_confianca":true,
  "cache_hit":false,"input_tokens":120,"output_tokens":30,
  "ms_retrieve":41.2,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
  "web_insuficiente":null,"erro":null}
 ```
+
+`request_id` é o **mesmo** valor que sai no header `X-Request-Id` e no corpo da
+resposta. É o que liga uma reclamação pontual ("recebi resposta errada, o id era
+78bbd705…") à linha exata da tabela — sem ele, correlacionar dependia de casar
+horário com hash de pergunta na mão. É `null` quando a pergunta veio da CLI.
+
+### Relatório de lacunas
+
+Cada resposta com `grounded=false` é um **documento que falta indexar**. O
+relatório transforma a telemetria já gravada no roadmap de ingestão, priorizado
+por quantas vezes a pergunta apareceu:
+
+```bash
+python -m scripts.lacunas                    # últimos 7 dias
+python -m scripts.lacunas --dias 7 --json    # para pipeline
+```
+
+```
+    n  dist  assunto        situação          tema
+  ------------------------------------------------------------------------------
+    2     1  canvas, puc-di sem resposta      Envio de atividade no Canvas
+    1     1  canvas         coberta pela web  Acesso ao Canvas
+```
+
+A ordem é a de prioridade: primeiro o que ficou **sem resposta nenhuma** (o
+aluno foi para a secretaria), depois o que a busca externa cobriu — lacuna mais
+barata, porque a página que respondeu já diz qual documento indexar. Ficam de
+fora os encaminhamentos por triagem (boleto, diploma: outro departamento, nunca
+vão ser indexados aqui) e as linhas com `erro`, que são falha de infraestrutura
+e não ausência de conteúdo.
+
+A janela útil é a da retenção (7 dias por padrão); pedir mais que isso avisa em
+vez de devolver uma janela vazia que pareceria "semana tranquila".
 
 ### `assunto` e `topico`
 
@@ -260,10 +320,41 @@ SELECT date_trunc('day', criado_em) AS dia,
 FROM telemetria GROUP BY 1 ORDER BY 1;
 ```
 
-**Privacidade:** o texto da pergunta nunca é registrado — só `assunto` e um hash
-truncado. Perguntas de aluno tocam assuntos sensíveis (ver `ENCAMINHAMENTOS` em
+### Privacidade e LGPD
+
+**O texto da pergunta nunca é registrado** — só `assunto` e um hash truncado.
+Perguntas de aluno tocam assuntos sensíveis (ver `ENCAMINHAMENTOS` em
 `app/core/config.py`); o hash preserva o que interessa, que é agrupar perguntas
 repetidas sem resposta.
+
+**Não gravar a pergunta não basta**, e esse foi o principal achado de T3.4:
+`topico` é escrito **pelo LLM a partir da pergunta**, e nada impede o modelo de
+repetir o RA que o aluno digitou ("acesso ao Canvas do RA 12345678"). Esse campo
+é persistido e é justamente o que o relatório de lacunas lê. O mesmo vale para
+`erro`, que carrega `str(exc)`. Os dois passam por `pii.mascarar` num ponto
+único, na emissão do registro (`app/core/telemetry.py`) — pela mesma razão da
+rede de segurança em `responder.answer`: cada ponto de extensão futuro é mais um
+lugar onde dá para esquecer.
+
+| Mecanismo | O que faz | Onde |
+|---|---|---|
+| Hash da pergunta | Agrupa repetição sem guardar o texto | `telemetry.hash_pergunta` |
+| Alerta de PII | `pii: ["cpf","ra"]` — a **categoria**, nunca o valor | `app/core/pii.py` |
+| Mascaramento | `topico` e `erro` viram `... do RA [ra]` antes de persistir | `telemetry.registrar` |
+| Retenção | 7 dias, apagados na própria escrita | `app/db/telemetry_store.py` |
+
+O detector cobre CPF, RA/matrícula, e-mail e celular. Ele é calibrado para
+**precisão, não recall**: um alerta que dispara em número de protocolo ou em ano
+("2024 2025") vira ruído e é ignorado em duas semanas — aí o vazamento de
+verdade passa junto. Por isso CPF sem pontuação é validado pelos dígitos
+verificadores, RA exige a palavra que o nomeia por perto, e telefone fixo ficou
+de fora de propósito.
+
+**Limite conhecido:** a tabela `resposta_cache` guarda o texto gerado pelo LLM,
+que em tese poderia ecoar um identificador vindo da pergunta. Não é mascarado
+porque isso corromperia a resposta servida ao aluno, e o risco é baixo: desde
+T2.4 a chave do cache inclui a pergunta, então uma entrada com dado pessoal só é
+recuperada por quem digitar exatamente o mesmo texto.
 
 **Ligar/desligar:** `TELEMETRY_STDERR_ENABLED` controla o log no terminal e
 `TELEMETRY_DB_ENABLED` a gravação no banco — independentes. O par usual em uso
@@ -343,8 +434,11 @@ o sinal que vira pauta de ingestão.
 | `app/agent/web_fallback.py` | busca externa restrita à allowlist de domínios oficiais |
 | `app/db/vector_store.py` | conexão com pgvector |
 | `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |
-| `app/db/telemetry_store.py` | tabela `telemetria` (JSONB) + retenção de 7 dias |
-| `scripts/` | CLIs de ingestão e de pergunta |
+| `app/db/telemetry_store.py` | tabela `telemetria` (JSONB), retenção de 7 dias e a consulta de lacunas |
+| `app/core/pii.py` | detecção e mascaramento de RA/CPF/e-mail/telefone (LGPD) |
+| `app/api/routers/demo.py` | rota `/demo` — injeta a chave da demo no HTML |
+| `app/static/index.html` | o frontend de demonstração (1 arquivo, sem build) |
+| `scripts/` | CLIs de ingestão, de pergunta e o relatório de lacunas |
 
 ## Pontos de extensão (features fora da v1)
 
@@ -402,13 +496,21 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 
 ## Próximos passos sugeridos
 
-1. Ingerir um conjunto pequeno de PDFs reais e calibrar `CHUNK_SIZE` e
-   `RELEVANCE_THRESHOLD` com `scripts/ask.py --debug`.
-2. Montar um conjunto de ~20 perguntas reais de alunos como teste de regressão
+O gargalo hoje é **conteúdo, não código** — e a demo tornou isso visível: com o
+corpus atual, quase toda pergunta sai com badge amarelo (`origem="web"`), ou
+seja, ~30-60s de latência num caminho que existia para ser exceção. As duas
+ferramentas para medir o progresso disso passaram a existir agora
+(`scripts/lacunas.py` e o badge de origem), o que muda a ordem da lista:
+
+1. Ingerir um conjunto de PDFs reais e calibrar `CHUNK_SIZE` e
+   `RELEVANCE_THRESHOLD` com `scripts/ask.py --debug`. É o item **T0.6** do
+   [BACKLOG.md](BACKLOG.md), e ele decide sozinho quanto do tráfego vai para o
+   fallback web — o caminho lento e caro.
+2. Rodar `python -m scripts.lacunas` semanalmente e usar a lista como fila de
+   ingestão. Repetir o passo 1 medindo a proporção de `origem="base"` antes e
+   depois: é a métrica de que a base está melhorando.
+3. Montar um conjunto de ~20 perguntas reais de alunos como teste de regressão
    do retrieval.
-3. Fixar a dimensão do embedding e criar índice HNSW quando o corpus crescer.
-4. Medir a taxa de acionamento do fallback de busca externa: fallback frequente
-   sobre um mesmo tema é sinal de documento faltando na ingestão, não de sucesso
-   da busca.
+4. Fixar a dimensão do embedding e criar índice HNSW quando o corpus crescer.
 5. Avaliar o gatilho na "zona cinzenta" (retrieval devolve chunks fracos, entre
    `RELEVANCE_THRESHOLD` e ~0.5), hoje fora do fallback de propósito.

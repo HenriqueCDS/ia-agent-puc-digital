@@ -161,14 +161,99 @@ tomada, só `RateLimiter` muda (`get_rate_limiter()` já é o único acesso).
 
 ---
 
-## Sprint 3 — Demo e sinal de produto
+## Sprint 3 — Demo e sinal de produto ✅ concluída (2026-08-23)
+
+Validado contra o Postgres e o Gemini reais, com `lifespan` e também com
+`uvicorn` de verdade: boot com warm-up 6,0s, `GET /demo` 6ms servindo 23 KB com
+`Cache-Control: no-store` e a chave da integração `demo` injetada (placeholder
+ausente na resposta), `/` → `/demo` em 307, `/v1/ready` 200 em 3ms,
+`/v1/assuntos` 200 em 8ms, `POST /v1/ask` com `request_id` batendo no header e
+no corpo, e a linha correspondente na tabela `telemetria` trazendo o mesmo
+`request_id`, `pii: ["ra"]` e o RA **ausente da linha inteira**. O relatório de
+lacunas rodou sobre esses registros reais. Suíte inteira: 221/221 (era 174).
 
 | # | Tarefa | Arquivos | Critério de aceite | Esforço |
 |---|---|---|---|---|
-| **T3.1** | Frontend estático (1 arquivo HTML+JS, sem build) servido em `/demo` | `app/static/index.html` | Pergunta → resposta + **badge de origem** + fontes com link + latência | 4h |
-| **T3.2** | Log estruturado de interação (`pergunta`, `assunto`, `origem`, `grounded`, latência, chunks, consumidor) | `app/db/interacoes.py` | Toda request registrada; `request_id` correlaciona log e resposta | 3h |
-| **T3.3** | Relatório de lacunas: perguntas com `grounded=False` agrupadas | `scripts/lacunas.py` | Lista priorizada do que falta indexar — vira o roadmap de ingestão | 2h |
-| **T3.4** | Política LGPD: retenção, hash do identificador, alerta de RA/CPF na pergunta | `app/db/interacoes.py`, README | Nada de identificável em claro na tabela | 2h |
+| ✅ **T3.1** | Frontend estático (1 arquivo HTML+JS, sem build) servido em `/demo` | `app/static/index.html`, `app/api/routers/demo.py` | Pergunta → resposta + **badge de origem** + fontes com link + latência | 4h |
+| ✅ **T3.2** | Log estruturado de interação (`assunto`, `origem`, `grounded`, latência, chunks, consumidor) | `app/core/telemetry.py`, `app/api/routers/v1.py` | Toda request registrada; `request_id` correlaciona log e resposta | 3h |
+| ✅ **T3.3** | Relatório de lacunas: perguntas com `grounded=False` agrupadas | `scripts/lacunas.py`, `app/db/telemetry_store.py` | Lista priorizada do que falta indexar — vira o roadmap de ingestão | 2h |
+| ✅ **T3.4** | Política LGPD: retenção, hash do identificador, alerta de RA/CPF na pergunta | `app/core/pii.py`, `app/core/telemetry.py`, README | Nada de identificável em claro na tabela | 2h |
+
+### Desvios do plano original
+
+- **T3.2/T3.4 não criaram `app/db/interacoes.py`.** Quando o backlog foi
+  escrito, esse arquivo era o lugar onde o log de interação passaria a existir.
+  Ele já existe: `app/core/telemetry.py` + `app/db/telemetry_store.py`
+  registram `assunto`, `origem`, `grounded`, `n_chunks`, `score_top`,
+  `cache_hit`, tokens e latência por etapa numa coluna JSONB, com retenção de 7
+  dias. Uma segunda tabela com os mesmos campos seria duplicação com dois
+  pontos de escrita para manter em sincronia. Faltavam só duas coisas, e foram
+  elas o trabalho de T3.2/T3.4: `request_id` e a contenção de PII.
+
+- **Exceção declarada fora da borda:** `Answer.cached` (`app/core/models.py` e
+  `app/agent/responder.py`). O cache hit existia só na telemetria, que é
+  destino de observabilidade e não é lido por quem chama a API. Sem expor isso,
+  a demo mostra "1.476 ms" numa resposta cacheada e "29.884 ms" numa nova sem
+  conseguir dizer por quê — e o cache, que é o item de custo mais visível do
+  sistema, fica indemonstrável.
+
+- **T2.3 ganhou teto diário por consumidor** (`RATE_LIMIT_DIARIO_POR_CONSUMIDOR`).
+  Não estava no backlog, mas é o que torna a decisão 3(a) defensável: sem teto
+  próprio, a chave pública da demo consome o orçamento do dia inteiro,
+  incluindo o do AVA.
+
+### Achados ao implementar
+
+- **T3.4 — não gravar a pergunta não basta.** A premissa da telemetria era "o
+  texto da pergunta nunca entra no registro, só `assunto` e hash". Só que
+  `topico` é escrito **pelo LLM a partir da pergunta**, e nada impede o modelo
+  de repetir o RA que o aluno digitou ("acesso ao Canvas do RA 12345678"). Esse
+  campo é persistido e é justamente o que o relatório de lacunas lê. O mesmo
+  vale para `erro`, que carrega `str(exc)`. Os dois passam por `pii.mascarar`
+  num ponto único, em `telemetry.registrar`, pela mesma razão da rede de
+  segurança em `responder.answer`: cada ponto de extensão futuro é mais um
+  lugar onde dá para esquecer.
+
+- **T3.4 — o alerta de PII vale pela precisão, não pelo recall.** As duas
+  primeiras versões dos padrões falharam contra casos reais, e as duas falhas
+  eram do tipo que mata um alerta de LGPD por desuso:
+  (a) `\W` entre "RA" e o número não casa "meu RA **é** 12345678", porque `é` é
+  caractere de palavra — o vão virou `[^\d\n]{0,15}`;
+  (b) `matrícula 987654321` era contada como RA **e** telefone, porque 9 dígitos
+  crus casam o padrão de celular. Hoje o telefone exige DDD ou separador
+  interno. Pela mesma lógica, CPF sem pontuação é validado pelos dígitos
+  verificadores (senão todo protocolo de 11 dígitos vira alerta) e telefone
+  fixo ficou **fora** de propósito: `\d{4}[\s-]?\d{4}` casa "2024 2025".
+
+- **T3.3 — agrupar por `(tema, assunto, origem)` destrói o relatório.** A
+  primeira versão da consulta fazia isso, e no banco real a mesma lacuna
+  apareceu em três linhas de peso 1: "Envio de atividade no Canvas" rotulado
+  ora `canvas`, ora `puc-digital`, mais uma linha por ter caído na web numa das
+  vezes. Como a ordenação por frequência é o único motivo de o relatório
+  existir, o agrupamento passou a ser só pelo tema (em caixa baixa), com
+  assunto e origem virando agregados da linha. Consolidado, o tema sobe para o
+  topo com 2 ocorrências, que é o que se queria ver.
+
+- **T3.3 — `grounded=false` inclui o caminho web, e isso é intencional.** Uma
+  resposta que veio de página pública oficial **também** é lacuna: a informação
+  existia, só não na nossa base. É inclusive a lacuna mais barata de fechar,
+  porque a página que respondeu já diz qual documento indexar. Ficam de fora
+  `origem='encaminhado'` (outro departamento, nunca vai ser indexado aqui) e as
+  linhas com `erro` (falha de infra, não ausência de conteúdo) — sem esses dois
+  cortes, uma queda do Postgres viraria "documento faltando".
+
+- **T3.1 — o front tem 4 badges, não 3.** O escopo escrito no backlog previa
+  `base`/`web`/`nenhuma`; `encaminhado` (triagem) entrou no agente depois. É a
+  mesma divergência que já tinha quebrado `app/api/schemas.py` em runtime e que
+  levou `Origem` a morar em `app/core/models.py`.
+
+- **T3.1 — o corpus atual manda quase tudo para o fallback web.** Rodando a
+  demo contra o banco real, "como acesso o Canvas?" saiu com `origem="web"` em
+  ~60s na primeira vez. Não é bug do front (as fontes vieram com URL clicável,
+  que é T1.3 funcionando) — é **T0.6 ainda não feita**. A demo torna isso
+  visível de uma forma que nenhum log tornava: o badge amarelo em quase toda
+  pergunta é o argumento pronto para priorizar a calibração do limiar e a
+  ingestão.
 
 ### Por que cada item
 
@@ -183,17 +268,33 @@ tomada, só `RateLimiter` muda (`get_rate_limiter()` já é o único acesso).
   origem via `StaticFiles` evita CORS na demo (T2.2 continua necessário
   para o AVA de verdade).
 
-#### Escopo do frontend de demonstração
+#### O frontend de demonstração, como ficou
 
-Um arquivo HTML estático com `fetch`, sem framework e sem build (~150 linhas):
+Um arquivo (`app/static/index.html`), sem framework, sem build e **sem nenhum
+recurso externo** — nada de CDN, nada de fonte remota. Não é minimalismo por
+estética: é o que permite abrir a demo numa máquina sem internet (a banca, a
+sala de aula) e o que garante que a página não manda a pergunta do aluno para um
+terceiro.
 
+- interface de conversa, com a marca do agente (SVG radial de 12 raios,
+  definida uma vez e reaproveitada por `<use>` no avatar de cada resposta);
 - campo de pergunta + `<select>` de assunto populado por `GET /v1/assuntos`;
-- a resposta;
+- indicador de estado no cabeçalho, vindo de `GET /v1/ready`;
 - **badge de origem** com cor: `base` (verde, material interno) / `web`
-  (amarelo, página pública) / `nenhuma` (cinza, encaminhado à secretaria);
-- lista de fontes, com link quando houver URL;
-- latência e indicador de cache hit;
-- `<details>` com o JSON cru — ajuda em apresentação para banca/gestor.
+  (amarelo, página pública) / `encaminhado` (azul, outro departamento) /
+  `nenhuma` (cinza, sem resposta em nenhuma fonte). O `title` de cada badge
+  explica o que aquele caminho significa — é o guardrail ficando visível;
+- lista de fontes com link quando houver URL, e o score de cada uma;
+- latência (medida no cliente, incluindo rede: é a que o aluno sente) e o chip
+  de cache hit;
+- `<details>` com o JSON cru da resposta — para apresentação a banca/gestor;
+- erros traduzidos a partir do envelope de T1.5 pela chave `erro`, que é
+  estável (429 mostra o `Retry-After`, 503 diz que é o serviço), nunca por
+  parsing do texto de `detalhe`;
+- renderização mínima do markdown que o modelo de fato produz (listas
+  numeradas de procedimento, negrito, `código`, URL solta), com **escape
+  aplicado antes** de qualquer regra: o texto vem do LLM, que por sua vez leu
+  páginas externas.
 
 ---
 
@@ -218,11 +319,16 @@ Um arquivo HTML estático com `fetch`, sem framework e sem build (~150 linhas):
 | S0 — Fundação | ~5h | Tudo |
 | ✅ S1 — Borda HTTP | ~13h | Integração multi-plataforma |
 | ✅ S2 — Segurança | ~8h | Exposição fora da máquina de desenvolvimento |
-| S3 — Demo + sinal | ~11h | Demonstração e roadmap de conteúdo |
+| ✅ S3 — Demo + sinal | ~11h | Demonstração e roadmap de conteúdo |
 
-**Caminho mais curto até uma demo defensável:**
-T0 completo → T1.1, T1.2, T1.3, T1.5 → T2.2 → T3.1.
-Cerca de 12h, e já dá para mostrar funcionando com fontes clicáveis.
+**O que ficou aberto:** S0 inteira, e ela agora é o gargalo real. A demo tornou
+isso visível — com o corpus atual, quase toda pergunta sai com badge amarelo
+(`origem="web"`), o que significa ~30-60s de latência num caminho que existia
+para ser exceção. **T0.6 (calibrar `RELEVANCE_THRESHOLD`) e T0.2 (ingerir um
+assunto real de verdade) são o próximo trabalho**, e agora há duas ferramentas
+para medir o resultado que antes não existiam: `python -m scripts.lacunas`
+(o que falta indexar, priorizado) e o badge de origem na demo (proporção do
+tráfego que a base cobre).
 
 ---
 
@@ -239,17 +345,23 @@ Cerca de 12h, e já dá para mostrar funcionando com fontes clicáveis.
    S2 foi feita antes. **T2.2 (CORS) já está pronto para o front de T3.1**, que
    de todo modo será servido da mesma origem (`StaticFiles`).
 
-3. **NOVA — a demo (T3.1) precisa de uma chave de API no navegador.** Com T2.1
-   no lugar, um HTML estático que chama `/v1/ask` via `fetch` teria que carregar
-   a chave no JS, onde ela é pública para qualquer um que abra o DevTools.
-   Opções:
-   - (a) a rota `/demo` (mesma origem) injeta a chave no HTML no servidor e usa
-     uma chave própria, de baixo teto diário, revogável sem afetar o AVA;
-   - (b) sessão de demo: um cookie de curta duração emitido por `/demo`,
-     aceito como alternativa à `X-API-Key` só para essa origem.
+3. ~~**A demo (T3.1) precisa de uma chave de API no navegador.**~~ **Resolvido
+   em (a)**: `/demo` injeta a chave no HTML no servidor. A opção (b) (cookie de
+   sessão) foi descartada — cria um segundo mecanismo de autenticação para
+   manter e testar, e resolve um problema que os tetos abaixo já contêm.
 
-   Sem decisão em contrário, seguir com **(a)**: mantém a demo como um arquivo
-   estático e não cria um segundo mecanismo de autenticação para manter.
+   A chave continua pública para quem abrir o DevTools; isso não tem solução
+   dentro de um arquivo estático. O que foi controlado é o **estrago**:
+   - integração própria (`DEMO_CONSUMIDOR`, default `demo`), então revogá-la não
+     derruba o AVA;
+   - teto diário próprio (`RATE_LIMIT_DIARIO_POR_CONSUMIDOR=demo:200`), então o
+     pior caso de abuso é a demo parar — e o teto **global** é checado antes do
+     próprio, para que nenhum consumidor passe do limite de custo do serviço;
+   - injetada em runtime, nunca commitada: o arquivo em disco tem só o
+     placeholder, e há teste travando isso
+     (`test_o_arquivo_em_disco_nao_contem_chave_nenhuma`);
+   - `Cache-Control: no-store` na resposta — a página tem uma chave dentro, e um
+     proxy guardando isso é como ela sobrevive a uma rotação.
 
 ---
 
@@ -274,6 +386,16 @@ multi-plataforma. Cada item virou uma tarefa acima.
 | Interações não são registradas — sinal de lacuna é descartado | T3.2, T3.3 |
 | Cache pode servir a resposta de outra pergunta | ✅ T2.4 |
 | Sem memória — follow-up quebra o retrieval | T4.1 |
+
+Achados de S3 que entraram na tabela depois:
+
+| Achado | Tarefa |
+|---|---|
+| Interações não são correlacionáveis com a resposta que o aluno recebeu | ✅ T3.2 |
+| `topico` (escrito pelo LLM) é persistido e pode repetir RA/CPF da pergunta | ✅ T3.4 |
+| Sinal de `grounded=false` gravado mas nunca lido | ✅ T3.3 |
+| Cache hit invisível para quem chama a API | ✅ T3.1 (`Answer.cached`) |
+| Teto de custo só global — chave pública da demo gastaria o do AVA | ✅ T3.1 |
 
 **A estrutura atual do FastAPI comporta isso?** O núcleo sim, a borda não —
 e isso é uma boa notícia, porque o custo fica baixo.

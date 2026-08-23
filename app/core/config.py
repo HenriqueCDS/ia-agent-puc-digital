@@ -1,5 +1,7 @@
 """Configuração central, carregada do .env."""
 
+import logging
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_RAW_DIR = PROJECT_ROOT / "data" / "raw"
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -276,6 +280,26 @@ class Settings(BaseSettings):
     # Teto do processo inteiro, por dia (UTC). É o limite de custo: mesmo com
     # várias integrações bem-comportadas, a soma não passa disto.
     rate_limit_diario_global: int = 2000
+    # Teto diário POR consumidor, no formato `nome:limite,outro:limite`. Só
+    # entra quem for listado; os demais respondem ao teto global.
+    #
+    # Existe por causa da demo (T3.1): a chave dela vive num HTML público, e o
+    # teto global sozinho significa que quem abrir o DevTools pode consumir o
+    # orçamento do dia inteiro — inclusive o do AVA. Com um teto próprio, o pior
+    # caso da demo é a demo parar.
+    rate_limit_diario_por_consumidor: str = ""
+
+    # --- Demo web (T3.1) ---
+    # Serve `app/static/index.html` em `/demo`. Desligar tira a rota do ar sem
+    # mexer em nada da v1.
+    demo_enabled: bool = True
+    # Nome (em API_KEYS) da integração que a demo usa. A chave é injetada no
+    # HTML pelo servidor — é pública para quem abrir o DevTools, e é por isso
+    # que ela é uma integração PRÓPRIA: revogá-la ou estourar o teto dela não
+    # afeta o AVA. Referenciar por NOME, e não repetir a chave numa segunda
+    # variável, evita o modo de falha silencioso de rotacionar API_KEYS e
+    # esquecer da cópia.
+    demo_consumidor: str = "demo"
 
     # --- Chamada ao LLM (T2.5) ---
     # Sem isto, uma request pendurada no Gemini segura uma thread do pool do
@@ -295,6 +319,34 @@ class Settings(BaseSettings):
             if chave:
                 mapa[chave.strip()] = nome.strip()
         return mapa
+
+    def chave_do_consumidor(self, nome: str) -> str | None:
+        """Chave registrada para uma integração, ou None se ela não existe.
+
+        Busca inversa de `api_keys_por_chave` — usada só pela demo (T3.1), que
+        é o único lugar do sistema que precisa PRODUZIR uma chave em vez de
+        conferir uma recebida.
+        """
+        return next(
+            (chave for chave, registrado in self.api_keys_por_chave.items() if registrado == nome),
+            None,
+        )
+
+    @property
+    def tetos_diarios_por_consumidor(self) -> dict[str, int]:
+        """`{nome: teto}`. Entrada malformada é ignorada com log, não derruba o boot."""
+        tetos: dict[str, int] = {}
+        for entrada in _csv(self.rate_limit_diario_por_consumidor):
+            nome, _, limite = entrada.partition(":")
+            try:
+                tetos[nome.strip()] = int(limite)
+            except ValueError:
+                _logger.warning(
+                    "RATE_LIMIT_DIARIO_POR_CONSUMIDOR: entrada ignorada (%r); "
+                    "formato esperado `nome:limite`",
+                    entrada,
+                )
+        return tetos
 
     @property
     def cors_origins_lista(self) -> list[str]:
