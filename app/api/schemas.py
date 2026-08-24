@@ -14,6 +14,22 @@ class AskRequest(BaseModel):
     # reclamar, e você paga tokens de entrada por lixo.
     pergunta: str = Field(min_length=3, max_length=1000)
     assunto: str | None = None
+    # Override do modelo, `[provider:]modelo` (ex.: `groq:llama-3.1-8b-instant`).
+    # OPCIONAL e ignorável: quem não manda o campo tem o comportamento de sempre
+    # — a cadeia com fallback —, então o contrato de `/ask` continua compatível
+    # com quem já integra. Por padrão não usa cache (repetir a mesma pergunta
+    # com o mesmo override chama o LLM de novo); `MODELO_OVERRIDE_CACHE_ENABLED`
+    # liga o cache também para ele — o modelo entra na chave, então não mistura
+    # com outro modelo nem com a cadeia normal.
+    #
+    # Só é aceito com `ASK_MODELO_OVERRIDE_ENABLED=true`; com o switch desligado
+    # (o padrão) a requisição é rejeitada em vez de o campo ser silenciosamente
+    # ignorado. Ignorar seria pior: quem está comparando modelos receberia a
+    # resposta do modelo de sempre achando que testou outro.
+    #
+    # `max_length` porque isto vira o `model` de uma chamada externa — sem
+    # limite, é um campo de texto livre indo para o provedor.
+    modelo: str | None = Field(default=None, max_length=120)
 
 
 class SourceOut(BaseModel):
@@ -45,6 +61,33 @@ class AskResponse(BaseModel):
 
 class AssuntosOut(BaseModel):
     assuntos: list[str]
+
+
+class ProviderOut(BaseModel):
+    """Um provider da cadeia, para o seletor de modelo da demo (`GET /v1/modelos`)."""
+
+    provider: str
+    modelo_padrao: str
+
+
+class ModelosOut(BaseModel):
+    """Resposta de `GET /v1/modelos`: o que a demo precisa para montar o seletor
+    sem chamar nenhum provedor — só os defaults do `.env` e o feature flag.
+
+    `override_enabled` espelha `ASK_MODELO_OVERRIDE_ENABLED`: o frontend usa
+    para decidir se mostra o seletor. Sem isso, a demo ofereceria um controle
+    que sempre devolveria 422 — pior que não ter o controle."""
+
+    override_enabled: bool
+    providers: list[ProviderOut]
+
+
+class CatalogoOut(BaseModel):
+    """Resposta de `GET /v1/modelos/{provider}`: o catálogo completo, buscado
+    sob demanda (ver `providers/chain.listar_modelos_cache`)."""
+
+    provider: str
+    modelos: list[str]
 
 
 class ProntidaoOut(BaseModel):

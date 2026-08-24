@@ -15,6 +15,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.api.ratelimit import RateLimitExcedido
 from app.api.schemas import ErroOut
+from app.providers.chain import ModeloInvalido
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,14 @@ def registrar_handlers(app: FastAPI) -> None:
     async def _assunto_invalido(request: Request, exc: AssuntoInvalido) -> JSONResponse:
         return _envelope(request, 422, "assunto_invalido", str(exc))
 
+    @app.exception_handler(ModeloInvalido)
+    async def _modelo_invalido(request: Request, exc: ModeloInvalido) -> JSONResponse:
+        # Handler próprio, e não o `ValueError` genérico abaixo: `erro` é a
+        # chave estável que quem integra lê programaticamente, e devolver
+        # "pergunta_invalida" para um `modelo` errado mandaria o cliente
+        # reescrever a pergunta — o único campo que estava certo.
+        return _envelope(request, 422, "modelo_invalido", str(exc))
+
     @app.exception_handler(ValueError)
     async def _valor_invalido(request: Request, exc: ValueError) -> JSONResponse:
         # Ex.: pergunta vazia (app/agent/preprocess.normalize). AssuntoInvalido
@@ -100,8 +109,11 @@ def registrar_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RuntimeError)
     async def _config_ausente(request: Request, exc: RuntimeError) -> JSONResponse:
-        # `_require_api_key` em app/providers/gemini.py: GOOGLE_API_KEY não
-        # configurada. 503, não 500: é o serviço indisponível, não o pedido errado.
+        # Dois casos, mesma resposta: nenhuma chave de LLM configurada (cadeia
+        # vazia, `ProviderChain.__init__`) e todos os providers indisponíveis
+        # (`base.TodosProvidersFalharam`, que é `RuntimeError` justamente para
+        # cair aqui). 503, não 500: é o serviço indisponível, não o pedido
+        # errado — e é o código que diz a quem integra que vale tentar de novo.
         return _envelope(request, 503, "servico_indisponivel", str(exc))
 
     @app.exception_handler(OperationalError)

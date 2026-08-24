@@ -25,9 +25,39 @@ ingest de novo não duplica nem deixa conteúdo órfão.
 opcional por assunto e corte por limiar de relevância (`RELEVANCE_THRESHOLD`).
 
 **Agente** — monta o prompt com os trechos recuperados e suas citações, chama o
-Gemini e devolve a resposta com as fontes (`arquivo, página`). Quando nada passa
+LLM e devolve a resposta com as fontes (`arquivo, página`). Quando nada passa
 do limiar, não chama o LLM com contexto vazio: cai no fallback de busca externa
 abaixo.
+
+**Cadeia de provedores** — a chamada ao LLM passa por uma cadeia de fallback
+(`LLM_PROVIDERS=gemini,groq,openrouter`): o primeiro que responder vence, e um
+provedor fora do ar (cota estourada, credencial inválida, timeout, 5xx) faz a
+pergunta cair para o próximo **sem** o aluno perceber. Erro do *pedido* (prompt
+inválido, modelo inexistente) propaga em vez de cair — nenhum outro provedor
+aceitaria o mesmo pedido. Uma tentativa por provedor, sem backoff: fallback é
+perguntar a outro, retry é insistir com o mesmo. Ver `app/providers/`.
+
+**Escolha do modelo** — cada provedor tem o seu no `.env` (`CHAT_MODEL`,
+`GROQ_MODEL`, `OPENROUTER_MODEL`). Modelo fora do catálogo da chave dá 404 com
+uma mensagem que não distingue "não existe" de "você não tem acesso" — as duas
+se resolvem olhando o catálogo da própria chave:
+
+```bash
+python -m scripts.modelos            # o que cada chave acessa; marca o do .env
+python -m scripts.ask "..." --modelo groq:llama-3.1-8b-instant   # testa sem editar o .env
+```
+
+Um 404 desses **não derruba** o `/ask`: o provedor mal configurado sai de cena e
+o próximo responde — mas a linha sai em `ERROR`, porque esperar não conserta.
+Para escolher o modelo por requisição no `POST /ask` (campo opcional `modelo`,
+sem fallback), ligue `ASK_MODELO_OVERRIDE_ENABLED` — desligado por padrão, já
+que a chave é da instituição e o teto diário conta requisições, não custo.
+
+Por padrão o override também não usa cache (repetir a mesma pergunta com o
+mesmo modelo paga o LLM de novo a cada vez); `MODELO_OVERRIDE_CACHE_ENABLED`
+liga o cache também para ele. É seguro ligar: o modelo entra na chave do
+cache, então um override nunca serve a resposta cacheada de outro modelo nem
+da cadeia normal.
 
 **Fallback de busca externa** — quando o retrieval não devolve nada, o agente
 procura a resposta em páginas públicas oficiais antes de encaminhar para a
@@ -73,7 +103,7 @@ Gemini por canal e revogar um consumidor sem derrubar os outros. Cada `/ask`
 que não bate cache é uma chamada paga mais até 5 buscas web, então o endpoint
 aberto seria um proxy grátis para a cota da instituição. Sobre isso vêm rate
 limit por consumidor (janela deslizante de 60s) e um teto diário do processo,
-CORS restrito às origens do `.env`, e timeout na chamada ao Gemini. Ver
+CORS restrito às origens do `.env`, e timeout na chamada ao LLM. Ver
 `app/api/deps.py`, `app/api/ratelimit.py` e `app/api/app.py`.
 
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
@@ -114,7 +144,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 2. configuração
-copy .env.example .env          # preencha GOOGLE_API_KEY
+copy .env.example .env          # preencha ao menos GEMINI_API_KEY
 
 # 3. banco (Postgres + pgvector)
 docker compose up -d
@@ -204,7 +234,7 @@ python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl   # e/ou 
 ```json
 {"canal":"api:ava","request_id":"78bbd705-e16c-417b-a546-b8b08f6b5e13","pii":null,
  "assunto":"canvas","assunto_origem":"metadata","topico":"envio de atividade",
- "pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash",
+ "pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash","provider":"gemini",
  "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"alta_confianca":true,
  "cache_hit":false,"input_tokens":120,"output_tokens":30,
  "ms_retrieve":41.2,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
@@ -392,7 +422,7 @@ pergunta ── preprocess.py ── triagem.py ──► outro departamento?
        │                    │                   │
       hit                  miss                 │
        │                    ▼                   │
-       │      responder.py ── Gemini            │
+       │      responder.py ── LLM (cadeia)      │
        │                    │                   │
        │            contexto serve?             │
        │              não ──┴── sim             │
@@ -406,7 +436,7 @@ pergunta ── preprocess.py ── triagem.py ──► outro departamento?
        │                        │      achou       nada
        │                        │         │           │
        │                        │         ▼           ▼
-       │                        │      Gemini    secretaria
+       │                        │       LLM      secretaria
        ▼                        ▼    (prompt web) origem="nenhuma"
         resposta + fontes (arquivo, página)   resposta + fontes (URL)
         origem="base"                         origem="web"
@@ -423,7 +453,9 @@ o sinal que vira pauta de ingestão.
 |---|---|
 | `app/core/` | configuração e contratos (`Query`, `Answer`, `RetrievedChunk`) |
 | `app/core/telemetry.py` | 1 linha JSON por pergunta: token, latência, guardrail, qualidade |
-| `app/providers/gemini.py` | **único** ponto que conhece o provedor de IA |
+| `app/providers/` | **único** ponto que conhece um SDK de LLM |
+| `app/providers/chain.py` | cadeia de fallback entre Gemini, Groq e OpenRouter |
+| `app/providers/base.py` | interface `LLMProvider` + regra de quando cair p/ o próximo |
 | `app/ingestion/loaders/` | fonte de dados → `Document` |
 | `app/ingestion/chunker.py` | divisão em chunks (função pura) |
 | `app/ingestion/pipeline.py` | orquestra load → chunk → embed → indexa |

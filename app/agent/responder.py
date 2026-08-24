@@ -20,7 +20,7 @@ from app.core import telemetry
 from app.core.config import settings
 from app.core.models import Answer, Query, RetrievedChunk
 from app.db.response_cache import get_cached_answer, set_cached_answer
-from app.providers.gemini import get_chat_model
+from app.providers.chain import cadeia_para_modelo, get_chat_model
 from app.retrieval.retriever import is_exact_match, retrieve
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,25 @@ def _format_context(chunks: list[RetrievedChunk]) -> str:
     return "\n\n---\n\n".join(
         f"[Fonte: {c.citation}]\n{c.document.page_content}" for c in chunks
     )
+
+
+def _resolver_llm(query: Query, llm: BaseChatModel | None) -> BaseChatModel:
+    """O LLM desta pergunta, na ordem: injetado > override da query > cadeia.
+
+    O injetado vence sempre porque é o dublê dos testes e o ponto de extensão de
+    quem usa o agente como biblioteca — um override vindo do request não pode
+    passar por cima dele.
+
+    Resolvido aqui, e não nos dois pontos de chamada, para que `query.modelo`
+    valha igual no caminho da base e no da web. Espalhar isso seria repetir a
+    mesma decisão em cada fonte de contexto nova (ver o PONTO DE EXTENSÃO em
+    `_responder`), e é exatamente onde se esquece.
+    """
+    if llm is not None:
+        return llm
+    if query.modelo:
+        return cadeia_para_modelo(query.modelo)
+    return get_chat_model()
 
 
 # Diferenças que não mudam a resposta: caixa, espaço repetido e a pontuação
@@ -63,9 +82,19 @@ def _cache_key(query: Query, chunks: list[RetrievedChunk], alta_confianca: bool)
     a pagar uma chamada ao LLM. Trade escolhido de propósito — a alternativa
     considerada (cachear só no ramo `alta_confianca`) preservaria mais hits mas
     deixaria o mesmo erro de pé no ramo comum, que é onde ele acontece.
+
+    `query.modelo` também entra na chave (sempre, mesmo quando vazio) — é o que
+    torna `settings.modelo_override_cache_enabled` seguro de ligar: um override
+    (`groq:x`) nunca compartilha entrada com a cadeia normal nem com outro
+    override (`gemini:y`). Sem isso, ligar o switch reintroduziria exatamente o
+    bug que desligá-lo por padrão evitava — servir a resposta de um modelo para
+    a pergunta feita a outro.
     """
     ids = sorted(c.document.id or "" for c in chunks)
-    base = f"{_normalizar_pergunta(query.text)}|{query.assunto or ''}|{alta_confianca}|{','.join(ids)}"
+    base = (
+        f"{_normalizar_pergunta(query.text)}|{query.assunto or ''}|{alta_confianca}|"
+        f"{','.join(ids)}|{query.modelo or ''}"
+    )
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
@@ -123,7 +152,7 @@ def _responder_pela_web(
     if not resultados:
         return _encaminhar_para_secretaria()
 
-    llm = llm or get_chat_model()
+    llm = _resolver_llm(query, llm)
     mensagens = ANSWER_PROMPT_WEB.format_messages(
         contexto=_format_context(resultados),
         pergunta=query.text,
@@ -296,7 +325,18 @@ def _tentar_base(
     # Cache pelo conjunto de chunks (ver _cache_key), checado só agora — depois
     # do guardrail em _responder — para não mascarar uma pergunta sem contexto e
     # não exigir GOOGLE_API_KEY configurada quando a resposta já está cacheada.
-    cache_key = _cache_key(query, chunks, alta_confianca) if settings.cache_enabled else None
+    #
+    # `query.modelo` desliga o cache por padrão (nem lê nem grava): o override
+    # existe para avaliar um modelo, e sem `MODELO_OVERRIDE_CACHE_ENABLED`
+    # ligado, cachear a resposta do modelo experimental entregaria ela ao
+    # próximo aluno com a mesma pergunta — mesma classe de bug que a T2.4
+    # fechou ao colocar a pergunta na chave. Com o switch ligado, o próprio
+    # modelo entra na chave (ver `_cache_key`), então cada override tem sua
+    # entrada própria e não contamina a cadeia normal nem outro modelo.
+    usar_cache = settings.cache_enabled and (
+        not query.modelo or settings.modelo_override_cache_enabled
+    )
+    cache_key = _cache_key(query, chunks, alta_confianca) if usar_cache else None
     bruto = None
     if cache_key:
         bruto = get_cached_answer(cache_key)
@@ -305,7 +345,7 @@ def _tentar_base(
             logger.info("cache hit (%s...)", cache_key[:8])
 
     if bruto is None:
-        llm = llm or get_chat_model()
+        llm = _resolver_llm(query, llm)
         mensagens = prompt.format_messages(
             contexto=_format_context(chunks),
             pergunta=query.text,

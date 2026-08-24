@@ -1,71 +1,101 @@
-"""Fábricas dos modelos de IA.
+"""Provider do Gemini — o primeiro da cadeia (ver `app/providers/chain.py`).
 
-Único lugar do projeto que conhece o provedor de IA. Trocar de provedor =
-trocar este arquivo, desde que as classes devolvidas continuem implementando
-`Embeddings` e `BaseChatModel` do LangChain.
+Continua sendo o provedor preferido: é o modelo com que os prompts em
+`app/agent/prompts.py` foram calibrados, e os outros dois existem para o dia em
+que ele não atender, não para dividir tráfego com ele.
 
-Embeddings rodam localmente (HuggingFace/sentence-transformers) para não
-depender de cota de API — o chat continua no Gemini, que é usado bem menos
-(uma chamada por pergunta do usuário, contra uma por chunk na ingestão).
+`get_embeddings` saiu daqui para `app/providers/embeddings.py` — os embeddings
+nunca foram do Gemini (rodam locais, via HuggingFace) e o nome do módulo já era
+enganoso antes desta mudança.
 """
 
-from functools import lru_cache
+import logging
 
-from langchain_core.embeddings import Embeddings
-from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_huggingface import HuggingFaceEmbeddings
 
-from app.core.config import settings
+from app.providers.base import LLMProvider
 
-
-def _require_api_key() -> str:
-    if not settings.google_api_key:
-        raise RuntimeError(
-            "GOOGLE_API_KEY não configurada. Copie .env.example para .env e preencha."
-        )
-    return settings.google_api_key
+logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=1)
-def get_embeddings() -> Embeddings:
-    """Modelo local. Tenta primeiro em modo offline (sem bater no HF Hub) —
+class GeminiProvider(LLMProvider):
+    """Gemini via `langchain-google-genai`.
 
-    depois do primeiro download o modelo já está em cache, então checar a rede
-    a cada execução só custa latência. Só volta a acessar a rede (e baixa/
-    atualiza o cache) se ainda não tiver nada salvo localmente — nesse caso,
-    usa `hf_token` (se configurado) para maior rate limit no download.
+    `timeout` é obrigatório e não decorativo: as rotas da API são síncronas
+    (`def`), então o FastAPI as roda no threadpool — uma chamada pendurada
+    segura uma thread até o socket morrer sozinho. Poucas dessas e o servidor
+    inteiro para de responder, inclusive as perguntas que sairiam do cache sem
+    tocar no LLM.
     """
-    model_kwargs = {"token": settings.hf_token} if settings.hf_token else {}
-    try:
-        return HuggingFaceEmbeddings(
-            model_name=settings.embedding_model,
-            model_kwargs={**model_kwargs, "local_files_only": True},
+
+    nome = "gemini"
+
+    def __init__(self, api_key: str, modelo: str, timeout: float, tentativas: int):
+        self.modelo = modelo
+        # Guardada só para `listar_modelos` (a CLI de catálogo): o
+        # `langchain-google-genai` não expõe o `ListModels` da API, então essa
+        # chamada é feita pelo SDK do Google direto. Nunca vai para log — ver
+        # `providers/chain.sem_segredo`.
+        self._api_key = api_key
+        # ATENÇÃO à unidade: em `langchain-google-genai`, `max_retries` alimenta
+        # um `stop_after_attempt` do tenacity — é o número TOTAL de tentativas,
+        # não de repetições (o default 6 significa 6 chamadas). Já no SDK da
+        # OpenAI o mesmo nome significa "repetições depois da primeira". A
+        # tradução das duas semânticas para o mesmo `tentativas` é feita aqui e
+        # em `openai_compat.py`, e é por isso que a configuração fala em
+        # TENTATIVAS, não em retries — ver `settings.llm_tentativas_por_provider`.
+        self._llm = ChatGoogleGenerativeAI(
+            model=modelo,
+            google_api_key=api_key,
+            temperature=0.1,  # suporte acadêmico: previsibilidade > criatividade
+            timeout=timeout,
+            max_retries=max(tentativas, 1),
         )
-    except OSError:
-        return HuggingFaceEmbeddings(
-            model_name=settings.embedding_model,
-            model_kwargs=model_kwargs,
-        )
 
+    def generate(self, mensagens: list[BaseMessage]) -> AIMessage:
+        return self._llm.invoke(mensagens)
 
-@lru_cache(maxsize=1)
-def get_chat_model() -> BaseChatModel:
-    """T2.5 — `timeout` e `max_retries` explícitos.
+    def listar_modelos(self) -> list[str]:
+        """`ListModels` da API do Google, via REST direto — de propósito, SEM o SDK.
 
-    As rotas da API são síncronas (`def`), então o FastAPI as roda no
-    threadpool: uma chamada pendurada no Gemini segura uma thread até o socket
-    morrer sozinho. Poucas dessas e o pool acaba — o servidor inteiro para de
-    responder, inclusive as perguntas que sairiam do cache sem tocar no LLM.
+        `google.generativeai.list_models()` desserializa a resposta num
+        dataclass `Model` fixo da versão instalada do SDK. Bug real visto em
+        produção: a API já devolve um campo (`thinking`) que o SDK instalado
+        não conhece, e a desserialização quebra com
+        `Model.__init__() got an unexpected keyword argument 'thinking'` —
+        pane que atinge TODOS os modelos, porque acontece antes de qualquer
+        filtro rodar. `ListModels` é um contrato JSON estável; ler os dois
+        campos que interessam (`name`, `supportedGenerationMethods`) direto da
+        resposta evita ficar hostage da versão do SDK instalada, que pode
+        atrasar meses atrás do que a API já aceita.
 
-    `max_retries` também é explícito porque o default da lib é 6, e timeout sem
-    limitar retry não resolve nada: o pior caso vira `6 * timeout`. Com 2 e 30s,
-    o teto de espera é o dobro do orçamento, não doze vezes.
-    """
-    return ChatGoogleGenerativeAI(
-        model=settings.chat_model,
-        google_api_key=_require_api_key(),
-        temperature=0.1,  # suporte acadêmico: previsibilidade > criatividade
-        timeout=settings.gemini_timeout,
-        max_retries=settings.gemini_max_retries,
-    )
+        `httpx` e não `requests`: já é dependência do projeto (transitiva do
+        FastAPI/TestClient) — sem biblioteca nova para uma chamada.
+
+        O filtro por `generateContent` não é cosmético: metade do catálogo é de
+        embedding e de `aqa`, e oferecê-los como opção de chat só produziria o
+        próximo 404. O prefixo `models/` sai porque é assim que o nome entra no
+        `.env`.
+        """
+        import httpx
+
+        modelos: list[str] = []
+        params: dict[str, str | int] = {"key": self._api_key, "pageSize": 200}
+        with httpx.Client(timeout=30.0) as cliente:
+            while True:
+                resposta = cliente.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models", params=params
+                )
+                resposta.raise_for_status()
+                corpo = resposta.json()
+                modelos.extend(
+                    modelo["name"].removeprefix("models/")
+                    for modelo in corpo.get("models", [])
+                    if "generateContent" in modelo.get("supportedGenerationMethods", [])
+                )
+                token = corpo.get("nextPageToken")
+                if not token:
+                    break
+                params["pageToken"] = token
+        return sorted(modelos)

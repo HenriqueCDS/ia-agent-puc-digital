@@ -18,7 +18,7 @@ A camada 2 é a que garante a restrição; a 1 é só recall. Nada que venha do
 DuckDuckGo é confiado sem passar pela 2.
 
 A filtragem de relevância reusa as embeddings locais que já estão carregadas
-(`providers.gemini.get_embeddings`) — custo zero de API e critério consistente
+(`providers.embeddings.get_embeddings`) — custo zero de API e critério consistente
 com o corte por limiar do retriever.
 """
 
@@ -33,7 +33,7 @@ from langchain_core.documents import Document
 from app.agent.triagem import classificar
 from app.core.config import WEB_ALLOWLIST, FonteWeb, settings
 from app.core.models import Query, RetrievedChunk
-from app.providers.gemini import get_embeddings
+from app.providers.embeddings import get_embeddings
 
 logger = logging.getLogger(__name__)
 

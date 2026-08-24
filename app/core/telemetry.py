@@ -134,7 +134,20 @@ class Registro:
     canal: str
     assunto: str | None
     pergunta_hash: str
+    # Modelo que DE FATO respondeu. Começa com o configurado (o topo da cadeia)
+    # e é corrigido em `somar_tokens` quando a resposta chega — com uma cadeia
+    # de fallback, o configurado é só um palpite.
     chat_model: str
+
+    # Provider que respondeu ("gemini", "groq", "openrouter"). Nulo quando não
+    # houve chamada ao LLM (cache hit, triagem, guardrail sem fallback).
+    #
+    # É a métrica que torna o fallback contável: com só o log de WARNING dá para
+    # ver que caiu, mas não "quanto do tráfego da semana saiu do Groq" — que é a
+    # pergunta que decide se a cota do Gemini precisa ser aumentada. A tabela é
+    # JSONB (ver app/db/telemetry_store.py), então campo novo não é migração:
+    # `dados->>'provider'` já funciona.
+    provider: str | None = None
 
     # Id da request HTTP (T3.2). O MESMO valor que sai no header `X-Request-Id`
     # e no corpo da resposta — é a ponte entre a reclamação do aluno e a linha
@@ -197,17 +210,31 @@ class Registro:
     erro: str | None = None
 
     def somar_tokens(self, resposta) -> None:
-        """Extrai o uso de token da resposta do LangChain.
+        """Absorve o que a resposta do LangChain traz de custo e de origem.
 
-        Soma em vez de atribuir porque o caminho da web pode gerar mais de uma
-        chamada no futuro. Tolera ausência: dublês de teste e provedores que não
-        reportam uso devolvem `usage_metadata` vazio."""
+        Soma os tokens em vez de atribuir porque o caminho da web pode gerar
+        mais de uma chamada no futuro. Tolera ausência: dublês de teste e
+        provedores que não reportam uso devolvem `usage_metadata` vazio.
+
+        O provider vem junto, e não num método separado, de propósito: este é o
+        único ponto por onde TODA resposta de LLM já passa (base e web), então
+        aqui não tem como esquecer — mesmo motivo da rede de segurança em
+        `responder.answer`. O carimbo é posto pela cadeia
+        (`providers/chain._carimbar`); um LLM injetado direto nos testes não tem
+        `response_metadata` e os campos ficam como estavam.
+        """
         uso = getattr(resposta, "usage_metadata", None) or {}
         entrada, saida = uso.get("input_tokens"), uso.get("output_tokens")
         if entrada is not None:
             self.input_tokens = (self.input_tokens or 0) + entrada
         if saida is not None:
             self.output_tokens = (self.output_tokens or 0) + saida
+
+        metadata = getattr(resposta, "response_metadata", None) or {}
+        # A ÚLTIMA chamada vence quando há duas na mesma resposta (base vetou ->
+        # web): é a que produziu o texto que o aluno recebeu.
+        self.provider = metadata.get("provider") or self.provider
+        self.chat_model = metadata.get("provider_model") or self.chat_model
 
 
 @contextmanager

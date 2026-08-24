@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.core import telemetry
 from app.db import telemetry_store
 from app.db.vector_store import get_vector_store
-from app.providers.gemini import get_embeddings
+from app.providers.embeddings import get_embeddings
 
 logger = logging.getLogger(__name__)
 

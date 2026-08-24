@@ -168,6 +168,11 @@ class Settings(BaseSettings):
     )
 
     google_api_key: str = ""
+    # Nome novo da MESMA chave. `GOOGLE_API_KEY` era o nome quando os embeddings
+    # também eram do Google; agora que só o chat é, `GEMINI_API_KEY` diz melhor
+    # o que ela paga — e casa com `GROQ_API_KEY`/`OPENROUTER_API_KEY`. As duas
+    # continuam válidas (ver `chave_gemini`): um `.env` existente não quebra.
+    gemini_api_key: str = ""
     # Opcional: só evita o aviso de "unauthenticated requests" e dá rate limit
     # maior no download do modelo de embeddings. Sem token, tudo funciona igual.
     hf_token: str = ""
@@ -301,14 +306,99 @@ class Settings(BaseSettings):
     # esquecer da cópia.
     demo_consumidor: str = "demo"
 
-    # --- Chamada ao LLM (T2.5) ---
-    # Sem isto, uma request pendurada no Gemini segura uma thread do pool do
-    # uvicorn indefinidamente (as rotas são `def`, não `async def`) — poucas
-    # dessas e o servidor inteiro para de responder.
-    gemini_timeout: float = 30.0
-    # A lib tenta 6 vezes por padrão; com timeout, isso vira 6x o tempo de
-    # espera no pior caso. 2 cobre a falha transitória sem virar um bloqueio.
-    gemini_max_retries: int = 2
+    # --- Chamada ao LLM: cadeia de providers (T4.1) ---
+    # Ordem de PRIORIDADE, separada por vírgula. É o único lugar que decide quem
+    # é tentado e em que ordem — reordenar, tirar um provedor da cadeia ou rodar
+    # com um só é edição de .env, sem deploy. Provider sem chave configurada sai
+    # da cadeia sozinho (ver providers/chain.construir_providers), então
+    # desligar o Groq é apagar `GROQ_API_KEY` OU tirá-lo daqui.
+    #
+    # A ordem padrão não é arbitrária: Gemini é o modelo com que os prompts em
+    # app/agent/prompts.py foram calibrados; Groq vem em segundo porque é o mais
+    # rápido dos outros dois (um fallback só é bom se o aluno não perceber); o
+    # OpenRouter `:free` fica por último porque é o de cota mais apertada — é
+    # rede de segurança, não provedor de regime.
+    llm_providers: str = "gemini,groq,openrouter"
+
+    groq_api_key: str = ""
+    openrouter_api_key: str = ""
+    # Catálogo dos dois muda com frequência (modelo saído de linha vira 404 —
+    # ver `providers/base._STATUS_DE_CONFIGURACAO` e `scripts/modelos.py`).
+    # Estes defaults foram confirmados no catálogo em 2026-08; se um deles
+    # sumir, `python -m scripts.modelos` diz qual e mostra o resto do catálogo.
+    groq_model: str = "qwen/qwen3.6-27b"
+    openrouter_model: str = "z-ai/glm-5.2:free"
+    # Vazio = a URL padrão do SDK (ver providers/openai_compat.py). Existe para
+    # apontar a cadeia a um proxy/gateway interno sem tocar em código.
+    groq_base_url: str = ""
+    openrouter_base_url: str = ""
+
+    # Timeout POR PROVIDER, em segundos. Sem isto, uma request pendurada no LLM
+    # segura uma thread do pool do uvicorn indefinidamente (as rotas são `def`,
+    # não `async def`) — poucas dessas e o servidor inteiro para de responder.
+    #
+    # Pior caso de espera de um `/ask` = llm_timeout * nº de providers na cadeia
+    # * llm_tentativas_por_provider. Com os padrões: 30s * 3 * 1 = 90s.
+    llm_timeout: float = 30.0
+    # Tentativas DENTRO de um provider antes de cair para o próximo. 1 de
+    # propósito: com três provedores em fila, insistir com quem acabou de
+    # devolver 429 é gastar o orçamento de latência do aluno com a resposta que
+    # já se sabe. Retry é insistir com quem falhou; fallback é perguntar a
+    # outro — e é o segundo que esta cadeia faz.
+    #
+    # O nome fala em TENTATIVAS, e não em retries, porque os dois SDKs usam
+    # `max_retries` com significados opostos (total de chamadas no
+    # langchain-google-genai, repetições depois da primeira no da OpenAI). A
+    # tradução é feita em cada provider; ver os comentários lá.
+    llm_tentativas_por_provider: int = 1
+
+    # Permite que o corpo de `/ask` traga `modelo` e escolha com que modelo
+    # responder (ver `app/core/models.Query.modelo`). DESLIGADO por padrão, e o
+    # padrão é a parte importante: a chave é nossa, então quem pode escolher o
+    # modelo pode escolher o mais caro do catálogo do provedor — o teto diário
+    # em requisições (`rate_limit_diario_global`) conta chamadas, não custo, e
+    # não protege contra isso. Ligue em desenvolvimento e para avaliar modelo;
+    # em produção, deixe `false` e mude o `.env` quando a escolha for definitiva.
+    #
+    # A CLI (`scripts/ask.py --modelo`) não passa por aqui: ela roda com o
+    # `.env` na mão, então já pode tudo o que este switch protege.
+    ask_modelo_override_enabled: bool = False
+
+    # Com `--modelo`/`modelo` o cache fica DESLIGADO por padrão (nem lê nem
+    # grava) — ver `_cache_key` em app/agent/responder.py. Ligue este switch se
+    # quiser que um override repetido (mesmo modelo, mesma pergunta) sirva do
+    # cache em vez de pagar o LLM de novo a cada chamada.
+    #
+    # Seguro por construção: o MODELO entra na chave do cache (ver
+    # `_cache_key`), então ligar isto não corre o risco que o desligamento
+    # original evitava — testar `groq:x` nunca serve a resposta cacheada do
+    # `gemini:y`, nem a de outro modelo do mesmo provider. Cada combinação
+    # (pergunta, chunks, modelo) tem sua própria entrada.
+    modelo_override_cache_enabled: bool = False
+
+    @property
+    def chave_gemini(self) -> str:
+        """`GEMINI_API_KEY`, com `GOOGLE_API_KEY` como nome legado.
+
+        O nome novo vence quando os dois estão preenchidos: quem acabou de
+        configurar `GEMINI_API_KEY` espera que ela seja usada, e uma
+        `GOOGLE_API_KEY` velha e revogada esquecida no .env viraria um 401
+        misterioso.
+        """
+        return self.gemini_api_key or self.google_api_key
+
+    @property
+    def llm_providers_lista(self) -> list[str]:
+        """Nomes da cadeia, normalizados e sem repetição, na ordem declarada.
+
+        Deduplicar importa: `gemini,groq,gemini` construiria dois clientes do
+        Gemini e faria a mesma chave 429 ser tentada duas vezes antes do Groq —
+        exatamente o retry que esta cadeia existe para não fazer.
+        """
+        vistos: dict[str, None] = {}
+        for nome in _csv(self.llm_providers):
+            vistos.setdefault(nome.casefold(), None)
+        return list(vistos)
 
     @property
     def api_keys_por_chave(self) -> dict[str, str]:

@@ -151,9 +151,12 @@ agente-suporte-ead/
 │   ├── core/
 │   │   ├── config.py               # configs via .env (chunk size, thresholds, CACHE_ENABLED etc.)
 │   │   └── models.py                # contratos: Query, RetrievedChunk, Answer
-│   ├── providers/
-│   │   └── gemini.py                # único ponto que conhece o provedor de IA
-│   │                                 #   (embeddings locais HuggingFace + chat Gemini)
+│   ├── providers/                   # único ponto que conhece um SDK de LLM
+│   │   ├── base.py                  # interface LLMProvider + quando cair p/ o próximo
+│   │   ├── chain.py                 # cadeia de fallback (gemini -> groq -> openrouter)
+│   │   ├── gemini.py                # provider 1: gemini-3.6-flash
+│   │   ├── openai_compat.py         # providers 2 e 3: Groq e OpenRouter (API OpenAI)
+│   │   └── embeddings.py            # embeddings locais (HuggingFace) — não é chat
 │   ├── ingestion/
 │   │   ├── loaders/
 │   │   │   └── registry.py          # fonte (pdf/txt/md) -> Document, por extensão
@@ -188,5 +191,5 @@ agente-suporte-ead/
 │
 ├── docker-compose.yml                 # Postgres + pgvector
 ├── requirements.txt
-├── .env.example                        # DATABASE_URL, GOOGLE_API_KEY, CACHE_ENABLED, WEB_FALLBACK_ENABLED etc.
+├── .env.example                        # DATABASE_URL, LLM_PROVIDERS, GEMINI/GROQ/OPENROUTER_API_KEY, CACHE_ENABLED etc.
 └── README.md

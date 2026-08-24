@@ -1,11 +1,18 @@
 # --- LangChain (núcleo + integrações) ---
-langchain-core>=0.3.0,<0.4
+langchain-core>=0.3.11,<0.4   # >=0.3.11: convert_to_openai_messages (providers/openai_compat.py)
 langchain-text-splitters>=0.3.0,<0.4
-langchain-google-genai>=2.0.0,<3.0   # chat (Gemini)
+langchain-google-genai>=2.0.0,<3.0   # chat (Gemini) — provider 1 da cadeia
 langchain-huggingface>=0.1,<0.2      # embeddings locais (sem cota de API)
 sentence-transformers>=3.0
 langchain-postgres>=0.0.13,<0.1
 langchain-community>=0.3.0,<0.4   # document loaders (PDF, texto)
+
+# --- Fallback de chat: Groq e OpenRouter (app/providers/openai_compat.py) ---
+# SDK da OpenAI cru, e não `langchain-openai`: a versão publicada dele exige
+# langchain-core 0.4, e este projeto está preso na 0.3 por causa do
+# langchain-postgres e do langchain-google-genai. A superfície usada é uma
+# chamada de chat — não vale trocar a linha inteira do LangChain por ela.
+openai>=1.40,<4
 
 # --- Banco / pgvector ---
 psycopg[binary]>=3.1

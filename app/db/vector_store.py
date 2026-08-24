@@ -6,7 +6,7 @@ from langchain_postgres import PGVector
 from sqlalchemy import text
 
 from app.core.config import settings
-from app.providers.gemini import get_embeddings
+from app.providers.embeddings import get_embeddings
 
 
 @lru_cache(maxsize=1)

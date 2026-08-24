@@ -328,6 +328,11 @@
     <select id="assunto" aria-label="Filtrar por assunto">
       <option value="">Todos os assuntos</option>
     </select>
+    <!-- Oculto até `carregarModelos()` confirmar que o override está ligado no
+         servidor (ASK_MODELO_OVERRIDE_ENABLED) — ver o comentário lá. Mostrar
+         um seletor que sempre devolveria 422 seria pior que não ter nenhum. -->
+    <select id="modelo" aria-label="Modelo" title="Escolher um modelo específico (sem fallback)" style="display:none">
+    </select>
   </div>
 </header>
 
@@ -531,12 +536,17 @@ function listaDeFontes(fontes) {
   return `<div class="fontes"><h4>Fontes</h4><ol>${itens}</ol></div>`;
 }
 
-function mensagemDoAgente(dados, ms) {
+function mensagemDoAgente(dados, ms, modeloPedido) {
   const origem = ORIGENS[dados.origem] || { rotulo: dados.origem, titulo: "" };
   const chips = [`<span class="chip">${ms} ms</span>`];
   // O cache hit é o que explica uma resposta de 20 ms sem parecer mágica: a
   // mesma pergunta já tinha sido respondida e nenhum token foi gasto de novo.
   if (dados.cache_hit) chips.push('<span class="chip" title="Resposta servida da resposta_cache — nenhuma chamada paga ao LLM">cache hit</span>');
+  // Vem do que ESTA requisição pediu, não da resposta do servidor: o override
+  // não tem fallback (ver ASK_MODELO_OVERRIDE_ENABLED), então o modelo que
+  // respondeu é garantidamente o que foi selecionado — exceto quando a
+  // resposta é de erro, caso em que este bloco nem é montado.
+  if (modeloPedido) chips.push(`<span class="chip" title="Sem fallback — respondeu exatamente este modelo">${escapar(modeloPedido)}</span>`);
 
   const html = `<div class="conteudo">
       <div class="resposta">${renderizarResposta(dados.resposta)}</div>
@@ -573,6 +583,7 @@ function descreverErro(status, corpo, retryAfter) {
       "A integração da demo não está cadastrada em API_KEYS no .env do servidor."];
   }
   if (codigo === "assunto_invalido") return ["Assunto inválido", corpo.detalhe];
+  if (codigo === "modelo_invalido") return ["Modelo indisponível", corpo.detalhe];
   if (codigo === "validacao" || codigo === "pergunta_invalida") {
     return ["Pergunta inválida", "Escreva entre 3 e 1000 caracteres."];
   }
@@ -588,13 +599,19 @@ async function perguntar(texto) {
   atualizarBotao();
 
   const assunto = $("assunto").value || null;
+  // Vazio = cadeia normal com fallback; o seletor só existe quando o servidor
+  // confirmou (via `carregarModelos`) que ASK_MODELO_OVERRIDE_ENABLED está
+  // ligado — ver o comentário no <select id="modelo">.
+  const modeloSelect = $("modelo");
+  const modelo = (modeloSelect && modeloSelect.style.display !== "none" && modeloSelect.value) || null;
+
   const inicio = performance.now();
   let resposta;
   try {
     resposta = await fetch("/v1/ask", {
       method: "POST",
       headers: cabecalhos(),
-      body: JSON.stringify({ pergunta: texto, assunto }),
+      body: JSON.stringify({ pergunta: texto, assunto, ...(modelo ? { modelo } : {}) }),
     });
   } catch (e) {
     encerrar(pensando, mensagemDeErro("Sem conexão com a API", String(e)));
@@ -612,7 +629,7 @@ async function perguntar(texto) {
     encerrar(pensando, mensagemDeErro(titulo, detalhe));
     return;
   }
-  encerrar(pensando, mensagemDoAgente(corpo, ms));
+  encerrar(pensando, mensagemDoAgente(corpo, ms, modelo));
 }
 
 /* ---------- estado do serviço e lista de assuntos ---------- */
@@ -645,6 +662,81 @@ async function carregarAssuntos() {
   } catch { /* o seletor continua em "todos os assuntos" */ }
 }
 
+const PREFIXO_CATALOGO = "__catalogo__";
+
+/*
+ * Seletor de modelo (opcional): dois níveis, espelhando o que a CLI já faz
+ * (`python -m scripts.ask --modelo` + `python -m scripts.modelos`).
+ *
+ *   1. Ao carregar, cada provider da cadeia entra com o modelo PADRÃO do
+ *      `.env` — sem nenhuma chamada extra, é o mesmo dado que `/v1/ready` já
+ *      resume em "chave_llm".
+ *   2. Só quando o aluno pede "Ver mais modelos…" é que o catálogo completo
+ *      do provider é buscado (`GET /v1/modelos/{provider}`) — evita bater nos
+ *      três provedores a cada carga da demo por um recurso que a maioria das
+ *      pessoas nunca vai abrir.
+ *
+ * O seletor inteiro fica OCULTO se o servidor não tiver `override_enabled`:
+ * mostrar um controle que sempre devolve 422 é pior que não mostrar nada.
+ */
+async function carregarModelos() {
+  try {
+    const r = await fetch("/v1/modelos", { headers: cabecalhos() });
+    if (!r.ok) return;
+    const dados = await r.json();
+    if (!dados.override_enabled || !dados.providers.length) return;
+
+    const seletor = $("modelo");
+    seletor.insertAdjacentHTML("beforeend",
+      '<option value="">Modelo padrão (automático)</option>');
+    for (const p of dados.providers) {
+      const grupo = document.createElement("optgroup");
+      grupo.label = p.provider;
+      grupo.dataset.provider = p.provider;
+      grupo.dataset.padrao = p.modelo_padrao;
+      grupo.innerHTML =
+        `<option value="${escapar(p.provider)}:${escapar(p.modelo_padrao)}">`
+        + `${escapar(p.modelo_padrao)} (padrão)</option>`
+        + `<option value="${PREFIXO_CATALOGO}${escapar(p.provider)}">Ver mais modelos…</option>`;
+      seletor.appendChild(grupo);
+    }
+    seletor.style.display = "";
+  } catch { /* seletor continua oculto — a cadeia automática segue disponível */ }
+}
+
+async function expandirCatalogo(seletor, provider, grupo) {
+  seletor.disabled = true;
+  const opcaoCarregando = grupo.querySelector(`option[value="${PREFIXO_CATALOGO}${provider}"]`);
+  if (opcaoCarregando) opcaoCarregando.textContent = "Carregando…";
+  try {
+    const r = await fetch(`/v1/modelos/${encodeURIComponent(provider)}`, { headers: cabecalhos() });
+    const corpo = await r.json().catch(() => null);
+    if (!r.ok) throw new Error((corpo && corpo.detalhe) || `HTTP ${r.status}`);
+
+    const padrao = grupo.dataset.padrao;
+    grupo.innerHTML = corpo.modelos.map((m) => {
+      const rotulo = m === padrao ? `${escapar(m)} (padrão)` : escapar(m);
+      return `<option value="${escapar(provider)}:${escapar(m)}">${rotulo}</option>`;
+    }).join("");
+    // Volta pro automático em vez de deixar o primeiro item do catálogo
+    // selecionado sem o aluno ter escolhido nada.
+    seletor.value = "";
+  } catch (e) {
+    if (opcaoCarregando) opcaoCarregando.textContent = "Falha ao carregar — tente de novo";
+    console.error("catálogo de modelos:", e);
+  } finally {
+    seletor.disabled = false;
+  }
+}
+
+$("modelo").addEventListener("change", (e) => {
+  const seletor = e.target;
+  if (!seletor.value.startsWith(PREFIXO_CATALOGO)) return;
+  const provider = seletor.value.slice(PREFIXO_CATALOGO.length);
+  const grupo = seletor.querySelector(`optgroup[data-provider="${provider}"]`);
+  if (grupo) expandirCatalogo(seletor, provider, grupo);
+});
+
 /* ---------- composer ---------- */
 
 function ajustarAltura() {
@@ -672,6 +764,7 @@ $("sugestoes")?.addEventListener("click", (e) => {
 campo.focus();
 verificarProntidao();
 carregarAssuntos();
+carregarModelos();
 </script>
 </body>
 </html>

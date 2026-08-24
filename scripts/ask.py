@@ -3,6 +3,14 @@
     python -m scripts.ask "Como envio uma atividade no Canvas?"
     python -m scripts.ask "Como acesso o portal?" --assunto puc-digital
     python -m scripts.ask "Como acesso o portal?" --debug   # mostra os chunks e scores
+    python -m scripts.ask "Como envio a atividade?" --modelo gemini:gemini-3.6-flash
+
+`--modelo` responde com UM modelo específico, sem cadeia de fallback — é o
+jeito de comparar dois modelos na base real sem editar o `.env`. Por padrão
+não usa cache (repetir a mesma pergunta com o mesmo modelo chama o LLM de
+novo); ligue `MODELO_OVERRIDE_CACHE_ENABLED` no `.env` para mudar isso — o
+modelo entra na chave do cache, então nunca mistura com outro modelo nem com
+a cadeia normal. Ver os nomes válidos com `python -m scripts.modelos`.
 
 A telemetria (1 linha JSON por pergunta) sai em stderr, separada da resposta, e
 vai também para a tabela `telemetria` no Postgres (retenção de 7 dias):
@@ -25,12 +33,18 @@ def main(
     pergunta: str = typer.Argument(...),
     assunto: str | None = typer.Option(None, "--assunto", "-a", help="Filtra por assunto."),
     debug: bool = typer.Option(False, "--debug", "-d", help="Mostra os chunks recuperados."),
+    modelo: str | None = typer.Option(
+        None,
+        "--modelo",
+        "-m",
+        help="Responde com este modelo (`[provider:]modelo`), sem fallback.",
+    ),
 ) -> None:
     telemetry.configurar_logs()
     telemetry_store.habilitar()
     telemetry.set_canal("cli")
 
-    resultado = answer(Query(text=pergunta, assunto=assunto))
+    resultado = answer(Query(text=pergunta, assunto=assunto, modelo=modelo))
 
     if debug:
         typer.secho("\n--- chunks recuperados ---", fg=typer.colors.CYAN)

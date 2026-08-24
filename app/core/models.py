@@ -32,6 +32,21 @@ class Query:
     assunto: str | None = None  # filtra o retrieval por pasta/assunto
     attachments: list[Path] = field(default_factory=list)
 
+    # Override do modelo, no formato `[provider:]modelo` (ver
+    # `app/providers/chain.cadeia_para_modelo`). `None` = a cadeia normal, com
+    # fallback — que é o caminho de toda pergunta de aluno.
+    #
+    # Existe para avaliar um modelo contra a base real sem editar o `.env` nem
+    # reiniciar o processo: é a diferença entre comparar dois modelos em cinco
+    # minutos e em dois deploys. Por padrão a resposta NÃO passa pelo cache
+    # (nem lê nem grava) — misturar respostas de modelos diferentes na mesma
+    # chave serviria a resposta de um modelo experimental para o aluno
+    # seguinte, que é a classe de bug que a T2.4 existiu para fechar.
+    # `settings.modelo_override_cache_enabled` liga o cache também para
+    # overrides; o modelo entra na chave nesse caso, então cada um tem sua
+    # própria entrada — ver `responder._cache_key`.
+    modelo: str | None = None
+
 
 @dataclass
 class RetrievedChunk:

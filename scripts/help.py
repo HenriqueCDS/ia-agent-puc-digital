@@ -16,6 +16,7 @@ app = typer.Typer(add_completion=False, help="Lista as CLIs do projeto.")
 # (comando, descrição) — mesma descrição do `help=` do typer.Typer de cada módulo.
 _COMANDOS = [
     ("python -m scripts.ask", "Faz uma pergunta ao agente."),
+    ("python -m scripts.modelos", "Lista os modelos disponíveis por provider."),
     ("python -m scripts.ingest", "Indexa os arquivos de data/raw/<assunto>/."),
     ("python -m scripts.list_ingested", "Lista os arquivos indexados na coleção atual."),
     ("python -m scripts.remove_ingested", "Remove arquivos indexados do pgvector."),

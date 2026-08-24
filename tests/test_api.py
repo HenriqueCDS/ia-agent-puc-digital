@@ -263,6 +263,213 @@ def test_anexo_nao_suportado_da_501(client, monkeypatch):
     assert resposta.json()["erro"] == "recurso_nao_suportado"
 
 
+# --- escolha de modelo por requisição -------------------------------------
+
+
+def test_modelo_por_requisicao_e_recusado_por_padrao(client):
+    """DESLIGADO por padrão: a chave é nossa, então quem escolhe o modelo
+    escolhe o mais caro do catálogo do provedor — e o teto diário conta
+    requisições, não custo."""
+    resposta = client.post(
+        "/v1/ask", json={"pergunta": "como envio atividade?", "modelo": "groq:qualquer"}
+    )
+
+    assert resposta.status_code == 422
+    assert resposta.json()["erro"] == "modelo_invalido"
+
+
+def test_modelo_recusado_em_vez_de_ignorado(client, monkeypatch):
+    """Ignorar o campo seria pior que recusar: quem está comparando modelos
+    receberia a resposta do modelo de sempre achando que testou outro."""
+    chamadas = []
+    _dublar_answer_direta(monkeypatch, lambda query: chamadas.append(query))
+
+    client.post("/v1/ask", json={"pergunta": "como envio atividade?", "modelo": "groq:x"})
+
+    assert chamadas == []  # nem chegou a responder com o modelo errado
+
+
+def test_modelo_chega_ao_agente_quando_habilitado(client, monkeypatch):
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", True)
+    recebidas = []
+
+    def fake_answer(query):
+        recebidas.append(query)
+        return Answer(text="ok", sources=[], grounded=True, origem="base")
+
+    _dublar_answer_direta(monkeypatch, fake_answer)
+
+    resposta = client.post(
+        "/v1/ask",
+        json={"pergunta": "como envio atividade?", "modelo": "groq:llama-3.1-8b-instant"},
+    )
+
+    assert resposta.status_code == 200
+    assert recebidas[0].modelo == "groq:llama-3.1-8b-instant"
+
+
+def test_pedido_sem_modelo_continua_igual(client, monkeypatch):
+    """O contrato de `/ask` não mudou para quem já integra: sem o campo, o
+    agente recebe `modelo=None` e segue pela cadeia com fallback."""
+    recebidas = []
+
+    def fake_answer(query):
+        recebidas.append(query)
+        return Answer(text="ok", sources=[], grounded=True, origem="base")
+
+    _dublar_answer_direta(monkeypatch, fake_answer)
+
+    resposta = client.post("/v1/ask", json={"pergunta": "como envio atividade?"})
+
+    assert resposta.status_code == 200
+    assert recebidas[0].modelo is None
+
+
+def test_modelo_invalido_do_agente_vira_422_e_nao_503(client, monkeypatch):
+    """`ModeloInvalido` tem handler próprio: devolver "pergunta_invalida"
+    mandaria o cliente reescrever o único campo que estava certo."""
+    from app.providers.chain import ModeloInvalido
+
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", True)
+
+    def levanta(query):
+        raise ModeloInvalido("Provider 'groq' não tem chave de API configurada.")
+
+    _dublar_answer_direta(monkeypatch, levanta)
+
+    resposta = client.post(
+        "/v1/ask", json={"pergunta": "como envio atividade?", "modelo": "groq:x"}
+    )
+
+    assert resposta.status_code == 422
+    assert resposta.json()["erro"] == "modelo_invalido"
+
+
+# --- /v1/modelos: o seletor da demo -----------------------------------------
+
+
+def _dublar_chaves_llm_habilitadas(monkeypatch, gemini="g", groq="q", openrouter="o") -> None:
+    monkeypatch.setattr(settings, "gemini_api_key", gemini)
+    monkeypatch.setattr(settings, "google_api_key", "")
+    monkeypatch.setattr(settings, "groq_api_key", groq)
+    monkeypatch.setattr(settings, "openrouter_api_key", openrouter)
+
+
+def test_modelos_lista_defaults_sem_chamar_provider_nenhum(client, monkeypatch):
+    """`GET /v1/modelos` é metadado puro do `.env` — não pode bater em rede."""
+    from app.api.routers import v1
+
+    _dublar_chaves_llm_habilitadas(monkeypatch)
+    monkeypatch.setattr(settings, "llm_providers", "gemini,groq,openrouter")
+    monkeypatch.setattr(settings, "chat_model", "gemini-3.6-flash")
+    monkeypatch.setattr(settings, "groq_model", "qwen/qwen3.6-27b")
+    monkeypatch.setattr(settings, "openrouter_model", "z-ai/glm-5.2:free")
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", True)
+
+    def nunca_deveria_chamar(nome):
+        raise AssertionError("GET /v1/modelos não deve tocar em nenhum provider")
+
+    monkeypatch.setattr(v1, "listar_modelos_cache", nunca_deveria_chamar)
+
+    resposta = client.get("/v1/modelos")
+
+    assert resposta.status_code == 200
+    assert resposta.json() == {
+        "override_enabled": True,
+        "providers": [
+            {"provider": "gemini", "modelo_padrao": "gemini-3.6-flash"},
+            {"provider": "groq", "modelo_padrao": "qwen/qwen3.6-27b"},
+            {"provider": "openrouter", "modelo_padrao": "z-ai/glm-5.2:free"},
+        ],
+    }
+
+
+def test_modelos_reflete_override_desligado(client, monkeypatch):
+    """A demo usa este campo para decidir se mostra o seletor — sem isso ela
+    ofereceria um controle que sempre devolveria 422."""
+    _dublar_chaves_llm_habilitadas(monkeypatch)
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", False)
+
+    resposta = client.get("/v1/modelos")
+
+    assert resposta.json()["override_enabled"] is False
+
+
+def test_modelos_omite_provider_sem_chave(client, monkeypatch):
+    """Provider sem chave não pode ser escolhido de qualquer forma
+    (`cadeia_para_modelo` devolveria erro) — não faz sentido oferecê-lo."""
+    _dublar_chaves_llm_habilitadas(monkeypatch, openrouter="")
+    monkeypatch.setattr(settings, "llm_providers", "gemini,groq,openrouter")
+
+    resposta = client.get("/v1/modelos")
+
+    nomes = [p["provider"] for p in resposta.json()["providers"]]
+    assert nomes == ["gemini", "groq"]
+
+
+def test_modelos_exige_autenticacao(app_sem_auth_config):
+    resposta = _client_cru(app_sem_auth_config).get("/v1/modelos")
+
+    assert resposta.status_code == 401
+
+
+def test_catalogo_de_provider_desligado_por_padrao(client, monkeypatch):
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", False)
+
+    resposta = client.get("/v1/modelos/groq")
+
+    assert resposta.status_code == 422
+    assert resposta.json()["erro"] == "modelo_invalido"
+
+
+def test_catalogo_de_provider_habilitado_devolve_a_lista(client, monkeypatch):
+    from app.api.routers import v1
+
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", True)
+    monkeypatch.setattr(v1, "listar_modelos_cache", lambda nome: ("modelo-a", "modelo-b"))
+
+    resposta = client.get("/v1/modelos/groq")
+
+    assert resposta.status_code == 200
+    assert resposta.json() == {"provider": "groq", "modelos": ["modelo-a", "modelo-b"]}
+
+
+def test_catalogo_de_provider_desconhecido_vira_422(client, monkeypatch):
+    from app.api.routers import v1
+    from app.providers.chain import ModeloInvalido
+
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", True)
+
+    def levanta(nome):
+        raise ModeloInvalido(f"Provider {nome!r} não tem chave de API configurada.")
+
+    monkeypatch.setattr(v1, "listar_modelos_cache", levanta)
+
+    resposta = client.get("/v1/modelos/inexistente")
+
+    assert resposta.status_code == 422
+    assert resposta.json()["erro"] == "modelo_invalido"
+
+
+def test_catalogo_falha_do_provider_nao_vaza_a_chave(client, monkeypatch):
+    """O erro do SDK pode ecoar a credencial — `sem_segredo` tem que rodar
+    antes de o texto ir para a RESPOSTA HTTP (não só o log)."""
+    from app.api.routers import v1
+
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", True)
+    monkeypatch.setattr(settings, "groq_api_key", "gsk_chave-secreta-de-verdade-123456")
+
+    def levanta(nome):
+        raise RuntimeError("401: invalid key gsk_chave-secreta-de-verdade-123456")
+
+    monkeypatch.setattr(v1, "listar_modelos_cache", levanta)
+
+    resposta = client.get("/v1/modelos/groq")
+
+    assert "gsk_chave-secreta-de-verdade-123456" not in resposta.text
+    assert resposta.status_code == 422
+
+
 def test_google_api_key_ausente_da_503(client, monkeypatch):
     def levanta(query):
         raise RuntimeError("GOOGLE_API_KEY não configurada.")
@@ -504,9 +711,23 @@ def _dublar_banco(monkeypatch, ok: bool) -> None:
     monkeypatch.setattr(v1, "get_vector_store", lambda: _Store())
 
 
+def _dublar_chaves_llm(monkeypatch, gemini="", groq="", openrouter="") -> None:
+    """Fixa as chaves dos TRÊS providers da cadeia (ver app/providers/chain.py).
+
+    Explícito em vez de mexer só na do Gemini: `/ready` passou a olhar a cadeia
+    inteira, e sem isto o resultado dependeria de quais chaves o desenvolvedor
+    tem no `.env` da própria máquina — o teste passaria localmente e falharia no
+    CI (ou o contrário).
+    """
+    monkeypatch.setattr(settings, "gemini_api_key", gemini)
+    monkeypatch.setattr(settings, "google_api_key", "")
+    monkeypatch.setattr(settings, "groq_api_key", groq)
+    monkeypatch.setattr(settings, "openrouter_api_key", openrouter)
+
+
 def test_ready_ok_com_banco_e_chave(client, monkeypatch):
     _dublar_banco(monkeypatch, ok=True)
-    monkeypatch.setattr(settings, "google_api_key", "chave-qualquer")
+    _dublar_chaves_llm(monkeypatch, gemini="chave-qualquer")
 
     resposta = client.get("/v1/ready")
 
@@ -514,11 +735,25 @@ def test_ready_ok_com_banco_e_chave(client, monkeypatch):
     assert resposta.json() == {"status": "ok", "checagens": {"banco": True, "chave_llm": True}}
 
 
+def test_ready_ok_com_apenas_um_provider_da_cadeia(client, monkeypatch):
+    """UM provider com chave já é pronto: a cadeia de fallback existe para o
+    serviço atender com o que tiver de pé. Exigir os três faria a instalação
+    normal — a que só configurou o Gemini — aparecer como indisponível para o
+    monitoramento enquanto responde perfeitamente."""
+    _dublar_banco(monkeypatch, ok=True)
+    _dublar_chaves_llm(monkeypatch, groq="so-o-groq")
+
+    resposta = client.get("/v1/ready")
+
+    assert resposta.status_code == 200
+    assert resposta.json()["checagens"]["chave_llm"] is True
+
+
 def test_ready_da_503_com_banco_fora_do_ar(client, monkeypatch):
     """O que T2.6 existe para consertar: até aqui `/health` respondia "ok"
     incondicionalmente e o monitoramento ficava verde com o banco derrubado."""
     _dublar_banco(monkeypatch, ok=False)
-    monkeypatch.setattr(settings, "google_api_key", "chave-qualquer")
+    _dublar_chaves_llm(monkeypatch, gemini="chave-qualquer")
 
     resposta = client.get("/v1/ready")
 
@@ -529,8 +764,9 @@ def test_ready_da_503_com_banco_fora_do_ar(client, monkeypatch):
 
 
 def test_ready_da_503_sem_chave_do_llm(client, monkeypatch):
+    """Nenhum dos três configurados: `/ask` não teria a quem perguntar."""
     _dublar_banco(monkeypatch, ok=True)
-    monkeypatch.setattr(settings, "google_api_key", "")
+    _dublar_chaves_llm(monkeypatch)
 
     resposta = client.get("/v1/ready")
 
