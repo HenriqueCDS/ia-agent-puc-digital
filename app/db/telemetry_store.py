@@ -221,6 +221,15 @@ def contar_perguntas(dias: int) -> tuple[int, int]:
     return linha.total or 0, linha.lacunas or 0
 
 
+def limpar_telemetria() -> int:
+    """Apaga todos os registros de telemetria. Usado pela CLI de limpeza (base zerada p/ testes)."""
+    with get_vector_store().session_maker() as sessao:
+        _garantir_tabela(sessao)
+        resultado = sessao.execute(text("DELETE FROM telemetria"))
+        sessao.commit()
+        return resultado.rowcount or 0
+
+
 def habilitar() -> None:
     """Liga a persistência. Chamado pelos entrypoints (CLI, /ask).
 

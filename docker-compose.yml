@@ -9,7 +9,7 @@ services:
     ports:
       # 5433 no host: a 5432 já está ocupada por um PostgreSQL nativo instalado
       # no Windows (serviço postgresql-x64-18). Dentro da rede Docker continua 5432.
-      - "5434:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

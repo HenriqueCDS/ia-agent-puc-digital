@@ -61,3 +61,14 @@ def set_cached_answer(
     with store.session_maker() as session:
         session.execute(stmt, {"cache_key": cache_key, "assunto": assunto, "resposta": resposta})
         session.commit()
+
+
+def clear_cache(store: PGVector | None = None) -> int:
+    """Apaga todo o cache de respostas. Usado pela CLI de limpeza (base zerada p/ testes)."""
+    store = store or get_vector_store()
+    _ensure_table(store)
+
+    with store.session_maker() as session:
+        result = session.execute(text("DELETE FROM resposta_cache"))
+        session.commit()
+        return result.rowcount or 0
