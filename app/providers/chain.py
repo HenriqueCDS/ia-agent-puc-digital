@@ -6,7 +6,7 @@ desistir dele e perguntar para outro. Por isso são no máximo `n` chamadas para
 `n` providers, sem espera entre elas — o pior caso de latência é a soma dos
 timeouts, e é o único orçamento que precisa ser explicado a quem opera.
 
-A cadeia é montada a partir do `.env` (`LLM_PROVIDERS=gemini,groq,openrouter`):
+A cadeia é montada a partir do `.env` (`LLM_PROVIDERS=gemini,huggingface,groq,openrouter`):
 reordenar, desligar um provedor ou rodar com um só é edição de configuração,
 sem deploy de código.
 
@@ -35,8 +35,10 @@ from app.providers.base import (
 from app.providers.gemini import GeminiProvider
 from app.providers.openai_compat import (
     GROQ_BASE_URL,
+    HUGGINGFACE_BASE_URL,
     OPENROUTER_BASE_URL,
     GroqProvider,
+    HuggingFaceProvider,
     OpenRouterProvider,
 )
 
@@ -55,7 +57,7 @@ _PADROES_DE_CHAVE = re.compile(
     # mais longo. Na prática as duas redigem a chave inteira aqui (o `[\w\-]+` é
     # guloso), mas a ordem certa evita a pegadinha se um dos padrões ganhar uma
     # âncora depois.
-    r"\b(?:AIza[\w\-]{10,}|sk-or-[\w\-]{10,}|sk-[\w\-]{10,}|gsk_[\w\-]{10,})\b"
+    r"\b(?:AIza[\w\-]{10,}|sk-or-[\w\-]{10,}|sk-[\w\-]{10,}|gsk_[\w\-]{10,}|hf_[\w\-]{10,})\b"
 )
 
 
@@ -63,6 +65,7 @@ def _segredos_configurados() -> list[str]:
     """Valores de chave que este processo conhece, para redigir do log."""
     candidatos = (
         settings.chave_gemini,
+        settings.hf_token,
         settings.groq_api_key,
         settings.openrouter_api_key,
     )
@@ -99,8 +102,8 @@ class ProviderChain:
             # resposta que a ausência de chave já dava antes desta mudança.
             raise RuntimeError(
                 "Nenhum provider de LLM configurado. Preencha ao menos uma das chaves "
-                "(GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY) no .env e confira "
-                "LLM_PROVIDERS."
+                "(GEMINI_API_KEY, HF_TOKEN, GROQ_API_KEY, OPENROUTER_API_KEY) no .env e "
+                "confira LLM_PROVIDERS."
             )
         self._providers = tuple(providers)
 
@@ -225,6 +228,19 @@ def _gemini(modelo: str | None = None) -> LLMProvider | None:
         modelo=modelo or settings.chat_model,
         timeout=settings.llm_timeout,
         tentativas=settings.llm_tentativas_por_provider,
+    )
+
+
+@_registrar("huggingface")
+def _huggingface(modelo: str | None = None) -> LLMProvider | None:
+    if not settings.hf_token:
+        return None
+    return HuggingFaceProvider(
+        api_key=settings.hf_token,
+        modelo=modelo or settings.hf_model,
+        timeout=settings.llm_timeout,
+        tentativas=settings.llm_tentativas_por_provider,
+        base_url=settings.hf_base_url or HUGGINGFACE_BASE_URL,
     )
 
 
@@ -380,6 +396,7 @@ def modelo_padrao(nome: str) -> str:
     """
     return {
         "gemini": settings.chat_model,
+        "huggingface": settings.hf_model,
         "groq": settings.groq_model,
         "openrouter": settings.openrouter_model,
     }.get(nome, "")
@@ -416,6 +433,7 @@ def chaves_por_provider() -> dict[str, bool]:
     """
     chaves = {
         "gemini": settings.chave_gemini,
+        "huggingface": settings.hf_token,
         "groq": settings.groq_api_key,
         "openrouter": settings.openrouter_api_key,
     }

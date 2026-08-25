@@ -139,6 +139,21 @@ _STATUS_NO_TEXTO = re.compile(
     re.IGNORECASE,
 )
 
+# Exceção à regra "400 é erro do pedido, propaga": estouro de janela de
+# contexto TAMBÉM chega como 400 (é assim que o SDK da OpenAI reporta —
+# `openai.BadRequestError`, "Please reduce the length of the messages or
+# completion"), mas a premissa de "os três provedores rejeitariam igual" não
+# vale aqui. Contexto máximo é por MODELO, não por formato de pedido: o mesmo
+# `mensagens` que estoura um `:free` do OpenRouter cabe folgado no Gemini. Cair
+# para o próximo provider é, portanto, a resposta certa — e é o próprio
+# `TodosProvidersFalharam` (com a causa de cada tentativa) que volta para quem
+# chamou se nenhum aceitar.
+_MENSAGENS_DE_CONTEXTO_EXCEDIDO = re.compile(
+    r"reduce the length|context[_ ]length[_ ]exceeded|maximum context length|"
+    r"context window|too many tokens|prompt is too long",
+    re.IGNORECASE,
+)
+
 
 def _status_http(exc: BaseException) -> int | None:
     """Status HTTP da exceção, procurado nos formatos dos três SDKs.
@@ -186,6 +201,8 @@ def motivo_de_fallback(exc: BaseException) -> Motivo | None:
             return Motivo(f"HTTP {status}")
         if 500 <= status < 600:
             return Motivo(f"HTTP {status} (falha do provedor)")
+        if status == 400 and _MENSAGENS_DE_CONTEXTO_EXCEDIDO.search(str(exc)):
+            return Motivo("HTTP 400 (contexto excede o limite do modelo)")
         # Status conhecido e fora das listas = o PEDIDO é que está errado.
         # Nenhum outro provider vai aceitá-lo, então não adianta tentar.
         return None

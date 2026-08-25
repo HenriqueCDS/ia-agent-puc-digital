@@ -348,9 +348,10 @@ def test_modelo_invalido_do_agente_vira_422_e_nao_503(client, monkeypatch):
 # --- /v1/modelos: o seletor da demo -----------------------------------------
 
 
-def _dublar_chaves_llm_habilitadas(monkeypatch, gemini="g", groq="q", openrouter="o") -> None:
+def _dublar_chaves_llm_habilitadas(monkeypatch, gemini="g", huggingface="h", groq="q", openrouter="o") -> None:
     monkeypatch.setattr(settings, "gemini_api_key", gemini)
     monkeypatch.setattr(settings, "google_api_key", "")
+    monkeypatch.setattr(settings, "hf_token", huggingface)
     monkeypatch.setattr(settings, "groq_api_key", groq)
     monkeypatch.setattr(settings, "openrouter_api_key", openrouter)
 
@@ -711,16 +712,19 @@ def _dublar_banco(monkeypatch, ok: bool) -> None:
     monkeypatch.setattr(v1, "get_vector_store", lambda: _Store())
 
 
-def _dublar_chaves_llm(monkeypatch, gemini="", groq="", openrouter="") -> None:
-    """Fixa as chaves dos TRÊS providers da cadeia (ver app/providers/chain.py).
+def _dublar_chaves_llm(monkeypatch, gemini="", huggingface="", groq="", openrouter="") -> None:
+    """Fixa as chaves dos QUATRO providers da cadeia (ver app/providers/chain.py).
 
     Explícito em vez de mexer só na do Gemini: `/ready` passou a olhar a cadeia
     inteira, e sem isto o resultado dependeria de quais chaves o desenvolvedor
     tem no `.env` da própria máquina — o teste passaria localmente e falharia no
-    CI (ou o contrário).
+    CI (ou o contrário). `hf_token` entra aqui pelo mesmo motivo: é a chave do
+    provider `huggingface`, e também alimenta o download do modelo local de
+    embeddings — zerá-la aqui não afeta os embeddings, só a cadeia de chat.
     """
     monkeypatch.setattr(settings, "gemini_api_key", gemini)
     monkeypatch.setattr(settings, "google_api_key", "")
+    monkeypatch.setattr(settings, "hf_token", huggingface)
     monkeypatch.setattr(settings, "groq_api_key", groq)
     monkeypatch.setattr(settings, "openrouter_api_key", openrouter)
 

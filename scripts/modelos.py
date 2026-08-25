@@ -76,7 +76,7 @@ def _listar(nome: str, filtro: str) -> None:
 @app.command()
 def main(
     provider: str | None = typer.Option(
-        None, "--provider", "-p", help="Só este provider (gemini, groq, openrouter)."
+        None, "--provider", "-p", help="Só este provider (gemini, huggingface, groq, openrouter)."
     ),
     filtro: str = typer.Option("", "--filtro", "-f", help="Só modelos que contêm o termo."),
 ) -> None:

@@ -1,9 +1,9 @@
-"""Providers 2 e 3 da cadeia: Groq e OpenRouter.
+"""Providers 2, 3 e 4 da cadeia: HuggingFace, Groq e OpenRouter.
 
-Os dois expõem a API de chat da OpenAI, então a diferença entre eles cabe em
-dois campos — `base_url` e `modelo`. Uma base parametrizada em vez de duas
+Os três expõem a API de chat da OpenAI, então a diferença entre eles cabe em
+dois campos — `base_url` e `modelo`. Uma base parametrizada em vez de três
 classes copiadas: a lógica de chamada, timeout e tentativa existe UMA vez, e
-acrescentar um quarto provedor compatível (Together, Fireworks, um vLLM interno)
+acrescentar um provedor compatível novo (Together, Fireworks, um vLLM interno)
 passa a ser uma entrada de configuração, não um arquivo novo.
 
 Por que o SDK `openai` cru e não `langchain-openai`: o `langchain-openai`
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+HUGGINGFACE_BASE_URL = "https://router.huggingface.co/v1"
 
 
 def _para_ai_message(resposta) -> AIMessage:
@@ -122,6 +123,36 @@ class GroqProvider(OpenAICompatibleProvider):
     ):
         super().__init__(
             nome="groq",
+            api_key=api_key,
+            modelo=modelo,
+            base_url=base_url,
+            timeout=timeout,
+            tentativas=tentativas,
+        )
+
+
+class HuggingFaceProvider(OpenAICompatibleProvider):
+    """HuggingFace Inference Providers — segundo da cadeia.
+
+    Vem logo depois do Gemini: usa o mesmo `HF_TOKEN` que os embeddings locais já
+    exigem (ver `app/providers/embeddings.py`), então é fallback "de graça" — sem
+    chave nova a gerenciar — antes de cair para Groq/OpenRouter. `router.
+    huggingface.co/v1` é o endpoint único e compatível com a API de chat da
+    OpenAI que a HF expõe na frente de vários backends (Together, Novita,
+    Fireworks...); qual backend atende um modelo dado é decidido pela HF, não
+    por este código.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        modelo: str,
+        timeout: float,
+        tentativas: int,
+        base_url: str = HUGGINGFACE_BASE_URL,
+    ):
+        super().__init__(
+            nome="huggingface",
             api_key=api_key,
             modelo=modelo,
             base_url=base_url,

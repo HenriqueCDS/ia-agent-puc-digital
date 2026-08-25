@@ -276,6 +276,26 @@ def test_status_no_texto_da_excecao_tambem_e_reconhecido():
     assert motivo_de_fallback(ErroCru("token 429 do documento é inválido")) is None
 
 
+def test_400_de_contexto_excedido_cai_para_o_proximo():
+    """Estouro de janela de contexto é por MODELO, não por formato do pedido.
+
+    Diferente de "Invalid prompt" (que os três provedores rejeitariam igual),
+    o mesmo `mensagens` que estoura um modelo pequeno pode caber num com janela
+    maior — então este 400 específico autoriza a cadeia a tentar o próximo.
+    """
+    mensagem = "Error code: 400 - Please reduce the length of the messages or completion."
+    assert motivo_de_fallback(ErroHTTP(400, mensagem)) is not None
+    # Também reconhecido sem `status_code` estruturado (SDK só com a mensagem).
+    assert motivo_de_fallback(Exception(mensagem)) is not None
+
+    segundo = FakeProvider("groq")
+    resposta = _cadeia(FakeProvider("gemini", erro=ErroHTTP(400, mensagem)), segundo).invoke(
+        MENSAGENS
+    )
+    assert resposta.response_metadata["provider"] == "groq"
+    assert segundo.chamadas == 1
+
+
 def test_nome_da_excecao_vale_quando_nao_ha_status():
     """Timeout e falha de conexão nunca chegam com resposta HTTP para ler."""
 
@@ -418,7 +438,17 @@ def _nomes(providers):
 
 
 def test_ordem_padrao_da_cadeia(config):
+    """Sem HF_TOKEN configurado (a fixture não seta), `huggingface` sai da
+    cadeia sozinho — igual a Groq/OpenRouter sem chave."""
     assert _nomes(construir_providers()) == ["gemini", "groq", "openrouter"]
+
+
+def test_huggingface_entra_como_segundo_elo_quando_tem_token(config, monkeypatch):
+    """Com HF_TOKEN preenchido, `huggingface` ocupa o 2º lugar da ordem padrão —
+    entre Gemini e Groq, reaproveitando a mesma chave dos embeddings locais."""
+    monkeypatch.setattr(config, "hf_token", "chave-hf")
+
+    assert _nomes(construir_providers()) == ["gemini", "huggingface", "groq", "openrouter"]
 
 
 def test_ordem_e_reconfiguravel_sem_mexer_em_codigo(config, monkeypatch):
@@ -488,6 +518,7 @@ def test_ready_reporta_a_chave_por_provider_habilitado(config, monkeypatch):
 
     assert chain_mod.chaves_por_provider() == {
         "gemini": True,
+        "huggingface": False,
         "groq": True,
         "openrouter": False,
     }

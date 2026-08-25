@@ -173,15 +173,35 @@ class Settings(BaseSettings):
     # o que ela paga — e casa com `GROQ_API_KEY`/`OPENROUTER_API_KEY`. As duas
     # continuam válidas (ver `chave_gemini`): um `.env` existente não quebra.
     gemini_api_key: str = ""
-    # Opcional: só evita o aviso de "unauthenticated requests" e dá rate limit
-    # maior no download do modelo de embeddings. Sem token, tudo funciona igual.
+    # Usado em DOIS lugares: (1) rate limit maior no download do modelo local de
+    # embeddings — sem token, tudo funciona igual, só um pouco mais devagar; (2)
+    # autenticação do provider `huggingface` na cadeia de chat (Inference
+    # Providers), que fala a mesma API da OpenAI atrás de
+    # `https://router.huggingface.co/v1`. Sem token, o provider simplesmente
+    # sai da cadeia (ver `providers/chain._huggingface`), igual a Groq/OpenRouter
+    # sem chave.
     hf_token: str = ""
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agente_ead"
 
     # Local (HuggingFace/sentence-transformers) para não depender de cota de API.
-    # Multilingual porque o conteúdo é majoritariamente em português.
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+    # Multilingual porque o conteúdo é majoritariamente em português. BGE-M3 no
+    # lugar do antigo paraphrase-multilingual-mpnet-base-v2: aquele modelo trunca
+    # em 128 tokens (config `max_seq_length` do próprio model card), bem abaixo
+    # do CHUNK_SIZE de 1000 caracteres — grande parte de cada chunk nunca
+    # influenciava o vetor. BGE-M3 aceita até 8192 tokens, então o chunk inteiro
+    # entra no embedding sem precisar reduzir CHUNK_SIZE. Troca de modelo muda a
+    # dimensão do vetor, por isso `collection_name` abaixo tem sufixo próprio —
+    # não misture com uma coleção antiga gerada pelo modelo anterior.
+    embedding_model: str = "BAAI/bge-m3"
     chat_model: str = "gemini-3.6-flash"
+    # Modelo do provider `huggingface` (Inference Providers), 2º elo da cadeia —
+    # ver LLM_PROVIDERS e providers/chain._huggingface. Nome de campo (e de env
+    # var, HF_MODEL) espelha GROQ_MODEL/OPENROUTER_MODEL de propósito. Catálogo
+    # muda com frequência: confirme com
+    # `python -m scripts.modelos --provider huggingface`.
+    hf_model: str = "meta-llama/Llama-3.3-70B-Instruct"
+    # Vazio = a URL padrão do router da HF (ver providers/openai_compat.py).
+    hf_base_url: str = ""
 
     chunk_size: int = 1000
     chunk_overlap: int = 150
@@ -195,9 +215,10 @@ class Settings(BaseSettings):
     exact_match_threshold: float = 0.90
 
     # Nome da coleção no pgvector. Trocar isola um índice novo do antigo.
-    # Sufixo "_hf" porque a dimensão do vetor mudou ao trocar Gemini por embeddings
-    # locais (HuggingFace) — misturar as duas na mesma coleção quebraria a busca.
-    collection_name: str = "base_conhecimento_hf"
+    # Sufixo pelo MODELO de embedding: a dimensão do vetor muda a cada troca
+    # (384/768 do antigo paraphrase-multilingual-mpnet-base-v2, 1024 do BGE-M3
+    # atual) — misturar coleções de modelos diferentes quebraria a busca.
+    collection_name: str = "base_conhecimento_bge_m3"
 
     # Desliga o cache de resposta (ver agent/responder._cache_key). Útil ao
     # iterar em prompts.py: evita servir uma resposta antiga enquanto se ajusta
@@ -314,11 +335,13 @@ class Settings(BaseSettings):
     # desligar o Groq é apagar `GROQ_API_KEY` OU tirá-lo daqui.
     #
     # A ordem padrão não é arbitrária: Gemini é o modelo com que os prompts em
-    # app/agent/prompts.py foram calibrados; Groq vem em segundo porque é o mais
-    # rápido dos outros dois (um fallback só é bom se o aluno não perceber); o
-    # OpenRouter `:free` fica por último porque é o de cota mais apertada — é
-    # rede de segurança, não provedor de regime.
-    llm_providers: str = "gemini,groq,openrouter"
+    # app/agent/prompts.py foram calibrados; HuggingFace vem em segundo porque
+    # reaproveita o HF_TOKEN que já existe para os embeddings, sem chave nova a
+    # gerenciar — um fallback "de graça" antes de sair para Groq; Groq vem
+    # depois por ser o mais rápido dos dois restantes (um fallback só é bom se o
+    # aluno não perceber); o OpenRouter `:free` fica por último porque é o de
+    # cota mais apertada — é rede de segurança, não provedor de regime.
+    llm_providers: str = "gemini,huggingface,groq,openrouter"
 
     groq_api_key: str = ""
     openrouter_api_key: str = ""
@@ -338,10 +361,10 @@ class Settings(BaseSettings):
     # não `async def`) — poucas dessas e o servidor inteiro para de responder.
     #
     # Pior caso de espera de um `/ask` = llm_timeout * nº de providers na cadeia
-    # * llm_tentativas_por_provider. Com os padrões: 30s * 3 * 1 = 90s.
+    # * llm_tentativas_por_provider. Com os padrões: 30s * 4 * 1 = 120s.
     llm_timeout: float = 30.0
     # Tentativas DENTRO de um provider antes de cair para o próximo. 1 de
-    # propósito: com três provedores em fila, insistir com quem acabou de
+    # propósito: com vários provedores em fila, insistir com quem acabou de
     # devolver 429 é gastar o orçamento de latência do aluno com a resposta que
     # já se sabe. Retry é insistir com quem falhou; fallback é perguntar a
     # outro — e é o segundo que esta cadeia faz.

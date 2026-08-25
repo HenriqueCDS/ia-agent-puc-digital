@@ -30,7 +30,7 @@ do limiar, não chama o LLM com contexto vazio: cai no fallback de busca externa
 abaixo.
 
 **Cadeia de provedores** — a chamada ao LLM passa por uma cadeia de fallback
-(`LLM_PROVIDERS=gemini,groq,openrouter`): o primeiro que responder vence, e um
+(`LLM_PROVIDERS=gemini,huggingface,groq,openrouter`): o primeiro que responder vence, e um
 provedor fora do ar (cota estourada, credencial inválida, timeout, 5xx) faz a
 pergunta cair para o próximo **sem** o aluno perceber. Erro do *pedido* (prompt
 inválido, modelo inexistente) propaga em vez de cair — nenhum outro provedor
