@@ -184,15 +184,34 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agente_ead"
 
     # Local (HuggingFace/sentence-transformers) para não depender de cota de API.
-    # Multilingual porque o conteúdo é majoritariamente em português. BGE-M3 no
-    # lugar do antigo paraphrase-multilingual-mpnet-base-v2: aquele modelo trunca
-    # em 128 tokens (config `max_seq_length` do próprio model card), bem abaixo
-    # do CHUNK_SIZE de 1000 caracteres — grande parte de cada chunk nunca
-    # influenciava o vetor. BGE-M3 aceita até 8192 tokens, então o chunk inteiro
-    # entra no embedding sem precisar reduzir CHUNK_SIZE. Troca de modelo muda a
-    # dimensão do vetor, por isso `collection_name` abaixo tem sufixo próprio —
-    # não misture com uma coleção antiga gerada pelo modelo anterior.
-    embedding_model: str = "BAAI/bge-m3"
+    # Multilingual porque o conteúdo é majoritariamente em português.
+    #
+    # Substitui o antigo paraphrase-multilingual-mpnet-base-v2, que truncava em
+    # 128 tokens (`max_seq_length` do próprio model card) — bem abaixo dos ~250-300
+    # tokens que 1000 caracteres de português rendem. Boa parte de cada chunk
+    # simplesmente não influenciava o vetor, e o efeito era busca ruim sem erro
+    # nenhum no log.
+    #
+    # e5-base e não BGE-M3 (a primeira escolha) por causa do hardware: sem GPU,
+    # os 568M de parâmetros do BGE-M3 levaram >23min só na primeira metade da
+    # ingestão, e o mesmo custo se paga em CADA pergunta (`embed_query`) e em
+    # cada snippet do fallback web. Os 8192 tokens dele eram folga que este
+    # corpus não usa: 512 já cobre o chunk inteiro com sobra de 40%.
+    #
+    # Trocar de modelo muda a dimensão do vetor — `collection_name` abaixo tem
+    # sufixo próprio por isso, e a reingestão é obrigatória.
+    embedding_model: str = "intfloat/multilingual-e5-base"
+    # Prefixos do E5, e eles NÃO são decorativos: a família e5 é treinada com
+    # instrução assimétrica (pergunta e documento entram com marcas diferentes),
+    # e usá-la sem os prefixos degrada o ranking de forma silenciosa — os vetores
+    # saem, a busca "funciona", só devolve pior.
+    #
+    # Vivem aqui, e não fixos no código, porque são propriedade do MODELO: quem
+    # trocar `embedding_model` por um que não use instrução (BGE-M3, os
+    # `paraphrase-*`) esvazia os dois e o wrapper vira no-op, sem editar código.
+    # Ver `providers/embeddings.get_embeddings`.
+    embedding_query_prefix: str = "query: "
+    embedding_passage_prefix: str = "passage: "
     chat_model: str = "gemini-3.6-flash"
     # Modelo do provider `huggingface` (Inference Providers), 2º elo da cadeia —
     # ver LLM_PROVIDERS e providers/chain._huggingface. Nome de campo (e de env
@@ -216,9 +235,11 @@ class Settings(BaseSettings):
 
     # Nome da coleção no pgvector. Trocar isola um índice novo do antigo.
     # Sufixo pelo MODELO de embedding: a dimensão do vetor muda a cada troca
-    # (384/768 do antigo paraphrase-multilingual-mpnet-base-v2, 1024 do BGE-M3
-    # atual) — misturar coleções de modelos diferentes quebraria a busca.
-    collection_name: str = "base_conhecimento_bge_m3"
+    # (768 do antigo paraphrase-multilingual-mpnet-base-v2, 768 do e5-base atual)
+    # — e a dimensão IGUAL é justamente o caso perigoso, porque nada quebra: a
+    # busca roda e devolve lixo, comparando vetores de espaços vetoriais
+    # diferentes. Coleção nova a cada troca de modelo, sempre.
+    collection_name: str = "base_conhecimento_e5_base"
 
     # Desliga o cache de resposta (ver agent/responder._cache_key). Útil ao
     # iterar em prompts.py: evita servir uma resposta antiga enquanto se ajusta

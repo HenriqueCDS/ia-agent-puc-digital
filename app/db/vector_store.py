@@ -26,12 +26,17 @@ def get_vector_store() -> PGVector:
     )
 
 
-# Subquery reaproveitada pelas três funções abaixo: escopa toda leitura/escrita
+# Subquery reaproveitada por TODAS as funções abaixo: escopa toda leitura/escrita
 # à coleção ATIVA (`settings.collection_name`). Sem isso, uma coleção antiga e
 # abandonada (ex.: de antes de trocar o provedor de embeddings — ver o comentário
-# sobre o sufixo "_hf" em `core/config.Settings.collection_name`) apareceria
-# misturada em `list_ingested_sources` e seria apagada junto por engano num
-# `delete_by_assunto`, mesmo nunca tendo sido usada em nenhuma busca.
+# sobre o sufixo do modelo em `core/config.Settings.collection_name`) apareceria
+# misturada em `list_ingested_sources`, seria apagada junto por engano num
+# `delete_by_assunto` e bloquearia a ingestão inteira em `existing_content_hashes`,
+# mesmo nunca tendo sido usada em nenhuma busca.
+#
+# "TODAS" é literal e é invariante do módulo, não coincidência: `existing_content_hashes`
+# nasceu sem o filtro e o efeito só apareceu meses depois, como uma reingestão que
+# indexava zero chunks sem erro nenhum. `tests/test_vector_store.py` trava isso.
 _COLLECTION_ID = (
     "(SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name)"
 )
@@ -123,21 +128,33 @@ def list_assuntos(store: PGVector) -> list[str]:
 
 
 def existing_content_hashes(store: PGVector, hashes: list[str]) -> set[str]:
-    """Entre os hashes dados, devolve os que já existem em QUALQUER fonte no índice.
+    """Entre os hashes dados, devolve os que já existem em QUALQUER fonte da coleção ATIVA.
 
     Usado antes de indexar para não duplicar chunks cujo texto já foi indexado a
     partir de outro arquivo (ex.: o mesmo aviso colado em dois PDFs).
+
+    "Da coleção ativa" é o ponto, e o filtro por `collection_id` já custou uma
+    ingestão inteira em silêncio. Sem ele, esta era a única das cinco funções do
+    módulo que enxergava a tabela toda — e `content_hash` é do TEXTO normalizado
+    (ver `ingestion/chunker.content_hash`), não do vetor, então ele é idêntico
+    entre coleções geradas por modelos de embedding diferentes. O efeito era:
+    criar uma coleção nova (trocar de modelo, testar outro chunking) e ver todo
+    chunk ser descartado como "duplicado" contra a coleção ANTIGA, deixando a
+    nova permanentemente vazia. Zero chunks indexados, zero erros, exit 0.
     """
     if not hashes:
         return set()
 
     stmt = text(
-        """
+        f"""
         SELECT DISTINCT cmetadata->>'content_hash' AS content_hash
         FROM langchain_pg_embedding
         WHERE cmetadata->>'content_hash' = ANY(:hashes)
+          AND collection_id = {_COLLECTION_ID}
         """
     )
     with store.session_maker() as session:
-        rows = session.execute(stmt, {"hashes": hashes})
+        rows = session.execute(
+            stmt, {"hashes": hashes, "collection_name": store.collection_name}
+        )
         return {row.content_hash for row in rows}
