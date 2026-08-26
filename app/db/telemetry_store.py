@@ -221,6 +221,84 @@ def contar_perguntas(dias: int) -> tuple[int, int]:
     return linha.total or 0, linha.lacunas or 0
 
 
+_ORIGEM_POR_HASH = """
+SELECT DISTINCT ON (dados->>'pergunta_hash')
+    dados->>'pergunta_hash' AS pergunta_hash,
+    dados->>'origem'        AS origem,
+    (dados->>'grounded')::boolean AS grounded,
+    (dados->>'score_top')::float  AS score_top,
+    (dados->>'n_chunks')::int     AS n_chunks,
+    (dados->>'cache_hit')::boolean AS cache_hit,
+    dados->>'resposta'    AS resposta,
+    dados->>'chat_model'  AS chat_model,
+    dados->>'provider'    AS provider
+FROM telemetria
+WHERE dados->>'canal' = :canal
+  AND dados->>'pergunta_hash' = ANY(:hashes)
+  AND criado_em >= now() - make_interval(days => :dias)
+ORDER BY dados->>'pergunta_hash', criado_em DESC
+"""
+
+
+@dataclass(frozen=True)
+class ResultadoTelemetria:
+    """O que a telemetria registrou, de fato, para uma pergunta (via hash)."""
+
+    origem: str | None
+    grounded: bool | None
+    score_top: float | None
+    n_chunks: int | None
+    cache_hit: bool | None
+    resposta: str | None
+    chat_model: str | None
+    provider: str | None
+
+    @property
+    def modelo(self) -> str | None:
+        """`"provider:modelo"`, igual `responder._rotulo_do_modelo` — `None` quando
+        não houve chamada ao LLM (cache hit, triagem, guardrail sem fallback)."""
+        if not self.chat_model:
+            return None
+        return f"{self.provider}:{self.chat_model}" if self.provider else self.chat_model
+
+
+def origem_por_hash(
+    hashes: list[str], dias: int, canal: str = "eval"
+) -> dict[str, ResultadoTelemetria]:
+    """Para cada hash de pergunta, a linha MAIS RECENTE gravada na janela.
+
+    Usado por `scripts.eval_report` para comparar a `origem_esperada` de um
+    dataset de teste (scripts.eval_run) com o que ficou de fato gravado na
+    telemetria — a mesma fonte de verdade de `scripts.lacunas`. `canal='eval'`
+    isola essas linhas do tráfego real (ver `telemetry.set_canal` em
+    `scripts/eval_run.py`), e "mais recente" resolve pergunta repetida em duas
+    rodadas de calibração dentro da mesma janela, pegando a última.
+    """
+    if not hashes:
+        return {}
+
+    with get_vector_store().session_maker() as sessao:
+        _garantir_tabela(sessao)
+        sessao.commit()
+        linhas = sessao.execute(
+            text(_ORIGEM_POR_HASH), {"hashes": hashes, "dias": dias, "canal": canal}
+        ).all()
+
+    return {
+        linha.pergunta_hash: ResultadoTelemetria(
+            origem=linha.origem,
+            grounded=linha.grounded,
+            score_top=linha.score_top,
+            n_chunks=linha.n_chunks,
+            cache_hit=linha.cache_hit,
+            resposta=linha.resposta,
+            chat_model=linha.chat_model,
+            provider=linha.provider,
+        )
+        for linha in linhas
+    }
+
+
 def limpar_telemetria() -> int:
     """Apaga todos os registros de telemetria. Usado pela CLI de limpeza (base zerada p/ testes)."""
     with get_vector_store().session_maker() as sessao:

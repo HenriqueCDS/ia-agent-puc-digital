@@ -181,6 +181,26 @@ class Registro:
     score_top: float | None = None
     alta_confianca: bool | None = None
 
+    # DISPERSÃO do top-k, e não mais só o topo. Existe para responder a uma
+    # pergunta que `score_top` sozinho não responde: a base COBRE este tema?
+    #
+    # Medido em 2026-08-26 (ver eval/analise-telemetria-2026-08-26.md §3.1):
+    # o score do topo não separa "a base respondeu" de "a base não respondeu" —
+    # média 0.8694 contra 0.8663, faixas sobrepostas, e o MAIOR score da rodada
+    # era de uma pergunta que a base não cobria. Com o E5, tudo cai numa faixa
+    # estreita e alta, então nenhum limiar absoluto sobre `score_top` funciona.
+    #
+    # A hipótese a testar é a margem RELATIVA: quando a base cobre o tema, o
+    # topo se destaca dos demais; quando não cobre, os k chegam empatados. Esses
+    # dois campos são o mínimo para calcular isso depois (`score_top -
+    # score_min`, e a distância do topo à média) sem guardar os k scores.
+    #
+    # É deliberadamente só INSTRUMENTAÇÃO: nada no roteamento lê estes campos
+    # ainda. Primeiro acumular dado real, depois decidir o critério — que é o
+    # mesmo caminho que `triagem.py` documenta para a segunda camada dela.
+    score_min: float | None = None
+    score_mean: float | None = None
+
     # Custo (M1/M2): cache hit é resposta com zero token de API.
     cache_hit: bool | None = None
     input_tokens: int | None = None
@@ -208,6 +228,16 @@ class Registro:
     veto_escapou: bool | None = None
 
     erro: str | None = None
+
+    # Texto da resposta do agente. `None` em operação normal — preencher isto
+    # para tráfego de aluno reabriria exatamente o vazamento que a PRIVACIDADE
+    # no topo deste módulo existe para evitar (a resposta pode ecoar RA/CPF que
+    # veio da pergunta). Só `scripts/eval_run.py` preenche, e só porque o
+    # dataset de teste (`eval/perguntas_teste.json`) é sintético, sem aluno
+    # real por trás — ver o `if registro.canal == "eval"` em
+    # `responder.answer`. Existe para que `scripts.eval_report` mostre
+    # pergunta+resposta+esperado+obtido+modelo sem precisar reexecutar nada.
+    resposta: str | None = None
 
     def somar_tokens(self, resposta) -> None:
         """Absorve o que a resposta do LangChain traz de custo e de origem.
@@ -295,6 +325,7 @@ def registrar(assunto: str | None, pergunta: str, chat_model: str) -> Iterator[R
         # exceção do driver pode trazer o valor que a causou.
         registro.topico = pii.mascarar(registro.topico)
         registro.erro = pii.mascarar(registro.erro)
+        registro.resposta = pii.mascarar(registro.resposta)
         dados = asdict(registro)
         # Nunca deixar a telemetria derrubar uma resposta que já ficou pronta.
         try:

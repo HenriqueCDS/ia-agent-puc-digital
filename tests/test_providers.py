@@ -621,7 +621,7 @@ def test_override_nao_le_nem_grava_no_cache(monkeypatch):
     gravado: dict[str, str] = {}
     monkeypatch.setattr(responder, "get_cached_answer", gravado.get)
     monkeypatch.setattr(
-        responder, "set_cached_answer", lambda k, a, r: gravado.__setitem__(k, r)
+        responder, "set_cached_answer", lambda k, a, r, m=None: gravado.__setitem__(k, r)
     )
 
     pergunta = "como envio a atividade?"
@@ -645,7 +645,7 @@ def _cache_em_memoria(monkeypatch):
     armazenado: dict[str, str] = {}
     monkeypatch.setattr(responder, "get_cached_answer", armazenado.get)
     monkeypatch.setattr(
-        responder, "set_cached_answer", lambda k, a, r: armazenado.__setitem__(k, r)
+        responder, "set_cached_answer", lambda k, a, r, m=None: armazenado.__setitem__(k, r)
     )
     return armazenado
 
@@ -777,3 +777,166 @@ def test_agente_responde_pelo_fallback_sem_saber_que_houve_fallback(monkeypatch)
     assert resultado.origem == "base"
     assert resultado.grounded is True
     assert [c.citation for c in resultado.sources] == ["guia.pdf, p. 1"]
+
+
+def test_repeticao_apos_fallback_serve_do_cache_sem_chamar_nenhum_provider(monkeypatch):
+    """A dúvida real que motivou este teste: "se o modelo X que respondeu antes
+    ficar indisponível, a mesma pergunta repetida vai reprocessar e consumir API
+    de novo?" — não, e a razão está em ONDE `_cache_key` é checada.
+
+    Em `_tentar_base` (app/agent/responder.py), o cache é lido ANTES de
+    `_resolver_llm`/`ProviderChain.generate` serem sequer chamados. A chave, por
+    sua vez, não guarda QUEM respondeu (só pergunta + assunto + chunks — ver o
+    docstring de `_cache_key`), então uma pergunta repetida bate na mesma chave
+    independente de qual provider da cadeia a atendeu da primeira vez.
+
+    Resultado: 1ª chamada cai no fallback (Gemini falha, Groq responde) e grava
+    no cache; na 2ª chamada, IDÊNTICA, a cadeia inteira nem é tocada — nenhum
+    provider (nem o que respondeu, nem o que falhou) recebe uma nova chamada.
+    """
+    from langchain_core.documents import Document
+
+    from app.agent import responder
+    from app.core.models import Query, RetrievedChunk
+
+    chunk = RetrievedChunk(
+        document=Document(
+            id="c1", page_content="Para enviar a atividade, acesse Tarefas.",
+            metadata={"source_name": "guia.pdf", "page": 0},
+        ),
+        score=0.9,
+    )
+    monkeypatch.setattr(responder, "retrieve", lambda q: [chunk])
+    armazenado = _cache_em_memoria(monkeypatch)
+
+    pergunta = "como envio atividade?"
+
+    # 1ª chamada: Gemini indisponível, Groq responde e a resposta é cacheada.
+    gemini_1 = FakeProvider("gemini", erro=ErroHTTP(429, "Quota exceeded"))
+    groq_1 = FakeProvider("groq", resposta="Acesse Tarefas e clique em Enviar.")
+    primeiro = responder.answer(Query(text=pergunta), llm=_cadeia(gemini_1, groq_1))
+
+    assert primeiro.text == "Acesse Tarefas e clique em Enviar."
+    assert primeiro.cached is False
+    assert armazenado  # a chave foi gravada
+
+    # 2ª chamada, MESMA pergunta: monta uma cadeia nova em que os DOIS
+    # providers -- inclusive o Groq que respondeu antes -- levantariam exceção
+    # se fossem chamados. Se o cache não interceptar antes da cadeia, o teste
+    # falha aqui (a exceção subiria de `ProviderChain.generate`).
+    def nao_deveria_ser_chamado(mensagens):
+        raise AssertionError("cache deveria ter respondido sem tocar em nenhum provider")
+
+    gemini_2 = FakeProvider("gemini", erro=ErroHTTP(429, "Quota exceeded"))
+    groq_2 = FakeProvider("groq")
+    groq_2.generate = nao_deveria_ser_chamado
+
+    segundo = responder.answer(Query(text=pergunta), llm=_cadeia(gemini_2, groq_2))
+
+    assert segundo.text == "Acesse Tarefas e clique em Enviar."
+    assert segundo.cached is True
+    assert gemini_2.chamadas == 0
+    assert groq_2.chamadas == 0
+
+
+def test_cache_da_cadeia_normal_nao_registra_qual_provider_respondeu(monkeypatch):
+    """O reverso do teste acima, e o trade-off que vale o usuário saber: a
+    chave do cache (caminho SEM `--modelo`) não inclui qual provider respondeu
+    — só a pergunta e os chunks. Então, se o Groq responder hoje (por exemplo,
+    com o Gemini fora), essa resposta fica "congelada" no cache e será servida
+    de novo amanhã mesmo que o Gemini volte — não é regenerada por provider,
+    é a mesma resposta para a mesma pergunta+contexto, seja qual for o modelo
+    que a gerou. Não é bug: é a escolha de design documentada em `_cache_key`
+    (T2.4) — mas é o oposto exato do medo de "recomputar à toa"."""
+    from langchain_core.documents import Document
+
+    from app.agent import responder
+    from app.core.models import Query, RetrievedChunk
+
+    chunk = RetrievedChunk(
+        document=Document(id="c1", page_content="texto", metadata={"source_name": "g.pdf"}),
+        score=0.9,
+    )
+    monkeypatch.setattr(responder, "retrieve", lambda q: [chunk])
+    _cache_em_memoria(monkeypatch)
+
+    pergunta = "como envio atividade?"
+    responder.answer(
+        Query(text=pergunta),
+        llm=_cadeia(FakeProvider("gemini", erro=ErroHTTP(500)), FakeProvider("groq", resposta="Resposta do Groq.")),
+    )
+
+    # Gemini "volta" e responderia diferente, mas nunca é nem tentado.
+    gemini_de_volta = FakeProvider("gemini", resposta="Resposta nova do Gemini.")
+    resultado = responder.answer(Query(text=pergunta), llm=_cadeia(gemini_de_volta))
+
+    assert resultado.text == "Resposta do Groq."  # a resposta antiga, do fallback
+    assert gemini_de_volta.chamadas == 0
+
+
+# --- A tabela `resposta_cache` grava QUEM respondeu (coluna `modelo`) -------
+#
+# Não afeta a BUSCA (a chave continua sem o provider, ver o teste acima) — é
+# metadado de auditoria, para responder "essa resposta cacheada veio de qual
+# modelo?" sem precisar adivinhar pela data. Ver `app/db/response_cache.py`.
+
+
+def test_cache_grava_o_provider_e_o_modelo_que_responderam(monkeypatch):
+    from langchain_core.documents import Document
+
+    from app.agent import responder
+    from app.core.models import Query, RetrievedChunk
+
+    chunk = RetrievedChunk(
+        document=Document(id="c1", page_content="texto", metadata={"source_name": "g.pdf"}),
+        score=0.9,
+    )
+    monkeypatch.setattr(responder, "retrieve", lambda q: [chunk])
+    monkeypatch.setattr(responder, "get_cached_answer", lambda k: None)
+
+    gravado = {}
+    monkeypatch.setattr(
+        responder, "set_cached_answer", lambda k, a, r, m=None: gravado.update(modelo=m)
+    )
+
+    cadeia = _cadeia(
+        FakeProvider("gemini", erro=ErroHTTP(429, "Quota exceeded")),
+        FakeProvider("groq", resposta="Resposta do Groq.", modelo="qwen/qwen3.6-27b"),
+    )
+    responder.answer(Query(text="como envio atividade?"), llm=cadeia)
+
+    assert gravado["modelo"] == "groq:qwen/qwen3.6-27b"
+
+
+def test_cache_sem_carimbo_de_provider_grava_o_modelo_configurado(monkeypatch):
+    """Um LLM injetado direto (dublê de teste, ou uso do agente como
+    biblioteca sem a `ProviderChain`) não carimba `response_metadata` — sobra
+    o modelo CONFIGURADO (`settings.chat_model`), a mesma informação que a
+    telemetria já usa nesse caso (`Registro.chat_model`)."""
+    from langchain_core.documents import Document
+    from langchain_core.messages import AIMessage
+
+    from app.agent import responder
+    from app.core.config import settings
+    from app.core.models import Query, RetrievedChunk
+
+    monkeypatch.setattr(settings, "chat_model", "gemini-3.6-flash")
+    chunk = RetrievedChunk(
+        document=Document(id="c1", page_content="texto", metadata={"source_name": "g.pdf"}),
+        score=0.9,
+    )
+    monkeypatch.setattr(responder, "retrieve", lambda q: [chunk])
+    monkeypatch.setattr(responder, "get_cached_answer", lambda k: None)
+
+    gravado = {}
+    monkeypatch.setattr(
+        responder, "set_cached_answer", lambda k, a, r, m=None: gravado.update(modelo=m)
+    )
+
+    class LLMDireto:
+        def invoke(self, mensagens):
+            return AIMessage(content="Resposta direta.")
+
+    responder.answer(Query(text="como envio atividade?"), llm=LLMDireto())
+
+    assert gravado["modelo"] == "gemini-3.6-flash"

@@ -83,6 +83,55 @@ def test_trancamento_de_disciplina_e_encaminhado():
     assert classificar("Quero trancamento de disciplina") is not None
 
 
+# --- "bolsa": o benefício é da cobrança, a de pesquisa/monitoria não é -------
+
+
+@pytest.mark.parametrize(
+    "pergunta",
+    [
+        "Como faço para participar do processo seletivo de bolsas de iniciação científica?",
+        "Como consigo uma bolsa de monitoria?",
+        "Existe bolsa de pesquisa para a pós-graduação?",
+        "Como funciona a bolsa de extensão?",
+    ],
+)
+def test_bolsa_academica_ou_de_pesquisa_nao_vai_para_a_cobranca(pergunta):
+    """Regressão de 2026-08-26: "processo seletivo de bolsas de iniciação
+    científica" era encaminhada para a cobrança em 1.3ms, sem tocar no RAG (ver
+    eval/analise-telemetria-2026-08-26.md §5). IC, monitoria, pesquisa e
+    extensão são acadêmico/pesquisa — nada a ver com o setor financeiro.
+
+    Vale para os dois lados: `web_fallback` consulta a mesma `classificar`,
+    então estas também voltam a poder ser pesquisadas nos domínios oficiais."""
+    assert classificar(pergunta) is None
+
+
+@pytest.mark.parametrize(
+    "pergunta",
+    [
+        "Como faço para renovar minha bolsa?",
+        "Ainda tenho direito à minha bolsa?",
+        "Perdi minha bolsa, o que faço?",
+    ],
+)
+def test_bolsa_como_beneficio_do_aluno_continua_encaminhada(pergunta):
+    """O outro lado da exceção acima: pedir sobre o próprio benefício depende do
+    cadastro do aluno e continua sendo da cobrança."""
+    categoria = classificar(pergunta)
+
+    assert categoria is not None and categoria.assunto == "financeiro"
+
+
+def test_termo_inequivoco_vence_a_excecao_de_bolsa():
+    """A ordem de `ENCAMINHAMENTOS` importa: "boleto" está numa entrada ANTES da
+    de "bolsa", então ele casa primeiro e as exceções da outra não o alcançam —
+    que é justamente por que "bolsa" ganhou entrada própria em vez de virar
+    exceção da entrada com boleto/FIES/mensalidade."""
+    categoria = classificar("O boleto da minha bolsa de pesquisa veio errado")
+
+    assert categoria is not None and categoria.assunto == "financeiro"
+
+
 # --- "minha nota": o valor é da secretaria, ver a nota é do agente -----------
 
 

@@ -74,7 +74,9 @@ def registros(caplog, monkeypatch):
     """
     monkeypatch.setattr(telemetry.logger, "propagate", True)
     monkeypatch.setattr(responder, "get_cached_answer", lambda key: None)
-    monkeypatch.setattr(responder, "set_cached_answer", lambda key, assunto, resposta: None)
+    monkeypatch.setattr(
+        responder, "set_cached_answer", lambda key, assunto, resposta, modelo=None: None
+    )
     # `canal` e `request_id` são ContextVars de processo: sem zerar aqui, o
     # valor posto por um teste vaza para os seguintes e a ordem da suíte passa
     # a mudar o resultado.
@@ -386,7 +388,9 @@ def test_cache_hit_recupera_o_topico_sem_nova_chamada(monkeypatch, registros):
     reclassificar."""
     guardado = {}
     monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk()])
-    monkeypatch.setattr(responder, "set_cached_answer", lambda k, a, r: guardado.update({k: r}))
+    monkeypatch.setattr(
+        responder, "set_cached_answer", lambda k, a, r, m=None: guardado.update({k: r})
+    )
     monkeypatch.setattr(responder, "get_cached_answer", lambda k: guardado.get(k))
 
     primeiro = responder.answer(Query(text=PERGUNTA), llm=_fake_llm_com_topico())

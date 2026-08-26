@@ -266,10 +266,18 @@ def test_anexo_nao_suportado_da_501(client, monkeypatch):
 # --- escolha de modelo por requisição -------------------------------------
 
 
-def test_modelo_por_requisicao_e_recusado_por_padrao(client):
+def test_modelo_por_requisicao_e_recusado_por_padrao(client, monkeypatch):
     """DESLIGADO por padrão: a chave é nossa, então quem escolhe o modelo
     escolhe o mais caro do catálogo do provedor — e o teto diário conta
-    requisições, não custo."""
+    requisições, não custo.
+
+    Explícito e não confiado no default: `settings` é lido do `.env` REAL do
+    projeto (não de um valor isolado por teste), e esse `.env` pode ter
+    `ASK_MODELO_OVERRIDE_ENABLED=true` para uso manual/local. Sem fixar aqui,
+    o teste passa ou falha dependendo do que está configurado na máquina de
+    quem roda — e falhou assim uma vez (`AttributeError` ao chamar a API real
+    de verdade, com `modelo="groq:qualquer"` inválido)."""
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", False)
     resposta = client.post(
         "/v1/ask", json={"pergunta": "como envio atividade?", "modelo": "groq:qualquer"}
     )
@@ -281,6 +289,7 @@ def test_modelo_por_requisicao_e_recusado_por_padrao(client):
 def test_modelo_recusado_em_vez_de_ignorado(client, monkeypatch):
     """Ignorar o campo seria pior que recusar: quem está comparando modelos
     receberia a resposta do modelo de sempre achando que testou outro."""
+    monkeypatch.setattr(settings, "ask_modelo_override_enabled", False)
     chamadas = []
     _dublar_answer_direta(monkeypatch, lambda query: chamadas.append(query))
 

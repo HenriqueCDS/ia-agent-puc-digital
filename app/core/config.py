@@ -100,12 +100,41 @@ ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
         resposta=_CONTATO.format(email="dcr@puc-campinas.edu.br"),
         termos=(
             "boleto",
-            "bolsa",
             "cobranca",
             "fies",
             "financeiro",
             "mensalidade",
             "prouni",
+        ),
+    ),
+    # "bolsa" é ambíguo, e por isso está aqui e não junto dos termos acima —
+    # mesmo padrão de "minha nota": entrada PRÓPRIA (mesmo assunto e mesmo
+    # e-mail da anterior) porque `excecoes` vale para a categoria inteira, e
+    # dentro da entrada acima elas desarmariam "boleto"/"fies"/"mensalidade"
+    # junto.
+    #
+    # Os dois sentidos: pedir o benefício do próprio aluno ("ainda tenho
+    # direito à bolsa?", "perdi minha bolsa") é da cobrança; bolsa de
+    # iniciação científica, pesquisa, monitoria ou extensão é acadêmico/
+    # pesquisa, e não tem nada a ver com o setor financeiro.
+    #
+    # Isto foi uma CORREÇÃO, não um refinamento preventivo: na rodada de
+    # avaliação de 2026-08-26, "processo seletivo de bolsas de iniciação
+    # científica" foi encaminhada para a cobrança em 1.3ms, sem tocar no RAG
+    # (ver eval/analise-telemetria-2026-08-26.md §5).
+    #
+    # As exceções valem também para a busca externa: `web_fallback` consulta a
+    # mesma `classificar`, então uma pergunta de IC passa a poder ser
+    # pesquisada nos domínios oficiais em vez de morrer aqui.
+    CategoriaEncaminhada(
+        assunto="financeiro",
+        resposta=_CONTATO.format(email="dcr@puc-campinas.edu.br"),
+        termos=("bolsa",),
+        excecoes=(
+            "iniciacao cientifica",
+            "pesquisa",
+            "monitoria",
+            "extensao",
         ),
     ),
     CategoriaEncaminhada(
@@ -187,16 +216,23 @@ class Settings(BaseSettings):
     # Multilingual porque o conteúdo é majoritariamente em português.
     #
     # Substitui o antigo paraphrase-multilingual-mpnet-base-v2, que truncava em
-    # 128 tokens (`max_seq_length` do próprio model card) — bem abaixo dos ~250-300
-    # tokens que 1000 caracteres de português rendem. Boa parte de cada chunk
-    # simplesmente não influenciava o vetor, e o efeito era busca ruim sem erro
-    # nenhum no log.
+    # 128 tokens (`max_seq_length` do próprio model card). Medido neste corpus
+    # (1289 chunks de 3 PDFs, tokenizer do e5): média 108 tokens, mediana 92,
+    # p99 233, máximo 254 — mas 34,4% dos chunks passavam de 128 e eram cortados
+    # antes de virar vetor. O texto cortado seguia no `page_content` (o LLM lia),
+    # só não influenciava a BUSCA: um terço da base com vetor incompleto, sem
+    # erro nenhum em log.
     #
     # e5-base e não BGE-M3 (a primeira escolha) por causa do hardware: sem GPU,
     # os 568M de parâmetros do BGE-M3 levaram >23min só na primeira metade da
     # ingestão, e o mesmo custo se paga em CADA pergunta (`embed_query`) e em
-    # cada snippet do fallback web. Os 8192 tokens dele eram folga que este
-    # corpus não usa: 512 já cobre o chunk inteiro com sobra de 40%.
+    # cada snippet do fallback web. Os 8192 tokens dele eram 32x de folga sobre
+    # o chunk máximo real (254): 512 cobre tudo com margem de 2x.
+    #
+    # O máximo de 254 tokens é bem menor que os 1000 CARACTERES do chunk_size
+    # porque o `PyPDFLoader` entrega um Document por PÁGINA e o splitter nunca
+    # junta páginas — na prática quem limita o chunk é a página, não o
+    # `chunk_size`. Vale lembrar disso antes de mexer no chunking.
     #
     # Trocar de modelo muda a dimensão do vetor — `collection_name` abaixo tem
     # sufixo próprio por isso, e a reingestão é obrigatória.

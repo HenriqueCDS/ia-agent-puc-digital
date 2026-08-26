@@ -1,0 +1,127 @@
+[
+  {
+    "pergunta": "Como faço para enviar uma atividade no Canvas?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Como acesso minhas disciplinas na plataforma PUC Digital?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Como funciona o fórum avaliativo?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Como faço para participar de uma aula ao vivo?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "O que é a Netiqueta e por que devo segui-la nos fóruns?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Onde vejo a nota final da disciplina?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Como recebo os avisos importantes da coordenação pelo AVA?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Quais dicas a instituição dá para organizar os estudos orientados?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Como funciona o fórum do docente?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Como resetar minha senha do Canvas caso eu tenha esquecido?",
+    "assunto": null,
+    "origem_esperada": "web"
+  },
+  {
+    "pergunta": "Quais são as datas do calendário acadêmico da PUC Campinas neste semestre?",
+    "assunto": null,
+    "origem_esperada": "web"
+  },
+  {
+    "pergunta": "Como funciona o processo de admissão para transferência externa na PUC Campinas?",
+    "assunto": null,
+    "origem_esperada": "web"
+  },
+  {
+    "pergunta": "Quais cursos de graduação presencial a PUC Campinas oferece no campus de Campinas?",
+    "assunto": null,
+    "origem_esperada": "web"
+  },
+  {
+    "pergunta": "Como funciona o suporte técnico do Canvas para navegador não suportado?",
+    "assunto": null,
+    "origem_esperada": "web"
+  },
+  {
+    "pergunta": "Qual o endereço e telefone da secretaria geral da PUC Campinas?",
+    "assunto": null,
+    "origem_esperada": "web"
+  },
+  {
+    "pergunta": "Como faço para participar do processo seletivo de bolsas de iniciação científica na PUC Campinas?",
+    "assunto": null,
+    "origem_esperada": "web"
+  },
+  {
+    "pergunta": "Existe algum aplicativo oficial do Canvas para celular e onde faço o download?",
+    "assunto": null,
+    "origem_esperada": "base"
+  },
+  {
+    "pergunta": "Como emito a segunda via do meu boleto da mensalidade?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  },
+  {
+    "pergunta": "Quero saber se ainda tenho direito à bolsa do Prouni, quem eu procuro?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  },
+  {
+    "pergunta": "Como solicito a segunda via do meu diploma de graduação?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  },
+  {
+    "pergunta": "Preciso de um certificado de conclusão do curso, como peço?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  },
+  {
+    "pergunta": "Como faço minha rematrícula para o próximo semestre?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  },
+  {
+    "pergunta": "Preciso do meu histórico escolar completo, onde solicito?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  },
+  {
+    "pergunta": "Quero fazer o trancamento da minha matrícula, qual o procedimento?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  },
+  {
+    "pergunta": "Estou com problema no boleto: veio com valor de cobrança errado, quem eu contato?",
+    "assunto": null,
+    "origem_esperada": "encaminhado"
+  }
+]

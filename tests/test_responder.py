@@ -54,7 +54,7 @@ def fake_cache(monkeypatch):
     monkeypatch.setattr(
         responder,
         "set_cached_answer",
-        lambda key, assunto, resposta: armazenado.__setitem__(key, resposta),
+        lambda key, assunto, resposta, modelo=None: armazenado.__setitem__(key, resposta),
     )
     return armazenado
 

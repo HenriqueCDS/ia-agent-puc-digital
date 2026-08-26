@@ -98,6 +98,21 @@ def _cache_key(query: Query, chunks: list[RetrievedChunk], alta_confianca: bool)
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
+def _rotulo_do_modelo(registro: telemetry.Registro) -> str:
+    """`"provider:modelo"` que gerou esta resposta, para gravar junto do cache.
+
+    `registro.provider` só é preenchido quando a resposta passou pela
+    `ProviderChain` (o carimbo vem de `chain._carimbar`, lido em
+    `Registro.somar_tokens`) — que é o caminho real da aplicação. Sem ele
+    (dublê de teste, LLM injetado direto), sobra só `chat_model`, que nesse
+    caso é o valor configurado (`settings.chat_model`) passado para
+    `telemetry.registrar` no início de `answer()`.
+    """
+    if registro.provider:
+        return f"{registro.provider}:{registro.chat_model}"
+    return registro.chat_model
+
+
 def _assunto_dos_chunks(chunks: list[RetrievedChunk]) -> str | None:
     """Assunto do documento que respondeu — gravado na ingestão (pipeline._enrich).
 
@@ -222,6 +237,11 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
 
         registro.origem = resultado.origem
         registro.grounded = resultado.grounded
+        # Só o canal de avaliação (scripts/eval_run.py, dataset sintético sem
+        # aluno real) grava o texto da resposta — ver o campo `resposta` em
+        # `telemetry.Registro` para o porquê de isto não valer para os demais.
+        if registro.canal == "eval":
+            registro.resposta = resultado.text
         return resultado
 
 
@@ -268,6 +288,11 @@ def _responder(
 
     registro.n_chunks = len(chunks)
     registro.score_top = round(chunks[0].score, 4) if chunks else None
+    # Dispersão do top-k junto do topo: é o par que permite testar a margem
+    # relativa depois, sem guardar os k scores. Ver `telemetry.Registro`.
+    if chunks:
+        registro.score_min = round(chunks[-1].score, 4)
+        registro.score_mean = round(sum(c.score for c in chunks) / len(chunks), 4)
     _registrar_assunto(registro, _assunto_dos_chunks(chunks), "metadata")
 
     # Guardrail: em suporte acadêmico, não responder é melhor que alucinar um
@@ -363,7 +388,7 @@ def _tentar_base(
         # checagem abaixo roda igual nos dois casos (cache hit ou chamada
         # nova).
         if cache_key:
-            set_cached_answer(cache_key, registro.assunto, bruto)
+            set_cached_answer(cache_key, registro.assunto, bruto, _rotulo_do_modelo(registro))
 
     texto, registro.topico = separar_topico(bruto)
 

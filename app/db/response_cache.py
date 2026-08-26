@@ -29,8 +29,17 @@ def _ensure_table(store: PGVector) -> None:
         )
         """
     )
+    # `modelo`: qual provider/modelo gerou a resposta cacheada (ver
+    # `responder._rotulo_do_modelo`). ADD COLUMN separado do CREATE TABLE de
+    # propósito — `CREATE TABLE IF NOT EXISTS` é um no-op quando a tabela JÁ
+    # existe (qualquer instalação anterior a esta mudança), então a coluna
+    # nunca entraria numa base em produção sem esta migração idempotente
+    # rodando junto. `IF NOT EXISTS` no ADD COLUMN (Postgres 9.6+) é o que
+    # deixa rodar em toda subida do processo sem checar se já rodou antes.
+    alterar = text("ALTER TABLE resposta_cache ADD COLUMN IF NOT EXISTS modelo TEXT")
     with store.session_maker() as session:
         session.execute(stmt)
+        session.execute(alterar)
         session.commit()
 
 
@@ -45,21 +54,36 @@ def get_cached_answer(cache_key: str, store: PGVector | None = None) -> str | No
 
 
 def set_cached_answer(
-    cache_key: str, assunto: str | None, resposta: str, store: PGVector | None = None
+    cache_key: str,
+    assunto: str | None,
+    resposta: str,
+    modelo: str | None = None,
+    store: PGVector | None = None,
 ) -> None:
+    """Grava (ou atualiza) a resposta cacheada.
+
+    `modelo` é só metadado de auditoria — "qual provider/modelo gerou esta
+    resposta" (ver `responder._rotulo_do_modelo`) — e NÃO entra na busca nem
+    na chave: `_cache_key` já resolve isso (inclui o modelo quando o override
+    está em jogo). Aqui ele só fica visível para quem consultar a tabela
+    direto, ex.: `SELECT modelo, COUNT(*) FROM resposta_cache GROUP BY modelo`.
+    """
     store = store or get_vector_store()
     _ensure_table(store)
 
     stmt = text(
         """
-        INSERT INTO resposta_cache (cache_key, assunto, resposta)
-        VALUES (:cache_key, :assunto, :resposta)
+        INSERT INTO resposta_cache (cache_key, assunto, resposta, modelo)
+        VALUES (:cache_key, :assunto, :resposta, :modelo)
         ON CONFLICT (cache_key)
-        DO UPDATE SET resposta = EXCLUDED.resposta, atualizado_em = now()
+        DO UPDATE SET resposta = EXCLUDED.resposta, modelo = EXCLUDED.modelo, atualizado_em = now()
         """
     )
     with store.session_maker() as session:
-        session.execute(stmt, {"cache_key": cache_key, "assunto": assunto, "resposta": resposta})
+        session.execute(
+            stmt,
+            {"cache_key": cache_key, "assunto": assunto, "resposta": resposta, "modelo": modelo},
+        )
         session.commit()
 
 
