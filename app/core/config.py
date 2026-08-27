@@ -52,6 +52,11 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
         path_prefix="/en/kb/",
         assunto="canvas",
     ),
+    FonteWeb(
+            host="learn.microsoft.com",
+            path_prefix="/pt-br",
+            assunto="microsoft",
+    ),
 )
 
 @dataclass(frozen=True)
@@ -183,6 +188,12 @@ ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
     ),
 )
 
+# Encaminhamento genérico, sem departamento específico: usado pelo guardrail de
+# entrada (ver app/agent/guardrail.py), quando a pergunta não é de outro setor —
+# é um pedido de abuso/ataque que não deve tocar RAG, web nem LLM. Mesmo e-mail
+# do suporte acadêmico da entrada "academico".
+CONTATO_PADRAO = _CONTATO.format(email="puc.digital@puc-campinas.edu.br")
+
 
 def _csv(valor: str) -> list[str]:
     """Divide uma lista separada por vírgula do .env, ignorando espaços e vazios."""
@@ -261,6 +272,18 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 150
 
+    # Teto de caracteres POR fonte de contexto (chunk da base ou snippet da web)
+    # ao montar o prompt — ver `responder._format_context`. Guarda contra o caso
+    # documentado em `embedding_model` acima (o `PyPDFLoader` entrega uma página
+    # inteira como um "chunk", e uma página densa passa de 8 mil caracteres) e
+    # contra um `body` gigante devolvido pela busca web: cinco desses no mesmo
+    # prompt já estouraram o limite de tokens por requisição de provider de tier
+    # gratuito (HTTP 413 `request_too_large` — ver `providers/base.py` e
+    # eval/analise-telemetria-2026-08-27.md §10). 6000 ≈ 1500 tokens; o chunk
+    # típico deste corpus tem ~1000 caracteres, bem abaixo, então só o caso
+    # patológico é cortado. 0 desliga o corte.
+    prompt_context_item_max_chars: int = 6000
+
     top_k: int = 5
     relevance_threshold: float = 0.35
 
@@ -302,6 +325,13 @@ class Settings(BaseSettings):
     # para desarmar rápido um termo mal calibrado em ENCAMINHAMENTOS sem
     # precisar de deploy.
     triagem_enabled: bool = True
+
+    # --- Guardrail de entrada (ver app/agent/guardrail.py) ---
+    # Kill switch de rollback: com False, o pedido de ataque/abuso (injeção,
+    # exfiltração de segredo, execução não autorizada, código de exploit) volta
+    # a seguir para o RAG em vez de ser encaminhado na entrada. Mesmo motivo do
+    # `triagem_enabled`: desarmar rápido um padrão mal calibrado sem deploy.
+    guardrail_enabled: bool = True
 
     # --- Fallback de busca externa (ver app/agent/web_fallback.py) ---
     # Kill switch: com False, o guardrail volta a se comportar como antes

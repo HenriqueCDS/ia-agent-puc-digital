@@ -17,6 +17,8 @@ from pathlib import Path
 from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
 from langchain_core.document_loaders import BaseLoader
 
+from app.ingestion.loaders.xlsx_modelos_resposta import ModelosRespostaXlsxLoader
+
 LoaderFactory = Callable[[str], BaseLoader]
 
 _REGISTRY: dict[str, LoaderFactory] = {}
@@ -40,3 +42,9 @@ register(".pdf", lambda uri: PyPDFLoader(uri))
 register(".txt", lambda uri: TextLoader(uri, encoding="utf-8"))
 register(".md", lambda uri: TextLoader(uri, encoding="utf-8"))
 register(".docx", lambda uri: Docx2txtLoader(uri))
+# Forma específica de `.xlsx`: modelos de e-mail já pré-chunkados pelo
+# notebook `ler_dados_pst` (ver `xlsx_modelos_resposta.py`). Não é loader
+# genérico de planilha — se um dia existir uma segunda forma de `.xlsx` na
+# ingestão, o registro por extensão sozinho deixa de bastar e o despacho
+# precisa olhar o conteúdo, não só o sufixo.
+register(".xlsx", lambda uri: ModelosRespostaXlsxLoader(uri))

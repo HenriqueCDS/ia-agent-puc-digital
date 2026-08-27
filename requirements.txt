@@ -24,6 +24,10 @@ pypdf>=4.0
 # --- Leitura de DOCX ---
 docx2txt>=0.8
 
+# --- Leitura de XLSX (modelos de e-mail pré-chunkados por ler_dados_pst.ipynb) ---
+pandas>=2.0
+openpyxl>=3.1   # engine de .xlsx que o pandas.read_excel usa por baixo
+
 # --- Busca externa (fallback quando o RAG nao encontra) ---
 ddgs>=9.0,<10   # DuckDuckGo; ver app/agent/web_fallback.py
 

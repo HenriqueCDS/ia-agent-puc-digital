@@ -164,6 +164,7 @@ class Registro:
     # De onde saiu o `assunto` acima: "informado" (o usuário passou), "metadata"
     # (pasta do documento que respondeu), "allowlist" (domínio da fonte web),
     # "triagem" (categoria de outro departamento, ver app/agent/triagem.py),
+    # "guardrail" (pedido de abuso barrado na entrada, ver app/agent/guardrail.py),
     # "blocklist" (termo sensível reconhecido) ou None. Sem isso, um assunto
     # derivado fica indistinguível de um informado, e a métrica perde o sentido.
     assunto_origem: str | None = None

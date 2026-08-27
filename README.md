@@ -81,6 +81,16 @@ explícitas (Canvas, disciplina, plataforma) para não perder o que a base
 responde bem. Liga/desliga com `TRIAGEM_ENABLED`; as categorias e os e-mails
 estão em `ENCAMINHAMENTOS` (`app/core/config.py`); ver `app/agent/triagem.py`.
 
+**Guardrail de entrada** — antes até da triagem, o pedido de ataque/abuso
+(injeção de prompt, exfiltração de segredo, `DROP TABLE`, código de exploit,
+`altere a nota`…) é encaminhado para o suporte pelo mesmo caminho da triagem —
+`origem="encaminhado"`, sem RAG, web nem LLM. Casamento léxico por substring
+(mesma filosofia da triagem), calibrado contra o dataset OWASP em `eval/`. Não
+substitui as defesas do pipeline (RAG fechado no CONTEXTO, `SYSTEM_WEB`,
+allowlist), é a 1ª linha que evita mandar a entrada hostil para um LLM ou para a
+busca externa. Liga/desliga com `GUARDRAIL_ENABLED`; ver `app/agent/guardrail.py`
+e `eval/analise-telemetria-2026-08-27.md`.
+
 **Cache de resposta** — perguntas que recuperam o mesmo conjunto de chunks no
 retrieval (mesmo sendo uma paráfrase uma da outra) reaproveitam a resposta já
 gerada, sem chamar o Gemini de novo. A chave não é o texto da pergunta, é
@@ -299,26 +309,28 @@ contra o agente de verdade, para calibrar `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` e
 comparar modelo:
 
 ```bash
-python -m scripts.clear_cache --yes                                    # 1. cache limpo
-python -m scripts.eval_run eval/perguntas_teste.json -m groq:<modelo>  # 2. modelo fixo, sem fallback
-python -m scripts.eval_report eval/perguntas_teste.json --dias 1 --detalhe  # 3. audita o que ficou gravado
+# -c limpa a resposta_cache; -m fixa um provider (sem fallback); --timeout encurta o tempo morto
+python -m scripts.eval_run eval/perguntas_teste2.json -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
+python -m scripts.eval_report eval/perguntas_teste2.json --dias 1 --detalhe   # audita o que ficou gravado
 ```
 
 `eval_run` roda o dataset e salva o resultado num arquivo local
 (`eval/resultados/<timestamp>.json`); `eval_report` lê a **mesma** telemetria
 que `scripts.lacunas` usa (canal `eval`), o que permite comparar rodadas
-passadas sem reexecutar nada. Os dois existem por causa de três armadilhas
-achadas na primeira rodada real
-([`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md)):
+passadas sem reexecutar nada. As flags existem por causa de armadilhas achadas
+nas rodadas reais ([`analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md)
+§6, [`-2026-08-27.md`](eval/analise-telemetria-2026-08-27.md) §10):
 
 - **Cache mascara o pipeline.** Uma pergunta já respondida antes serve do
   `resposta_cache` sem tocar retrieval nem LLM — uma rodada assim não mede
-  ajuste nenhum em `CHUNK_SIZE`/`RELEVANCE_THRESHOLD`. Rode `clear_cache`
-  antes de toda rodada de calibração.
+  ajuste nenhum em `CHUNK_SIZE`/`RELEVANCE_THRESHOLD`, e a única pergunta
+  não-cacheada (se for a que gera um prompt grande) pode derrubar a rodada num
+  413. Use `-c`.
 - **A cadeia de fallback troca o gerador no meio da rodada.** Sem `--modelo`,
-  a cota de um provider pode estourar na pergunta 8 e as seguintes saírem de
-  outro — a rodada acaba comparando três modelos entre si, não uma config
-  contra outra.
+  a cota do tier gratuito (Gemini: 20 req/dia) estoura no meio e as perguntas
+  seguintes saem de outro provider — a rodada compara modelos, não configs. Sem
+  `-m` o script avisa. `--timeout 15` corta pela metade os ~30s que cada
+  pergunta perde tentando o provider sem cota antes do fallback.
 - **~12% das perguntas oscilam sozinhas**, mesma config, mesmo score de
   retrieval: quem varia é o resultado do buscador externo (`ddgs`), não o
   agente — o retrieval em si é determinístico (`score_top` bate na 4ª casa
@@ -344,6 +356,7 @@ acertou — sem isso, um valor derivado ficaria indistinguível de um informado:
 | `metadata` | o retrieval achou chunks | pasta gravada na ingestão (`pipeline._enrich`) |
 | `allowlist` | respondeu pela web | `FonteWeb.assunto` do domínio (`WEB_ALLOWLIST`) |
 | `triagem` | assunto de outro departamento | categoria casada em `ENCAMINHAMENTOS` |
+| `guardrail` | pedido de ataque/abuso barrado na entrada | padrão casado em `guardrail._PADROES` (`assunto="fora de escopo"`) |
 | `blocklist` | nada encontrado, tema sensível | categoria casada, com `TRIAGEM_ENABLED=false` |
 | `null` | nada acima | pergunta fora de escopo |
 
@@ -460,7 +473,10 @@ data/raw/<assunto>/*.pdf|txt|md
    ▼
 pipeline.py ── chunker.py ── embeddings locais (HF) ── pgvector
                                                           │
-pergunta ── preprocess.py ── triagem.py ──► outro departamento?
+pergunta ── preprocess.py ── guardrail.py ──► ataque/abuso?
+                                  │              origem="encaminhado"
+                                  │
+                             triagem.py ──────► outro departamento?
                                   │              origem="encaminhado"
                             é do agente
                                   │
@@ -515,6 +531,7 @@ o sinal que vira pauta de ingestão.
 | `app/agent/` | pré-processamento, prompt, cache e geração da resposta |
 | `app/agent/prompts.py` | prompts + marcador `#TOPICO` lido pela telemetria |
 | `app/agent/triagem.py` | encaminha assunto de outro departamento antes do RAG |
+| `app/agent/guardrail.py` | encaminha pedido de ataque/abuso antes do RAG (léxico, OWASP LLM Top 10) |
 | `app/agent/web_fallback.py` | busca externa restrita à allowlist de domínios oficiais |
 | `app/db/vector_store.py` | conexão com pgvector |
 | `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |
@@ -590,22 +607,24 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 
 ## Próximos passos sugeridos
 
-Com o pipeline já validado ponta a ponta (ver acima) e um dataset de 25
-perguntas rodando de verdade contra o agente, o gargalo deixou de ser "falta
-corpus" e passou a ser **calibração e vazamento de guardrail** — é o que a
-rodada de avaliação de 2026-08-26
-([`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md))
-mapeou, em ordem de impacto:
+Com o pipeline já validado ponta a ponta (ver acima) e datasets de eval
+rodando de verdade contra o agente, o gargalo deixou de ser "falta corpus" e
+passou a ser **calibração, vazamento de guardrail e cota de API** — é o que as
+rodadas de 2026-08-26 e 2026-08-27
+([`-26`](eval/analise-telemetria-2026-08-26.md),
+[`-27`](eval/analise-telemetria-2026-08-27.md)) mapearam, em ordem de impacto:
 
 | # | Ação | Onde | Status |
 |---|---|---|---|
 | 1 | Recalibrar os limiares para a faixa real do embedding (0.84–0.88), ou trocar por margem relativa do top-k / reranker | `RELEVANCE_THRESHOLD`, `EXACT_MATCH_THRESHOLD` | ⏳ pendente — `score_min`/`score_mean` já instrumentados na telemetria para testar a hipótese |
-| 2 | Fechar o vazamento do veto: recusa em prosa do LLM sem o marcador esperado passa como resposta válida | `prompts.eh_insuficiente` | ⏳ pendente |
+| 2 | Fechar o vazamento do veto: recusa em prosa do LLM sem o marcador esperado passa como resposta válida | `prompts.eh_insuficiente` | ⏳ pendente — prompt endurecido em 2026-08-27, mas ainda probabilístico |
 | 3 | Pré-aquecer o modelo de embeddings no boot (evita ~40s no primeiro request do processo) | `app/api/app.py` | ⏳ pendente |
-| 4 | Rodar toda calibração com cache limpo, modelo fixo e N=3, comparando item a item | processo de avaliação | ✅ documentado em [Avaliação de qualidade (eval)](#avaliação-de-qualidade-eval) |
-| 5 | Corrigir termo ambíguo "bolsa" na triagem (mandava aluno de iniciação científica para a cobrança) | `ENCAMINHAMENTOS` | ✅ aplicado |
+| 4 | Guardrail de entrada (injeção / segredo / exploit → `encaminhado`) | `app/agent/guardrail.py` | ✅ aplicado 2026-08-27 |
+| 5 | Corte do 413: cada fonte de contexto limitada a `PROMPT_CONTEXT_ITEM_MAX_CHARS`; 413 do provider cai para o próximo | `responder._format_context`, `providers/base.py` | ✅ aplicado 2026-08-27 |
+| 6 | Rodada de calibração com `-c` (cache limpo), `-m` (modelo fixo) e `--timeout`, comparando item a item em N=3 | `scripts/eval_run.py` | ✅ flags aplicadas — ver [Avaliação de qualidade (eval)](#avaliação-de-qualidade-eval) |
+| 7 | Corrigir termo ambíguo "bolsa" na triagem | `ENCAMINHAMENTOS` | ✅ aplicado |
 
-Depois desses três pendentes, os próximos são os de sempre: rodar
+Depois dos pendentes acima, os próximos são os de sempre: rodar
 `python -m scripts.lacunas` semanalmente como fila de ingestão, ampliar o
 dataset de eval (hoje 25 perguntas) com perguntas reais de aluno, e fixar a
 dimensão do embedding + criar índice HNSW quando o corpus crescer além de

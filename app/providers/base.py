@@ -86,10 +86,19 @@ class TodosProvidersFalharam(RuntimeError):
 #   429      cota/rate limit
 #   5xx      falha do lado do provedor
 #
-# Tudo o que NÃO está aqui (nem em `_STATUS_DE_CONFIGURACAO`) e tem status
-# conhecido propaga: 400 (prompt/parâmetro inválido), 413 (contexto grande
-# demais), 422.
+# Tudo o que NÃO está aqui (nem em `_STATUS_DE_CONFIGURACAO` nem tratado à
+# parte abaixo) e tem status conhecido propaga: 400 (prompt/parâmetro
+# inválido), 422.
 _STATUS_DE_FALLBACK = frozenset({401, 402, 403, 408, 429})
+
+# 413 = `request_too_large`. Cai para o próximo provider, e a razão é a mesma do
+# 400 de contexto excedido tratado em `_MENSAGENS_DE_CONTEXTO_EXCEDIDO`: o teto
+# de tokens por requisição é do MODELO/tier, não do formato do pedido. O SDK da
+# OpenAI reporta assim quando o mesmo `mensagens` que estoura um free-tier da
+# Groq (ex.: "Request Entity Too Large" em `qwen/qwen3.6-27b`) cabe folgado no
+# Gemini. Propagar aqui derrubava `/ask` (e a eval com `--modelo`) com o
+# `APIStatusError: Error code: 413` cru, em vez de tentar quem aceitaria.
+_STATUS_DE_CONTEXTO = frozenset({413})
 
 # 404 = `model_not_found`. Cai para o próximo, mas em categoria PRÓPRIA, e a
 # distinção custou um bug real ("The model `llama-3.3-70b-versatile` does not
@@ -199,6 +208,8 @@ def motivo_de_fallback(exc: BaseException) -> Motivo | None:
             )
         if status in _STATUS_DE_FALLBACK:
             return Motivo(f"HTTP {status}")
+        if status in _STATUS_DE_CONTEXTO:
+            return Motivo(f"HTTP {status} (requisição excede o limite do modelo)")
         if 500 <= status < 600:
             return Motivo(f"HTTP {status} (falha do provedor)")
         if status == 400 and _MENSAGENS_DE_CONTEXTO_EXCEDIDO.search(str(exc)):

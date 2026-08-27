@@ -4,7 +4,9 @@ contra o agente de verdade e salva o resultado (origem esperada vs. obtida).
     python -m scripts.eval_run
     python -m scripts.eval_run eval/perguntas_teste.json
     python -m scripts.eval_run eval/perguntas_teste.json --saida eval/resultados/run1.csv --formato csv
-    python -m scripts.eval_run eval/perguntas_teste.json --modelo gemini:gemini-3.6-flash
+
+    # rodada de calibração recomendada (ver eval/analise-telemetria-2026-08-27.md §10):
+    python -m scripts.eval_run eval/perguntas_teste2.json -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
 
 Existe para apoiar a calibração de `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` (e,
 com `--modelo`, comparação de modelo): rode o mesmo dataset antes e depois
@@ -13,9 +15,18 @@ resultados. Este script dá o resultado na hora (arquivo local); para
 auditar o que ficou gravado na telemetria (mesma fonte do `scripts.lacunas`),
 use `scripts.eval_report` depois.
 
-`--modelo` fixa UM modelo sem cadeia de fallback, igual `scripts.ask
---modelo` — sem isso, a cadeia pode responder com um provider diferente a
-cada pergunta, e o resultado deixaria de comparar o mesmo modelo em todas.
+Flags que existem por causa de rate limit / cota do tier gratuito:
+
+- `--modelo/-m` fixa UM modelo sem cadeia de fallback. Sem isso, a cadeia pode
+  responder com um provider diferente a cada pergunta (o do topo estoura a
+  cota no meio da rodada) e o resultado deixa de comparar a mesma coisa. Sem
+  `-m`, o script avisa.
+- `--limpar-cache/-c` apaga a `resposta_cache` antes de rodar — sem isso a
+  rodada mede o cache, não o pipeline, e a única pergunta não-cacheada pode
+  derrubar tudo num 413.
+- `--timeout` sobrescreve `LLM_TIMEOUT` só nesta execução: com o provider do
+  topo sem cota, cada pergunta queima o timeout inteiro antes do fallback —
+  15s corta esse tempo morto pela metade.
 """
 
 import csv
@@ -27,8 +38,10 @@ import typer
 
 from app.agent.responder import answer
 from app.core import telemetry
+from app.core.config import settings
 from app.core.models import Query
 from app.db import telemetry_store
+from app.db.response_cache import clear_cache
 
 app = typer.Typer(add_completion=False, help="Roda o dataset de avaliação contra o agente.")
 
@@ -126,15 +139,47 @@ def main(
     modelo: str | None = typer.Option(
         None, "--modelo", "-m", help="Fixa um modelo (`[provider:]modelo`), sem fallback."
     ),
+    limpar_cache: bool = typer.Option(
+        False, "--limpar-cache", "-c",
+        help="Apaga a resposta_cache antes de rodar (sem isso a rodada mede o cache).",
+    ),
+    timeout: float | None = typer.Option(
+        None, "--timeout",
+        help="Sobrescreve LLM_TIMEOUT (s) só nesta rodada. Ex.: 15 corta pela metade "
+             "o tempo morto quando o provider do topo está sem cota.",
+    ),
 ) -> None:
     if formato not in ("json", "csv"):
         raise typer.BadParameter("--formato deve ser 'json' ou 'csv'.")
 
     itens = _carregar_dataset(dataset)
 
+    # Fixar o modelo é o que torna a rodada comparável: sem `--modelo`, a cadeia
+    # de fallback pode responder com um provider diferente a cada pergunta (cota
+    # do tier gratuito estourando), e o resultado deixa de medir a config para
+    # medir "qual modelo respondeu". Ver eval/analise-telemetria-2026-08-27.md §10.
+    if modelo is None:
+        typer.secho(
+            "aviso: sem --modelo, a cadeia de fallback pode variar o provider entre "
+            "as perguntas — a rodada não fica comparável. Ex.: -m huggingface:"
+            f"{settings.hf_model}",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+    if timeout is not None:
+        # Lido na construção dos providers (`providers/chain`), que é preguiçosa
+        # e só acontece na 1ª pergunta — então basta ajustar antes de `_rodar`.
+        settings.llm_timeout = timeout
+
     telemetry.configurar_logs()
     telemetry_store.habilitar()
     telemetry.set_canal(_CANAL)
+
+    if limpar_cache:
+        removidos = clear_cache()
+        typer.secho(f"cache limpo: {removidos} entrada(s) removida(s).",
+                    fg=typer.colors.CYAN, err=True)
 
     linhas = _rodar(itens, modelo)
 

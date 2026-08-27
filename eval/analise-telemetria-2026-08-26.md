@@ -166,6 +166,24 @@ o marcador `CONTEXTO_INSUFICIENTE` que `prompts.eh_insuficiente` procura:
 Em todos, `web_insuficiente: null` e `veto_escapou: null` — ou seja, **nenhum
 dos dois mecanismos de detecção viu nada.** A telemetria registrou sucesso.
 
+Os três não são idênticos: nos itens 8 e 15 o conteúdo recuperado é de outro
+assunto (guia de normalização de trabalhos ≠ dicas de estudo orientado;
+telefones de faculdades específicas ≠ secretaria geral) — deveriam ter virado
+`#SEM_COBERTURA#`. O item 11 tem valor real (confirma que existe calendário
+2026, cita datas parciais, aponta a página oficial) — a frase ambígua é só a
+abertura, não o problema de fundo.
+
+**Correção aplicada** (`app/agent/prompts.py`, `SYSTEM_WEB` e `SYSTEM`): o
+prompt agora proíbe explicitamente as frases que abriram os três vazamentos
+("infelizmente, não há informações específicas...", "não foi possível
+encontrar...") e aperta o critério de recusa de "tratar do assunto" para
+"tratar ESPECIFICAMENTE da pergunta" — com um exemplo do que não fazer,
+espelhando o caso real do item 15. Segue a mesma família de mecanismo que já
+existe para o marcador de tópico e para a tradução de `CONTEXTO_INSUFICIENTE`:
+fechar a forma específica de escape, não tentar prever todas as formas com
+regex. **Precisa de nova rodada de `eval_run` para confirmar que fechou** —
+prompt é comportamento probabilístico, isto reduz a chance, não elimina.
+
 Impactos, do mais visível ao mais insidioso:
 
 **1. O aluno recebe um não-resposta em vez do encaminhamento.** É o pior dos
@@ -317,10 +335,11 @@ provider que aguente as 25 chamadas (Groq ou HF), não o Gemini free.
 |---|---|---|
 | 4 | `"bolsa"` em entrada própria com `excecoes` | ✅ `config.ENCAMINHAMENTOS` |
 | 6 | Gabarito do item 17 (`web` → `base`) | ✅ `eval/perguntas_teste.json` |
-| 7 | `GROQ_MODEL` sem o prefixo duplicado | ✅ `.env` |
+| 7 | `GROQ_MODEL` sem o prefixo duplicado | ✅ `.env` + `.env.example` |
 | — | `score_min`/`score_mean` do top-k na telemetria | ✅ instrumentação p/ §3.1 |
+| 3 | Veto em prosa proibido explicitamente no prompt | ✅ `prompts.SYSTEM_WEB`/`SYSTEM` — precisa de rodada nova p/ confirmar (§4) |
 | 1, 5, 9 | processo de rodada (cache, modelo fixo, N=3) | 📋 §9 |
-| 2, 3, 8 | limiares, veto em prosa, pré-aquecimento | ⏳ pendentes |
+| 2, 8 | limiares, pré-aquecimento | ⏳ pendentes |
 
 Os campos novos de telemetria são **só instrumentação**: nada no roteamento os
 lê. A ordem é deliberada — acumular dado real primeiro, decidir o critério

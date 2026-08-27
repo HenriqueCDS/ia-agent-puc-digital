@@ -292,6 +292,35 @@ def test_contexto_recuperado_entra_no_prompt(monkeypatch):
     assert resultado.sources
 
 
+def test_chunk_gigante_e_truncado_antes_de_virar_prompt(monkeypatch):
+    """Página densa de PDF (um "chunk" só, >8k chars) não pode ir inteira para o
+    prompt: 5 dessas estouram o limite de token do provider (HTTP 413). Ver
+    `PROMPT_CONTEXT_ITEM_MAX_CHARS` e eval/analise-telemetria-2026-08-27.md §10."""
+    monkeypatch.setattr(responder.settings, "prompt_context_item_max_chars", 500)
+    gigante = "A" * 5000
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(texto=gigante, page=1)])
+    llm = FakeLLM()
+
+    responder.answer(Query(text="pergunta"), llm=llm)
+
+    prompt = "\n".join(str(m.content) for m in llm.mensagens)
+    assert "A" * 500 in prompt
+    assert "A" * 600 not in prompt
+    assert "[...trecho truncado]" in prompt
+
+
+def test_teto_zero_desliga_o_corte_de_contexto(monkeypatch):
+    monkeypatch.setattr(responder.settings, "prompt_context_item_max_chars", 0)
+    gigante = "B" * 5000
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(texto=gigante, page=1)])
+    llm = FakeLLM()
+
+    responder.answer(Query(text="pergunta"), llm=llm)
+
+    prompt = "\n".join(str(m.content) for m in llm.mensagens)
+    assert "B" * 5000 in prompt
+
+
 def test_pergunta_vazia_e_rejeitada():
     with pytest.raises(ValueError):
         responder.answer(Query(text="   "), llm=FakeLLM())

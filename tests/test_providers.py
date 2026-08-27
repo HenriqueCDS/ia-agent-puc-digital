@@ -169,7 +169,6 @@ def test_gatilhos_de_indisponibilidade_caem_para_o_proximo(erro):
     "erro",
     [
         ErroHTTP(400, "Invalid prompt"),  # conteúdo/validação
-        ErroHTTP(413, "context too long"),
         ErroHTTP(422, "unprocessable"),
         ValueError("pergunta vazia"),
     ],
@@ -293,6 +292,28 @@ def test_400_de_contexto_excedido_cai_para_o_proximo():
         MENSAGENS
     )
     assert resposta.response_metadata["provider"] == "groq"
+    assert segundo.chamadas == 1
+
+
+def test_413_request_too_large_cai_para_o_proximo():
+    """`request_too_large` (HTTP 413) é teto de tokens por requisição do MODELO/
+    tier, não erro de formato do pedido — mesma lógica do 400 de contexto
+    excedido. Bug real: a Groq free-tier devolvia isso e o `APIStatusError:
+    Error code: 413` cru subia para `/ask` em vez de a cadeia tentar o Gemini.
+    """
+    mensagem = (
+        "Error code: 413 - {'error': {'message': 'Request Entity Too Large', "
+        "'type': 'invalid_request_error', 'code': 'request_too_large'}}"
+    )
+    assert motivo_de_fallback(ErroHTTP(413, mensagem)) is not None
+    # Também reconhecido sem `status_code` estruturado (SDK só com a mensagem).
+    assert motivo_de_fallback(Exception(mensagem)) is not None
+
+    segundo = FakeProvider("gemini", resposta="Resposta do Gemini.")
+    resposta = _cadeia(FakeProvider("groq", erro=ErroHTTP(413, mensagem)), segundo).invoke(
+        MENSAGENS
+    )
+    assert resposta.response_metadata["provider"] == "gemini"
     assert segundo.chamadas == 1
 
 

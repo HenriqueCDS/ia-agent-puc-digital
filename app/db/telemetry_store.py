@@ -299,6 +299,30 @@ def origem_por_hash(
     }
 
 
+_EXPORTAR_CANAL = """
+SELECT criado_em, dados
+FROM telemetria
+WHERE dados->>'canal' = :canal
+  AND criado_em >= now() - make_interval(days => :dias)
+ORDER BY criado_em
+"""
+
+
+def exportar_canal(canal: str, dias: int) -> list[tuple[datetime, dict]]:
+    """Todas as linhas de um canal na janela, em ordem cronológica.
+
+    `dados` cru (não passa por `ResultadoTelemetria`) de propósito: existe para
+    inspeção externa (`scripts.eval_export`, auditoria manual), onde o
+    consumidor pode querer QUALQUER campo do JSONB, não só os que os relatórios
+    de hoje leem. Ver `origem_por_hash` para o caso de uso que já filtra/resume.
+    """
+    with get_vector_store().session_maker() as sessao:
+        _garantir_tabela(sessao)
+        sessao.commit()
+        linhas = sessao.execute(text(_EXPORTAR_CANAL), {"canal": canal, "dias": dias}).all()
+    return [(linha.criado_em, linha.dados) for linha in linhas]
+
+
 def limpar_telemetria() -> int:
     """Apaga todos os registros de telemetria. Usado pela CLI de limpeza (base zerada p/ testes)."""
     with get_vector_store().session_maker() as sessao:

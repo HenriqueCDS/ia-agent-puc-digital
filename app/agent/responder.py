@@ -14,10 +14,11 @@ from app.agent.prompts import (
     eh_insuficiente,
     separar_topico,
 )
+from app.agent import guardrail
 from app.agent.triagem import classificar
 from app.agent.web_fallback import buscar_na_web, fonte_permitida, termo_bloqueado
 from app.core import telemetry
-from app.core.config import settings
+from app.core.config import CONTATO_PADRAO, settings
 from app.core.models import Answer, Query, RetrievedChunk
 from app.db.response_cache import get_cached_answer, set_cached_answer
 from app.providers.chain import cadeia_para_modelo, get_chat_model
@@ -26,9 +27,26 @@ from app.retrieval.retriever import is_exact_match, retrieve
 logger = logging.getLogger(__name__)
 
 
+def _conteudo_limitado(texto: str) -> str:
+    """Corta uma fonte de contexto no teto de caracteres (ver o setting).
+
+    Uma página densa de PDF entra no retrieval como um "chunk" só (o splitter
+    não divide página — ver `config.embedding_model`), e a busca web às vezes
+    devolve um `body` de milhares de caracteres. Cinco desses no mesmo prompt
+    estouram o limite de token por requisição de provider de tier gratuito
+    (HTTP 413). O corte é por caractere, no fim, com marca — perder o rodapé de
+    uma página é melhor que a requisição inteira falhar.
+    """
+    teto = settings.prompt_context_item_max_chars
+    if teto and len(texto) > teto:
+        return texto[:teto].rstrip() + "\n[...trecho truncado]"
+    return texto
+
+
 def _format_context(chunks: list[RetrievedChunk]) -> str:
     return "\n\n---\n\n".join(
-        f"[Fonte: {c.citation}]\n{c.document.page_content}" for c in chunks
+        f"[Fonte: {c.citation}]\n{_conteudo_limitado(c.document.page_content)}"
+        for c in chunks
     )
 
 
@@ -270,6 +288,21 @@ def _responder(
     concatenada aqui. Com três ou mais fontes assim, o roteamento passa a valer
     como tool calling, tendo `retrieve` e `buscar_na_web` como tools.
     """
+    # ANTES DA TRIAGEM: pedido de ataque/abuso (injeção de prompt, exfiltração de
+    # segredo, execução não autorizada, código de exploit) é encaminhado para o
+    # suporte sem tocar em RAG, web nem LLM. Mesmo desfecho da triagem
+    # (`origem="encaminhado"`) — a decisão de 2026-08-27 foi consolidar toda
+    # recusa nesse caminho em vez de criar uma origem nova. Ver o módulo
+    # `guardrail` e eval/analise-telemetria-2026-08-27.md §8.
+    if settings.guardrail_enabled:
+        termo = guardrail.deve_encaminhar(query.text)
+        if termo is not None:
+            logger.info("guardrail: pergunta casou padrão de abuso (%r)", termo)
+            _registrar_assunto(registro, guardrail.ASSUNTO, "guardrail")
+            return Answer(
+                text=CONTATO_PADRAO, sources=[], grounded=False, origem="encaminhado"
+            )
+
     # PRIMEIRA etapa, antes do retrieval: assunto de outro departamento não
     # deve nem tentar o RAG. Não é só economia de chamada — é o que impede o LLM
     # de responder sobre boleto/diploma a partir de um chunk fraco que passou
