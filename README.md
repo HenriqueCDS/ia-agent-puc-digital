@@ -38,7 +38,7 @@ aceitaria o mesmo pedido. Uma tentativa por provedor, sem backoff: fallback é
 perguntar a outro, retry é insistir com o mesmo. Ver `app/providers/`.
 
 **Escolha do modelo** — cada provedor tem o seu no `.env` (`CHAT_MODEL`,
-`GROQ_MODEL`, `OPENROUTER_MODEL`). Modelo fora do catálogo da chave dá 404 com
+`HF_MODEL`, `GROQ_MODEL`, `OPENROUTER_MODEL`). Modelo fora do catálogo da chave dá 404 com
 uma mensagem que não distingue "não existe" de "você não tem acesso" — as duas
 se resolvem olhando o catálogo da própria chave:
 
@@ -109,23 +109,40 @@ CORS restrito às origens do `.env`, e timeout na chamada ao LLM. Ver
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
 
-**Testes** — 174 testes cobrindo chunking, ids determinísticos, corte por
+**Testes** — 266 testes cobrindo chunking, ids determinísticos, corte por
 limiar, filtro por assunto, formatação de citação, o guardrail do agente, o
 hit/miss do cache de resposta, o fallback de busca externa (allowlist, domínio
 sósia, redirect do buscador, corte por similaridade, blocklist de assunto
-sensível e degradação em caso de rate limit) e a borda HTTP inteira — contrato
-de resposta, cada código de erro, autenticação, CORS, a janela deslizante do
-rate limit e liveness vs. readiness. Rodam sem banco, sem chave de API e **sem
-rede**, usando dublês de vector store, de LLM, de cache, de busca e de relógio.
+sensível e degradação em caso de rate limit), a cadeia de fallback entre os
+quatro provedores de LLM e a borda HTTP inteira — contrato de resposta, cada
+código de erro, autenticação, CORS, a janela deslizante do rate limit,
+liveness vs. readiness e o seletor de modelo da demo. Rodam sem banco, sem
+chave de API e **sem rede**, usando dublês de vector store, de LLM, de cache,
+de busca e de relógio.
 
-### Ainda não executado de ponta a ponta
+### Validado ponta a ponta; calibração em aberto
 
-O caminho completo `ingest → embeddings locais → pgvector → retrieve` ainda não
-foi rodado contra um banco real. Falta subir o Postgres e configurar a
-`GOOGLE_API_KEY`; os pontos que só ficam provados aí são o `DELETE` de
-`delete_by_source` e a criação sob demanda da tabela `resposta_cache` (ambos em
-`app/db/`), únicos trechos acoplados ao schema/SQL direto por fora do
-`langchain-postgres`.
+O caminho completo `ingest → embeddings locais (e5-base) → pgvector →
+retrieve → LLM` já rodou contra um banco real e um corpus de 3 PDFs (1289
+chunks) — ver a rodada de avaliação em
+[`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md).
+O que essa rodada deixou em aberto, em ordem de impacto:
+
+1. **`RELEVANCE_THRESHOLD` e `EXACT_MATCH_THRESHOLD` estão fora da faixa útil**
+   do embedding atual (§3 da análise): não descartam nem promovem chunk
+   nenhum hoje, porque o `score_top` de qualquer pergunta cai numa faixa
+   estreita (0.84–0.88) esteja a base cobrindo o tema ou não.
+2. **Recusa em prosa do LLM escapa dos dois vetos de contexto insuficiente**
+   (`prompts.eh_insuficiente`) quando o modelo não emite o marcador esperado —
+   infla a acurácia aparente de `origem="web"` (§4 da análise).
+3. **Pré-aquecer o modelo de embeddings no boot**: o primeiro request do
+   processo paga ~40s de carregamento de peso que as demais requisições não
+   pagam (§7 da análise).
+
+As correções já aplicadas nessa rodada (termo ambíguo "bolsa" isolado na
+triagem, gabarito do dataset corrigido, prefixo duplicado de `GROQ_MODEL`)
+já estão em `app/core/config.py` e `eval/perguntas_teste.json`; os itens 1–3
+acima continuam pendentes.
 
 ### Fora do escopo desta fase
 
@@ -235,7 +252,8 @@ python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl   # e/ou 
 {"canal":"api:ava","request_id":"78bbd705-e16c-417b-a546-b8b08f6b5e13","pii":null,
  "assunto":"canvas","assunto_origem":"metadata","topico":"envio de atividade",
  "pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash","provider":"gemini",
- "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"alta_confianca":true,
+ "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"score_min":0.87,
+ "score_mean":0.91,"alta_confianca":true,
  "cache_hit":false,"input_tokens":120,"output_tokens":30,
  "ms_retrieve":41.2,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
  "web_insuficiente":null,"erro":null}
@@ -273,6 +291,40 @@ e não ausência de conteúdo.
 
 A janela útil é a da retenção (7 dias por padrão); pedir mais que isso avisa em
 vez de devolver uma janela vazia que pareceria "semana tranquila".
+
+### Avaliação de qualidade (eval)
+
+Dataset de perguntas com origem esperada (`eval/perguntas_teste.json`) rodado
+contra o agente de verdade, para calibrar `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` e
+comparar modelo:
+
+```bash
+python -m scripts.clear_cache --yes                                    # 1. cache limpo
+python -m scripts.eval_run eval/perguntas_teste.json -m groq:<modelo>  # 2. modelo fixo, sem fallback
+python -m scripts.eval_report eval/perguntas_teste.json --dias 1 --detalhe  # 3. audita o que ficou gravado
+```
+
+`eval_run` roda o dataset e salva o resultado num arquivo local
+(`eval/resultados/<timestamp>.json`); `eval_report` lê a **mesma** telemetria
+que `scripts.lacunas` usa (canal `eval`), o que permite comparar rodadas
+passadas sem reexecutar nada. Os dois existem por causa de três armadilhas
+achadas na primeira rodada real
+([`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md)):
+
+- **Cache mascara o pipeline.** Uma pergunta já respondida antes serve do
+  `resposta_cache` sem tocar retrieval nem LLM — uma rodada assim não mede
+  ajuste nenhum em `CHUNK_SIZE`/`RELEVANCE_THRESHOLD`. Rode `clear_cache`
+  antes de toda rodada de calibração.
+- **A cadeia de fallback troca o gerador no meio da rodada.** Sem `--modelo`,
+  a cota de um provider pode estourar na pergunta 8 e as seguintes saírem de
+  outro — a rodada acaba comparando três modelos entre si, não uma config
+  contra outra.
+- **~12% das perguntas oscilam sozinhas**, mesma config, mesmo score de
+  retrieval: quem varia é o resultado do buscador externo (`ddgs`), não o
+  agente — o retrieval em si é determinístico (`score_top` bate na 4ª casa
+  decimal entre rodadas). Rode N=3 e compare **item a item**, nunca só o
+  total: duas trocas em direção oposta se cancelam no agregado e escondem
+  instabilidade real.
 
 ### `assunto` e `topico`
 
@@ -320,7 +372,7 @@ Responde às quatro perguntas que importam para eficiência:
 | Quanto custa? | `input_tokens`, `output_tokens`, `cache_hit` (hit = zero token de API) |
 | Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_llm` (rede), `ms_web` (rede lenta) |
 | O guardrail dispara quanto? | `origem` = `base` / `web` / `encaminhado` / `nenhuma`, `base_insuficiente`, `web_insuficiente` |
-| A qualidade caiu? | `n_chunks`, `score_top`, `alta_confianca` ao longo do tempo |
+| A qualidade caiu? | `n_chunks`, `score_top`/`score_min`/`score_mean` (dispersão do top-k), `alta_confianca` ao longo do tempo |
 
 Consultas (a coluna `dados` é `JSONB` — campo novo no registro não exige migração):
 
@@ -454,7 +506,7 @@ o sinal que vira pauta de ingestão.
 | `app/core/` | configuração e contratos (`Query`, `Answer`, `RetrievedChunk`) |
 | `app/core/telemetry.py` | 1 linha JSON por pergunta: token, latência, guardrail, qualidade |
 | `app/providers/` | **único** ponto que conhece um SDK de LLM |
-| `app/providers/chain.py` | cadeia de fallback entre Gemini, Groq e OpenRouter |
+| `app/providers/chain.py` | cadeia de fallback entre Gemini, HuggingFace, Groq e OpenRouter |
 | `app/providers/base.py` | interface `LLMProvider` + regra de quando cair p/ o próximo |
 | `app/ingestion/loaders/` | fonte de dados → `Document` |
 | `app/ingestion/chunker.py` | divisão em chunks (função pura) |
@@ -470,7 +522,12 @@ o sinal que vira pauta de ingestão.
 | `app/core/pii.py` | detecção e mascaramento de RA/CPF/e-mail/telefone (LGPD) |
 | `app/api/routers/demo.py` | rota `/demo` — injeta a chave da demo no HTML |
 | `app/static/index.html` | o frontend de demonstração (1 arquivo, sem build) |
-| `scripts/` | CLIs de ingestão, de pergunta e o relatório de lacunas |
+| `scripts/` | CLIs de ingestão, de pergunta, relatório de lacunas e avaliação |
+| `scripts/eval_run.py` | roda um dataset de eval contra o agente de verdade, salva local |
+| `scripts/eval_report.py` | audita, na telemetria já gravada, o mesmo dataset (sem reexecutar) |
+| `scripts/clear_cache.py` | apaga `resposta_cache` — necessário antes de toda rodada de calibração |
+| `scripts/clear_logs.py` | apaga a tabela `telemetria` |
+| `eval/` | datasets de avaliação e rodadas de análise da telemetria |
 
 ## Pontos de extensão (features fora da v1)
 
@@ -500,7 +557,12 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
   não alucina um procedimento acadêmico — tenta as páginas públicas oficiais e,
   não achando, encaminha para a secretaria. Também serve de termômetro de quais
   documentos faltam na base (`Answer.grounded` continua `False` mesmo quando a
-  web responde; quem precisa distinguir lê `Answer.origem`).
+  web responde; quem precisa distinguir lê `Answer.origem`). **Ressalva medida
+  em produção**: com o embedding atual, `score_top` cai numa faixa estreita
+  (0.84–0.88) esteja a base cobrindo o tema ou não, então o limiar de 0.35 hoje
+  nunca descarta um chunk — quem decide base-vs-web é o veto do LLM, não este
+  número (ver
+  [`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md) §3).
 - **Fallback como ramo do guardrail, não como tool do LLM**: o gatilho ("o
   retrieval voltou vazio") é um `if`, não uma decisão ambígua. Deixar o modelo
   escolher custaria uma chamada extra para decidir o que o código já sabe, e
@@ -528,21 +590,23 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 
 ## Próximos passos sugeridos
 
-O gargalo hoje é **conteúdo, não código** — e a demo tornou isso visível: com o
-corpus atual, quase toda pergunta sai com badge amarelo (`origem="web"`), ou
-seja, ~30-60s de latência num caminho que existia para ser exceção. As duas
-ferramentas para medir o progresso disso passaram a existir agora
-(`scripts/lacunas.py` e o badge de origem), o que muda a ordem da lista:
+Com o pipeline já validado ponta a ponta (ver acima) e um dataset de 25
+perguntas rodando de verdade contra o agente, o gargalo deixou de ser "falta
+corpus" e passou a ser **calibração e vazamento de guardrail** — é o que a
+rodada de avaliação de 2026-08-26
+([`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md))
+mapeou, em ordem de impacto:
 
-1. Ingerir um conjunto de PDFs reais e calibrar `CHUNK_SIZE` e
-   `RELEVANCE_THRESHOLD` com `scripts/ask.py --debug`. É o item **T0.6** do
-   [BACKLOG.md](BACKLOG.md), e ele decide sozinho quanto do tráfego vai para o
-   fallback web — o caminho lento e caro.
-2. Rodar `python -m scripts.lacunas` semanalmente e usar a lista como fila de
-   ingestão. Repetir o passo 1 medindo a proporção de `origem="base"` antes e
-   depois: é a métrica de que a base está melhorando.
-3. Montar um conjunto de ~20 perguntas reais de alunos como teste de regressão
-   do retrieval.
-4. Fixar a dimensão do embedding e criar índice HNSW quando o corpus crescer.
-5. Avaliar o gatilho na "zona cinzenta" (retrieval devolve chunks fracos, entre
-   `RELEVANCE_THRESHOLD` e ~0.5), hoje fora do fallback de propósito.
+| # | Ação | Onde | Status |
+|---|---|---|---|
+| 1 | Recalibrar os limiares para a faixa real do embedding (0.84–0.88), ou trocar por margem relativa do top-k / reranker | `RELEVANCE_THRESHOLD`, `EXACT_MATCH_THRESHOLD` | ⏳ pendente — `score_min`/`score_mean` já instrumentados na telemetria para testar a hipótese |
+| 2 | Fechar o vazamento do veto: recusa em prosa do LLM sem o marcador esperado passa como resposta válida | `prompts.eh_insuficiente` | ⏳ pendente |
+| 3 | Pré-aquecer o modelo de embeddings no boot (evita ~40s no primeiro request do processo) | `app/api/app.py` | ⏳ pendente |
+| 4 | Rodar toda calibração com cache limpo, modelo fixo e N=3, comparando item a item | processo de avaliação | ✅ documentado em [Avaliação de qualidade (eval)](#avaliação-de-qualidade-eval) |
+| 5 | Corrigir termo ambíguo "bolsa" na triagem (mandava aluno de iniciação científica para a cobrança) | `ENCAMINHAMENTOS` | ✅ aplicado |
+
+Depois desses três pendentes, os próximos são os de sempre: rodar
+`python -m scripts.lacunas` semanalmente como fila de ingestão, ampliar o
+dataset de eval (hoje 25 perguntas) com perguntas reais de aluno, e fixar a
+dimensão do embedding + criar índice HNSW quando o corpus crescer além de
+~50k chunks.
