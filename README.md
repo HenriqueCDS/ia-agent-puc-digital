@@ -62,10 +62,12 @@ da cadeia normal.
 **Fallback de busca externa** — quando o retrieval não devolve nada, o agente
 procura a resposta em páginas públicas oficiais antes de encaminhar para a
 secretaria. A busca é restrita por uma allowlist (`WEB_ALLOWLIST` em
-`app/core/config.py`): site da PUC-Campinas e a base de conhecimento oficial do
-Canvas (`community.instructure.com/en/kb/`). A restrição tem duas camadas — uma
-query `site:<host>` por fonte, e a revalidação de **toda** URL devolvida contra
-`(host, path_prefix)`, porque o operador `site:` do buscador vaza resultado fora
+`app/core/config.py`): o site do programa PUC Digital
+(`pucdigital.puc-campinas.edu.br`), uma lista de páginas curadas do portal
+institucional (calendário, secretaria-geral, biblioteca) e a base de
+conhecimento oficial do Canvas (`community.instructure.com/en/kb/`). A restrição
+tem duas camadas — uma query `site:<host>` por fonte, e a revalidação de **toda**
+URL devolvida contra `(host, path_prefixes)`, porque o operador `site:` do buscador vaza resultado fora
 do escopo em silêncio. Os snippets ainda passam por um corte de similaridade
 (mesmo modelo de embedding local da base, sem custo de API) e por um veto final
 do LLM, que responde com o marcador `#SEM_COBERTURA#` quando os trechos não
@@ -317,7 +319,22 @@ python -m scripts.eval_report eval/perguntas_teste2.json --dias 1 --detalhe   # 
 `eval_run` roda o dataset e salva o resultado num arquivo local
 (`eval/resultados/<timestamp>.json`); `eval_report` lê a **mesma** telemetria
 que `scripts.lacunas` usa (canal `eval`), o que permite comparar rodadas
-passadas sem reexecutar nada. As flags existem por causa de armadilhas achadas
+passadas sem reexecutar nada.
+
+> **`acertou` mede só o ROTEAMENTO.** Ele compara `resultado.origem` com
+> `origem_esperada` — uma resposta que inventa um prazo ou cita a página errada
+> sai como acerto desde que tenha ido pelo caminho certo. Por isso cada linha do
+> resultado traz a `resposta` (mascarada por `pii.mascarar`), as `fontes_citadas`,
+> os três scores do retrieval (`score_top`/`score_min`/`score_mean`), os flags de
+> veto (`base_insuficiente`, `web_insuficiente`, `veto_escapou`) e o `criterio` de
+> conferência manual do dataset. O arquivo é a base da revisão, não o veredito —
+> ver [`eval/plano-testes-2026-08-28.md`](eval/plano-testes-2026-08-28.md) §1.
+>
+> Duas colunas com nomes parecidos, de propósito: `fontes_resposta`/`score_fonte_top`
+> são as fontes **da resposta** (vazias quando a origem é `nenhuma`/`encaminhado`);
+> `chunks_recuperados`/`score_top` são o que o **retrieval** trouxe (quase sempre 5).
+
+As flags existem por causa de armadilhas achadas
 nas rodadas reais ([`analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md)
 §6, [`-2026-08-27.md`](eval/analise-telemetria-2026-08-27.md) §10):
 

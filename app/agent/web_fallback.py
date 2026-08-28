@@ -11,7 +11,7 @@ A restrição aos domínios oficiais tem duas camadas:
 1. direcionar — uma query `site:<host> <termos>` por entrada da allowlist,
    porque `site:a OR site:b` no DuckDuckGo devolve resultado fora do escopo
    em silêncio;
-2. validar — toda URL devolvida é reconferida contra (host, path_prefix) da
+2. validar — toda URL devolvida é reconferida contra (host, path_prefixes) da
    allowlist antes de virar contexto.
 
 A camada 2 é a que garante a restrição; a 1 é só recall. Nada que venha do
@@ -100,7 +100,8 @@ def fonte_permitida(url: str) -> FonteWeb | None:
     for fonte in WEB_ALLOWLIST:
         alvo = fonte.host.lower().removeprefix("www.")
         casa_host = host == alvo or (fonte.subdominios and host.endswith("." + alvo))
-        if casa_host and caminho.startswith(fonte.path_prefix.lower()):
+        casa_caminho = any(caminho.startswith(p.lower()) for p in fonte.path_prefixes)
+        if casa_host and casa_caminho:
             return fonte
     return None
 

@@ -104,7 +104,7 @@ flowchart TD
   (`if not chunks`), o que mantém o comportamento testável e previsível
 - Restrição de domínio em duas camadas: uma query `site:<host>` por entrada da
   allowlist (recall) e a revalidação de **toda** URL devolvida contra
-  `(host, path_prefix)` (garantia). O operador `site:` sozinho vaza resultado
+  `(host, path_prefixes)` (garantia). O operador `site:` sozinho vaza resultado
   fora do escopo em silêncio, então não é tratado como restrição
 - Cascata de filtros, do mais barato ao mais caro: allowlist → similaridade
   (embedding local, sem custo de API) → veto do LLM, que responde `INSUFICIENTE`

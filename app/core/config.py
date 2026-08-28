@@ -18,44 +18,98 @@ class FonteWeb:
     """Entrada da allowlist da busca externa (ver `app/agent/web_fallback.py`).
 
     `termos` são palavras injetadas na query do DuckDuckGo para direcionar o
-    recall; `host`/`path_prefix` são o que de fato *restringe*: toda URL
+    recall; `host`/`path_prefixes` são o que de fato *restringe*: toda URL
     devolvida é revalidada contra eles antes de chegar ao LLM.
+
+    `path_prefixes` é uma tupla: uma URL é aceita se o PATH dela começa por
+    QUALQUER um dos prefixos. `("/",)` (o default) libera o host inteiro; uma
+    lista de páginas curadas (`("/calendario/", "/biblioteca/")`) restringe a
+    busca ao que a equipe conferiu — ver KB-2 no comentário abaixo.
     """
 
     host: str
-    path_prefix: str = "/"
+    path_prefixes: tuple[str, ...] = ("/",)
     subdominios: bool = False
     termos: str = ""
     assunto: str | None = None  # casa com a pasta em data/raw (filtro do retrieval)
 
 
-# Allowlist da busca externa. Fica no código (e não no .env) porque é regra de
-# segurança: o que muda aqui muda o que o agente pode citar como fonte oficial.
+# Allowlist da busca externa: o conjunto FECHADO de páginas que o agente pode
+# consultar e citar quando a base indexada não cobre a pergunta (ver
+# `app/agent/web_fallback.py`). Fica no código, e não no .env, porque é regra de
+# segurança — cada host aqui é uma fonte que o agente passa a tratar como
+# oficial.
 #
-# Sobre o path do Instructure: as três URLs de guia que originaram esta lista
-# (.../kb/canvas-lms-{basics,instructor,student}-guide) são páginas-índice — os
-# artigos com o conteúdo real ficam em /en/kb/articles/<id>-<slug>. Restringir o
-# path ao slug do guia descartaria justamente as páginas úteis, então o corte
-# duro é `/en/kb/`: a base de conhecimento oficial inteira, que já exclui o
-# fórum de usuários (/t5/, /en/community/). Os três guias ficam cobertos por uma
-# entrada só — em teste real, buscar o slug de cada guia separadamente não
-# melhorou os resultados e triplicava as consultas ao mesmo host, o que acelera
-# o rate limit do buscador. Uma entrada por host é a regra aqui.
+# REGRAS AO EDITAR:
+#
+# 1. UMA entrada por host. Cada `FonteWeb` vira uma query `site:<host>` no
+#    DuckDuckGo; o mesmo host repetido em 5 entradas dispara a mesma busca 5x e
+#    só acelera o rate limit do scraper. Um caminho específico (/pos/, /secretaria/)
+#    NÃO precisa de entrada própria: entra como mais um item de `path_prefixes`
+#    na entrada do host.
+#
+# 2. `path_prefixes` do Instructure é `("/en/kb/",)`, não o slug do guia. As
+#    páginas .../canvas-lms-student-guide são índices SEM conteúdo; os artigos
+#    ficam em /en/kb/articles/<id>-<slug>, e um prefixo no slug do guia
+#    rejeitaria justamente esses na revalidação de URL (`fonte_permitida`).
+#    `/en/kb/` cobre a KB oficial inteira e já exclui o fórum de usuários (/t5/,
+#    /en/community/).
+#
+# 3. `path_prefixes` casa contra o PATH da URL, nunca contra o fragmento
+#    (`#...`) — um valor como "/x/#y" nunca casa nada.
+#
+# 4. `assunto` casa com a PASTA em data/raw (`canvas`, `puc-digital`) ou é None.
+#    É o rótulo gravado na telemetria quando a web responde (`_assunto_da_web`) e
+#    o filtro de `_fontes_para`. Texto livre ("Pós Graduação", "Teams") polui o
+#    relatório de lacunas e quebra o filtro.
+#
+# 5. KB-2 — o portal institucional (`www.puc-campinas.edu.br`) NÃO entra inteiro.
+#    `subdominios=True` + `path_prefixes=("/",)` cobria vestibular, avaliação
+#    institucional, notícias, landing pages de campanha e PDFs soltos em
+#    /wp-content/ — conteúdo que respondia com confiança aparente sobre assunto
+#    que não é do agente (Q7 "nota mínima PUC" citou página de vestibular; ver
+#    eval/backlog-problemas.md KB-2). O que entra agora: o subdomínio `pucdigital`
+#    (o site do programa, curado por natureza) e uma LISTA de páginas conferidas
+#    do portal. Página nova só entra aqui depois de alguém abrir e conferir.
 WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
+    # Site do programa PUC Digital — subdomínio dedicado, todo o conteúdo é do
+    # próprio programa, então entra inteiro (`path_prefixes=("/",)`, o default).
     FonteWeb(
-        host="puc-campinas.edu.br",
-        subdominios=True,  # o conteúdo institucional se espalha por subdomínios
+        host="pucdigital.puc-campinas.edu.br",
         assunto="puc-digital",
     ),
+    # Portal institucional: SÓ as páginas curadas (ver regra 5 acima). Sem
+    # `subdominios` — vestibular/pos/educacional são outros subdomínios e cada um
+    # traria o próprio ruído. `host` sem `www.`: `fonte_permitida` normaliza os
+    # dois lados removendo o prefixo, então casa `www.puc-campinas.edu.br`.
+    FonteWeb(
+        host="puc-campinas.edu.br",
+        path_prefixes=(
+            "/calendario/",       # calendário acadêmico (datas de prova, férias, recesso)
+            "/secretaria-geral/",  # competência da secretaria, procedimentos oficiais
+            "/biblioteca/",        # serviços e regulamentos da biblioteca
+        ),
+        termos="PUC Digital estudante",
+        assunto="puc-digital",
+    ),
+    # Base de conhecimento oficial do Canvas (guias do estudante, do professor e
+    # dos apps mobile — todos sob /en/kb/).
     FonteWeb(
         host="community.instructure.com",
-        path_prefix="/en/kb/",
+        path_prefixes=("/en/kb/",),
         assunto="canvas",
     ),
+    # As aulas ao vivo da PUC Digital acontecem em salas do Teams (ver
+    # AulasAoVivo_v2-2.pdf, p.6). A documentação oficial do Teams cobre o que a
+    # base interna não detalha: "não consigo entrar na reunião", áudio/câmera,
+    # entrar como convidado. Restrito a /pt-br/teams/ para não abrir o
+    # support.microsoft.com inteiro. `assunto=None`: um resultado de Teams não é
+    # "canvas" nem "puc-digital" — deixa o rótulo vir da própria pergunta.
     FonteWeb(
-            host="learn.microsoft.com",
-            path_prefix="/pt-br",
-            assunto="microsoft",
+        host="support.microsoft.com",
+        path_prefixes=("/pt-br/teams/",),
+        termos="Teams reunião aula",
+        assunto=None,
     ),
 )
 

@@ -148,8 +148,8 @@ ANSWER_PROMPT_ALTA_CONFIANCA = ChatPromptTemplate.from_messages(
 )
 
 SEM_CONTEXTO = (
-    "Não encontrei essa informação na base de conhecimento disponível."
-    "Recomendo verificar diretamente com a secretaria acadêmica ou com o suporte da instituição (puc.digital@puc-campinas.edu.br)."
+    "Não encontrei essa informação na base de conhecimento disponível.\n\n"
+    "Recomendo verificar diretamente com a secretaria acadêmica ou com o suporte da instituição (puc.digital@puc-campinas.edu.br) e whatsApp (19) 99689-1420."
 )
 
 SYSTEM_WEB = (

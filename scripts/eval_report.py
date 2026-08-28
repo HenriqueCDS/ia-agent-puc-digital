@@ -42,6 +42,16 @@ def _carregar_dataset(caminho: Path) -> list[dict]:
     return json.loads(caminho.read_text(encoding="utf-8"))
 
 
+def _origens_aceitas(item: dict) -> list[str]:
+    """`origem_esperada` + os aliases de `origem_tambem_ok` — igual `scripts.eval_run`.
+
+    `nenhuma` e `encaminhado` dão a MESMA mensagem ao aluno; um dataset marca
+    `origem_tambem_ok: ["nenhuma"]` nas perguntas em que o agente legitimamente
+    não sabe, sem afrouxar os casos (PII/injeção) em que a distinção importa.
+    """
+    return [item["origem_esperada"], *item.get("origem_tambem_ok", ())]
+
+
 def _resumir(resposta: str | None, limite: int = 300) -> str:
     if not resposta:
         return "(sem registro — resposta só é gravada por scripts.eval_run)"
@@ -81,9 +91,10 @@ def main(
             "pergunta": item["pergunta"],
             "resposta": achado.resposta if achado else None,
             "origem_esperada": item["origem_esperada"],
+            "origem_tambem_ok": item.get("origem_tambem_ok") or None,
             "origem_obtida": origem_obtida,
             "modelo": achado.modelo if achado else None,
-            "acertou": origem_obtida == item["origem_esperada"],
+            "acertou": origem_obtida in _origens_aceitas(item),
             "sem_registro": achado is None,
             "score_top": achado.score_top if achado else None,
             "n_chunks": achado.n_chunks if achado else None,
@@ -128,7 +139,10 @@ def main(
         typer.secho("\nDetalhe:", bold=True)
         for l in linhas:
             cor = typer.colors.GREEN if l["acertou"] else typer.colors.RED
-            typer.secho(f"\n[{l['origem_esperada']} -> {l['origem_obtida'] or '(sem registro)'}] ", fg=cor, nl=False)
+            esp = l["origem_esperada"]
+            if l["origem_tambem_ok"]:
+                esp += f"(+{'/'.join(l['origem_tambem_ok'])})"
+            typer.secho(f"\n[{esp} -> {l['origem_obtida'] or '(sem registro)'}] ", fg=cor, nl=False)
             typer.echo(f"modelo={l['modelo'] or '—'}")
             typer.echo(f"  P: {l['pergunta']}")
             typer.echo(f"  R: {_resumir(l['resposta'])}")

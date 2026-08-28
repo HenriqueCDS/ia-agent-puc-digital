@@ -94,6 +94,25 @@ def configurar_persistencia(sink: Callable[[dict], None] | None) -> None:
     _persistir = sink
 
 
+def persistencia_atual() -> Callable[[dict], None] | None:
+    """O sink instalado agora, ou `None`. Existe para poder ENCADEAR um destino.
+
+    Sem isto, quem quisesse observar os registros (é o caso de
+    `scripts/eval_run.py`, que quer o registro da pergunta no arquivo de
+    resultado) teria de escolher entre o Postgres e a sua própria captura — ou
+    alcançar a global privada. Com isto, encadear é explícito:
+
+        anterior = telemetry.persistencia_atual()
+        telemetry.configurar_persistencia(lambda d: (guardar(d), anterior and anterior(d)))
+
+    Um sink só, e composto por quem instala, em vez de uma lista de observadores
+    aqui dentro: quem encadeia decide a ordem e o que fazer se um destino falhar,
+    e este módulo continua com um destino opcional, não com um mecanismo de
+    eventos.
+    """
+    return _persistir
+
+
 def serializar(dados: dict) -> str:
     """JSON canônico do registro. Um só lugar para o log e para o banco."""
     return json.dumps(dados, ensure_ascii=False)

@@ -38,8 +38,9 @@ def _resultado(href, body="conteúdo RELEVANTE", title="titulo"):
     "url",
     [
         "https://community.instructure.com/en/kb/articles/661210-how-do-i-submit",
-        "https://www.puc-campinas.edu.br/graduacao/",
-        "https://pucdigital.puc-campinas.edu.br/pagina",  # subdomínio permitido
+        "https://www.puc-campinas.edu.br/calendario/",  # path curado do portal
+        "https://www.puc-campinas.edu.br/biblioteca/servicos/",
+        "https://pucdigital.puc-campinas.edu.br/pagina",  # subdomínio do programa: inteiro
     ],
 )
 def test_url_oficial_e_permitida(url):
@@ -52,6 +53,12 @@ def test_url_oficial_e_permitida(url):
         # fórum de usuários do Instructure: fora de /en/kb/, não é guia oficial
         "https://community.instructure.com/t5/Canvas-Question-Forum/x/td-p/1",
         "https://community.instructure.com/en/all-guides",
+        # portal institucional fora dos paths curados (KB-2): vestibular,
+        # avaliação institucional, notícia e landing page de campanha
+        "https://www.puc-campinas.edu.br/graduacao/direito/",
+        "https://vestibular.puc-campinas.edu.br/curso/",
+        "https://www.puc-campinas.edu.br/avaliacao-institucional/avaliacao-do-ensino/",
+        "https://www.puc-campinas.edu.br/termo-aceite-dados-pessoais-lp/",
         # domínio sósia: termina com o host permitido, mas não é ele
         "https://puc-campinas.edu.br.attacker.com/pagina",
         "https://blog.exemplo.com/canvas",
@@ -64,7 +71,7 @@ def test_url_fora_da_allowlist_e_recusada(url):
 
 def test_redirect_do_duckduckgo_e_resolvido_antes_de_validar():
     envolvida = (
-        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.puc-campinas.edu.br%2Fcursos%2F"
+        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.puc-campinas.edu.br%2Fcalendario%2F"
     )
     assert web_fallback.fonte_permitida(envolvida) is not None
 
@@ -88,7 +95,7 @@ def test_snippet_irrelevante_e_cortado_pelo_limiar(monkeypatch):
         web_fallback,
         "_buscar_em",
         lambda fonte, pergunta: [
-            _resultado("https://www.puc-campinas.edu.br/a", body="texto qualquer")
+            _resultado("https://www.puc-campinas.edu.br/calendario/a", body="texto qualquer")
         ],
     )
 
@@ -107,7 +114,7 @@ def test_resultado_relevante_vira_chunk_citando_a_url(monkeypatch):
 
 
 def test_urls_repetidas_entre_fontes_sao_deduplicadas(monkeypatch):
-    url = "https://www.puc-campinas.edu.br/a"
+    url = "https://www.puc-campinas.edu.br/calendario/a"
     monkeypatch.setattr(web_fallback, "_buscar_em", lambda f, p: [_resultado(url)])
 
     chunks = web_fallback.buscar_na_web(Query(text="pergunta"))
@@ -160,7 +167,7 @@ def test_assunto_sem_resultado_amplia_para_allowlist_inteira(monkeypatch):
 
     def buscar(fonte, pergunta):
         if fonte.host == "puc-campinas.edu.br":
-            return [_resultado("https://www.puc-campinas.edu.br/pagina")]
+            return [_resultado("https://www.puc-campinas.edu.br/calendario/pagina")]
         return []
 
     monkeypatch.setattr(web_fallback, "_buscar_em", buscar)
@@ -168,7 +175,7 @@ def test_assunto_sem_resultado_amplia_para_allowlist_inteira(monkeypatch):
     chunks = web_fallback.buscar_na_web(Query(text="como envio atividade?", assunto="canvas"))
 
     assert len(chunks) == 1
-    assert chunks[0].citation == "https://www.puc-campinas.edu.br/pagina"
+    assert chunks[0].citation == "https://www.puc-campinas.edu.br/calendario/pagina"
 
 
 def test_assunto_com_resultado_nao_amplia_a_busca(monkeypatch):
@@ -188,7 +195,7 @@ def test_assunto_com_resultado_nao_amplia_a_busca(monkeypatch):
 
 def test_no_maximo_web_max_chunks_chegam_ao_llm(monkeypatch):
     muitos = [
-        _resultado(f"https://www.puc-campinas.edu.br/pagina-{i}")
+        _resultado(f"https://www.puc-campinas.edu.br/calendario/pagina-{i}")
         for i in range(settings.web_max_chunks + 3)
     ]
     monkeypatch.setattr(web_fallback, "_buscar_em", lambda f, p: muitos)
