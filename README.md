@@ -1,33 +1,40 @@
 # Agente de IA — Suporte Acadêmico EAD (v1)
 
 Agente de RAG que responde dúvidas de alunos e funcionários sobre o Canvas e
-sobre procedimentos acadêmicos, usando como base de conhecimento os PDFs e
-textos colocados em `data/raw/<assunto>/`.
+sobre procedimentos acadêmicos, usando como base de conhecimento os arquivos
+colocados em `data/raw/<assunto>/` (PDF, texto, DOCX e os modelos de e-mail de
+atendimento em `data/raw/email_modelos/`) e as páginas oficiais pré-indexadas
+pelo crawler da allowlist (`scripts/crawl.py`).
 
-Escopo da v1: apenas arquivos locais, sem dados sigilosos do aluno.
+Escopo da v1: base local + páginas da allowlist, sem dados sigilosos do aluno.
 Ver [arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md).
 
 ## Estado atual do projeto
 
 Esqueleto da v1 implementado e executável localmente. O que existe hoje:
 
-**Ingestão** — leitura de `.pdf` (via `pypdf`), `.txt` e `.md` a partir de
+**Ingestão** — leitura de `.pdf` (via `pypdf`), `.txt`, `.md`, `.docx` e a
+planilha de modelos de e-mail de atendimento (`.xlsx` pré-chunkado por
+`ler_dados_pst.ipynb`, em `data/raw/email_modelos/`) a partir de
 `data/raw/<assunto>/`, divisão em chunks com overlap
 (`RecursiveCharacterTextSplitter`), geração de embeddings com um modelo local
 (HuggingFace/sentence-transformers, multilíngue — sem depender de cota de API)
-e indexação no pgvector. A metadata de origem (`assunto`, `source_type`,
-`source_uri`, `source_path`, `source_name`, `page`, `chunk_index`) é gravada em
-todo chunk. A ingestão é idempotente: cada chunk tem id determinístico e os
-chunks antigos do arquivo são removidos antes da reindexação, então rodar o
-ingest de novo não duplica nem deixa conteúdo órfão.
+e indexação no pgvector. Todo loader novo entra num ponto só:
+`app/ingestion/loaders/registry.py`. A metadata de origem (`assunto`,
+`source_type`, `source_uri`, `source_path`, `source_name`, `page`,
+`chunk_index`; `categoria="web"` no conteúdo crawlado) é gravada em todo chunk.
+A ingestão é idempotente: cada chunk tem id determinístico e os chunks antigos
+da fonte são removidos antes da reindexação, então rodar o ingest de novo não
+duplica nem deixa conteúdo órfão. `tests/test_ingestao.py` trava que todo
+arquivo em `data/raw/` tenha um loader — nada fica de fora em silêncio.
 
 **Retrieval** — busca por similaridade de cosseno no pgvector, com filtro
 opcional por assunto e corte por limiar de relevância (`RELEVANCE_THRESHOLD`).
 
 **Agente** — monta o prompt com os trechos recuperados e suas citações, chama o
 LLM e devolve a resposta com as fontes (`arquivo, página`). Quando nada passa
-do limiar, não chama o LLM com contexto vazio: cai no fallback de busca externa
-abaixo.
+do limiar, não chama o LLM com contexto vazio: recorre às páginas oficiais da
+allowlist (ver abaixo) antes de encaminhar para a secretaria.
 
 **Cadeia de provedores** — a chamada ao LLM passa por uma cadeia de fallback
 (`LLM_PROVIDERS=gemini,huggingface,groq,openrouter`): o primeiro que responder vence, e um
@@ -59,26 +66,32 @@ liga o cache também para ele. É seguro ligar: o modelo entra na chave do
 cache, então um override nunca serve a resposta cacheada de outro modelo nem
 da cadeia normal.
 
-**Fallback de busca externa** — quando o retrieval não devolve nada, o agente
-procura a resposta em páginas públicas oficiais antes de encaminhar para a
-secretaria. A busca é restrita por uma allowlist (`WEB_ALLOWLIST` em
-`app/core/config.py`): uma lista de caminhos curados do portal da PUC-Campinas
-(`/calendario/`, `/secretaria-geral/`, `/biblioteca/`) e a base de
-conhecimento oficial do Canvas (`community.instructure.com/en/kb/`). A restrição
-tem duas camadas — uma query `site:<host>` por fonte, e a revalidação de **toda**
-URL devolvida contra `(host, path_prefixes)`, porque o operador `site:` do buscador vaza resultado fora
-do escopo em silêncio. Os snippets ainda passam por um corte de similaridade
-(mesmo modelo de embedding local da base, sem custo de API) e por um veto final
-do LLM, que responde com o marcador `#SEM_COBERTURA#` quando os trechos não
-bastam. Nada relevante encontrado → resposta com o contato da secretaria.
-Liga/desliga com `WEB_FALLBACK_ENABLED`; ver `app/agent/web_fallback.py`.
+**Páginas oficiais (allowlist)** — o que a base indexada não cobre pode estar
+numa página oficial. O conjunto é FECHADO (`WEB_ALLOWLIST` em
+`app/core/config.py`): caminhos curados do portal da PUC-Campinas
+(`/calendario/`, `/secretaria-geral/`, `/biblioteca/`), a base de conhecimento
+oficial do Canvas (`community.instructure.com/en/kb/`) e a doc do Teams
+(`support.microsoft.com/pt-br/teams/`). Cada entrada é `(host, path_prefixes)` —
+o portal **não** entra inteiro nem por subdomínio: uma página nova só passa a ser
+citável depois de alguém conferir e adicionar o prefixo (KB-2 — antes disso o
+agente citava vestibular e avaliação institucional em pergunta de nota).
 
-O caminho comum, porém, não é a busca ao vivo: `python -m scripts.crawl`
-pré-indexa as páginas da allowlist no pgvector (`source_type="web"`,
-`categoria="web"`, mesmo `assunto` da fonte), rodando semanalmente. Com isso a
-pergunta cujo conteúdo já foi crawlado é respondida pelo RAG normal (~300ms,
-`grounded=true`) e o DuckDuckGo só é raspado quando nem a base nem o conteúdo
-crawlado cobrem — ver `eval/analises/kb-3-melhorar-fallback-na-base.md`.
+Há dois caminhos até essas páginas:
+
+- **Pré-crawl (comum)** — `python -m scripts.crawl` lê o sitemap de cada fonte,
+  filtra pelos `path_prefixes` (reusando a mesma revalidação da busca ao vivo),
+  extrai o conteúdo e indexa no pgvector com `source_type="web"` /
+  `categoria="web"` e o `assunto` da fonte. Roda semanalmente. A pergunta cujo
+  conteúdo já foi crawlado é respondida pelo RAG normal (~300ms, `grounded=true`).
+- **Busca ao vivo (rede)** — quando nem a base nem o conteúdo crawlado cobrem, o
+  `web_fallback` raspa o DuckDuckGo (uma query `site:<host>` por fonte, cada URL
+  revalidada contra a allowlist), corta por similaridade com o embedding local e
+  passa por um veto final do LLM (`#SEM_COBERTURA#`). É o caminho raro e caro
+  (~15s); o pré-crawl existe para mantê-lo raro. Liga/desliga com
+  `WEB_FALLBACK_ENABLED`.
+
+Nada relevante em nenhum dos dois → resposta com o contato da secretaria. Ver
+`app/agent/web_fallback.py` e `eval/analises/kb-3-melhorar-fallback-na-base.md`.
 
 **Triagem por assunto** — antes de qualquer coisa, a pergunta que é de outro
 departamento (cobrança, diploma, rematrícula…) é encaminhada com o contato certo,
@@ -118,8 +131,9 @@ caminho já pronto para plugar um front ou o AVA da instituição depois.
 **Segurança da borda** — `/ask` e `/assuntos` exigem `X-API-Key`, com uma chave
 por integração (`API_KEYS=nome:chave,...`): é o que permite atribuir o custo do
 Gemini por canal e revogar um consumidor sem derrubar os outros. Cada `/ask`
-que não bate cache é uma chamada paga mais até 5 buscas web, então o endpoint
-aberto seria um proxy grátis para a cota da instituição. Sobre isso vêm rate
+que não bate cache é uma chamada paga (e, no caminho raro do fallback ao vivo,
+mais um punhado de buscas web), então o endpoint aberto seria um proxy grátis
+para a cota da instituição. Sobre isso vêm rate
 limit por consumidor (janela deslizante de 60s) e um teto diário do processo,
 CORS restrito às origens do `.env`, e timeout na chamada ao LLM. Ver
 `app/api/deps.py`, `app/api/ratelimit.py` e `app/api/app.py`.
@@ -127,16 +141,18 @@ CORS restrito às origens do `.env`, e timeout na chamada ao LLM. Ver
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
 
-**Testes** — 266 testes cobrindo chunking, ids determinísticos, corte por
+**Testes** — 388 testes cobrindo chunking, ids determinísticos, corte por
 limiar, filtro por assunto, formatação de citação, o guardrail do agente, o
-hit/miss do cache de resposta, o fallback de busca externa (allowlist, domínio
-sósia, redirect do buscador, corte por similaridade, blocklist de assunto
-sensível e degradação em caso de rate limit), a cadeia de fallback entre os
-quatro provedores de LLM e a borda HTTP inteira — contrato de resposta, cada
-código de erro, autenticação, CORS, a janela deslizante do rate limit,
-liveness vs. readiness e o seletor de modelo da demo. Rodam sem banco, sem
-chave de API e **sem rede**, usando dublês de vector store, de LLM, de cache,
-de busca e de relógio.
+hit/miss do cache de resposta, a cobertura de loader de toda fonte em
+`data/raw/` (`test_ingestao`), o crawler da allowlist (parsing de sitemap,
+filtro por `path_prefixes`, extração de conteúdo — `test_crawl`), o fallback de
+busca externa (allowlist, domínio sósia, path fora dos curados, redirect do
+buscador, corte por similaridade, blocklist de assunto sensível e degradação em
+caso de rate limit), a cadeia de fallback entre os quatro provedores de LLM e a
+borda HTTP inteira — contrato de resposta, cada código de erro, autenticação,
+CORS, a janela deslizante do rate limit, liveness vs. readiness e o seletor de
+modelo da demo. Rodam sem banco, sem chave de API e **sem rede**, usando dublês
+de vector store, de LLM, de cache, de busca e de relógio.
 
 ### Validado ponta a ponta; calibração em aberto
 
@@ -164,11 +180,16 @@ acima continuam pendentes.
 
 ### Fora do escopo desta fase
 
-Ingestão por web scraping (o fallback busca em tempo real, não indexa),
-interpretação de print/imagem, consumo de outras APIs públicas, classificação de
+Interpretação de print/imagem, consumo de APIs públicas em tempo real (calendário
+acadêmico, API do Canvas), FAQ estruturado sem LLM, classificação de
 intenção/escalonamento e canais de atendimento. Nenhum deles está implementado —
 cada um tem o lugar de encaixe definido na tabela de
 [pontos de extensão](#pontos-de-extensão-features-fora-da-v1).
+
+Web scraping **saiu** do "fora de escopo": `scripts/crawl.py` já indexa as
+páginas da allowlist (via sitemap). O que segue fora é o scraping de site
+arbitrário — a allowlist continua sendo um conjunto fechado por decisão de
+segurança.
 
 ## Como rodar
 
@@ -184,12 +205,16 @@ copy .env.example .env          # preencha ao menos GEMINI_API_KEY
 # 3. banco (Postgres + pgvector)
 docker compose up -d
 
-# 4. coloque os PDFs/textos em data/raw/canvas/ e data/raw/puc-digital/
+# 4. coloque os arquivos em data/raw/canvas/, data/raw/puc-digital/,
+#    data/raw/email_modelos/ (PDF, txt, md, docx, xlsx de modelos)
 
-# 5. ingestão
-python -m scripts.ingest canvas puc-digital -v
+# 5. ingestão dos arquivos locais
+python -m scripts.ingest canvas puc-digital email_modelos -v
 
-# 6. pergunte
+# 6. (opcional) indexa as páginas oficiais da allowlist
+python -m scripts.crawl --dry-run     # confere as URLs; depois rode sem --dry-run
+
+# 7. pergunte
 python -m scripts.ask "Como envio uma atividade no Canvas?"
 python -m scripts.ask "Como acesso o portal?" --assunto puc-digital --debug
 ```
@@ -378,7 +403,7 @@ acertou — sem isso, um valor derivado ficaria indistinguível de um informado:
 | `assunto_origem` | Quando | Fonte |
 |---|---|---|
 | `informado` | usuário passou `--assunto` | tem precedência sobre tudo |
-| `metadata` | o retrieval achou chunks | pasta gravada na ingestão (`pipeline._enrich`) |
+| `metadata` | o retrieval achou chunks | `assunto` gravado na ingestão (`pipeline._enrich` para arquivo, `crawl._documento` para página crawlada) |
 | `allowlist` | respondeu pela web | `FonteWeb.assunto` do domínio (`WEB_ALLOWLIST`) |
 | `triagem` | assunto de outro departamento | categoria casada em `ENCAMINHAMENTOS` |
 | `guardrail` | pedido de ataque/abuso barrado na entrada | padrão casado em `guardrail._PADROES` (`assunto="fora de escopo"`) |
@@ -493,9 +518,9 @@ Postgres que já estava lá.
 ## Fluxo de dados
 
 ```
-data/raw/<assunto>/*.pdf|txt|md
-   │  loaders/registry.py      (fonte -> Document)
-   ▼
+data/raw/<assunto>/*.pdf|txt|md|docx|xlsx      scripts/crawl.py
+   │  loaders/registry.py  (fonte -> Document)   │  sitemap + path_prefixes
+   ▼                                             ▼  (source_type="web")
 pipeline.py ── chunker.py ── embeddings locais (HF) ── pgvector
                                                           │
 pergunta ── preprocess.py ── guardrail.py ──► ataque/abuso?
@@ -549,9 +574,9 @@ o sinal que vira pauta de ingestão.
 | `app/providers/` | **único** ponto que conhece um SDK de LLM |
 | `app/providers/chain.py` | cadeia de fallback entre Gemini, HuggingFace, Groq e OpenRouter |
 | `app/providers/base.py` | interface `LLMProvider` + regra de quando cair p/ o próximo |
-| `app/ingestion/loaders/` | fonte de dados → `Document` |
+| `app/ingestion/loaders/` | fonte de dados → `Document` (PDF, txt, md, docx, xlsx de modelos de e-mail) |
 | `app/ingestion/chunker.py` | divisão em chunks (função pura) |
-| `app/ingestion/pipeline.py` | orquestra load → chunk → embed → indexa |
+| `app/ingestion/pipeline.py` | orquestra load → chunk → embed → indexa; `ingest_file` (arquivo) e `ingest_documents` (páginas crawladas) |
 | `app/retrieval/retriever.py` | busca por similaridade + filtro por assunto |
 | `app/agent/` | pré-processamento, prompt, cache e geração da resposta |
 | `app/agent/prompts.py` | prompts + marcador `#TOPICO` lido pela telemetria |
@@ -565,11 +590,12 @@ o sinal que vira pauta de ingestão.
 | `app/api/routers/demo.py` | rota `/demo` — injeta a chave da demo no HTML |
 | `app/static/index.html` | o frontend de demonstração (1 arquivo, sem build) |
 | `scripts/` | CLIs de ingestão, de pergunta, relatório de lacunas e avaliação |
+| `scripts/crawl.py` | indexa as páginas da `WEB_ALLOWLIST` no pgvector (KB-3); rodar semanal |
 | `scripts/eval_run.py` | roda um dataset de eval contra o agente de verdade, salva local |
 | `scripts/eval_report.py` | audita, na telemetria já gravada, o mesmo dataset (sem reexecutar) |
 | `scripts/clear_cache.py` | apaga `resposta_cache` — necessário antes de toda rodada de calibração |
 | `scripts/clear_logs.py` | apaga a tabela `telemetria` |
-| `eval/` | datasets de avaliação e rodadas de análise da telemetria |
+| `eval/` | datasets de avaliação, análises de telemetria e `backlog-problemas.md` (fila priorizada de correções) |
 
 ## Pontos de extensão (features fora da v1)
 
@@ -577,7 +603,7 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 
 | Feature | Onde entra | O que muda |
 |---|---|---|
-| **Web scraping** do site da instituição | `app/ingestion/loaders/registry.py` | registrar um `WebBaseLoader`; o resto do pipeline é o mesmo |
+| ~~**Web scraping** da allowlist~~ | `scripts/crawl.py` | **feito** (KB-3): sitemap → `path_prefixes` → `pipeline.ingest_documents`. Falta agendar o re-crawl semanal |
 | **APIs públicas** (calendário acadêmico, API do Canvas) | mesmo registry, ou fonte de contexto extra em `responder.py` | novo loader; com 3+ fontes assim, o roteamento vira tool calling tendo `retrieve` e `buscar_na_web` como tools |
 | **FAQ estruturado** (match exato, sem LLM) | antes do `retrieve` em `responder.py` | responde as perguntas de altíssima frequência com texto aprovado, latência ~0 |
 | **Abertura de chamado** | onde hoje está `_encaminhar_para_secretaria` | transforma o encaminhamento em ação: abre o ticket já com a pergunta |
@@ -618,10 +644,22 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
   carregado para a base decide se o snippet serve, sem gastar token para
   descobrir que a busca não trouxe nada. Limiar calibrado em busca real
   (acertos em 0.52–0.65, melhor falso-positivo fora de escopo em 0.37).
-- **Caminho da web sem cache**: a `_cache_key` depende de ids de chunk, que não
-  existem para resultado de web, e conteúdo externo muda sem aviso enquanto a
-  tabela `resposta_cache` não tem TTL. É o caminho raro; cachear depois, por
-  conjunto de URLs e com expiração.
+- **Pré-crawl da allowlist em vez de só busca ao vivo** (KB-3): raspar o
+  DuckDuckGo a cada pergunta custa ~15s e estoura rate limit. `scripts/crawl.py`
+  indexa as páginas oficiais no pgvector (com `assunto` da fonte, não `"web"`,
+  para o filtro do retrieval continuar valendo), e a busca ao vivo fica só como
+  rede para o que ainda não foi crawlado. O conteúdo crawlado responde como
+  `origem="base"` — perde-se o sinal de lacuna daquela página, o que é a decisão
+  deliberada de que ela pertence à base.
+- **Allowlist do portal por caminho, não por site/subdomínio** (KB-2): o portal
+  institucional inteiro trazia vestibular, avaliação institucional e landing
+  pages de campanha respondendo com confiança aparente sobre assunto que não é
+  do agente. Cada caminho em `path_prefixes` é uma seção conferida à mão.
+- **Caminho da web ao vivo sem cache**: a `_cache_key` depende de ids de chunk,
+  que não existem para resultado de web, e conteúdo externo muda sem aviso
+  enquanto a tabela `resposta_cache` não tem TTL. É o caminho raro (o pré-crawl
+  cobre o comum); cachear a camada de coleta depois, por conjunto de URLs e com
+  expiração.
 - **Passos explícitos no `responder.py`** em vez de uma chain fechada: dá para
   inspecionar o contexto recuperado (`--debug`) antes da chamada ao LLM.
 - **Cache por conjunto de chunks, não pelo texto da pergunta**: duas perguntas
@@ -648,9 +686,14 @@ rodadas de 2026-08-26 e 2026-08-27
 | 5 | Corte do 413: cada fonte de contexto limitada a `PROMPT_CONTEXT_ITEM_MAX_CHARS`; 413 do provider cai para o próximo | `responder._format_context`, `providers/base.py` | ✅ aplicado 2026-08-27 |
 | 6 | Rodada de calibração com `-c` (cache limpo), `-m` (modelo fixo) e `--timeout`, comparando item a item em N=3 | `scripts/eval_run.py` | ✅ flags aplicadas — ver [Avaliação de qualidade (eval)](#avaliação-de-qualidade-eval) |
 | 7 | Corrigir termo ambíguo "bolsa" na triagem | `ENCAMINHAMENTOS` | ✅ aplicado |
+| 8 | Enxugar a `WEB_ALLOWLIST` para caminhos curados; `FonteWeb.path_prefix` → tupla `path_prefixes` | `app/core/config.py` | ✅ aplicado 2026-08-28 (KB-2) |
+| 9 | Crawler da allowlist para o pgvector (`scripts/crawl.py`) — busca ao vivo vira rede | `scripts/crawl.py`, `pipeline.ingest_documents` | 🔧 crawler pronto; falta 1ª execução em prod + cron semanal (KB-3) |
+
+O backlog completo, priorizado e com histórico, está em
+[`eval/backlog-problemas.md`](eval/backlog-problemas.md).
 
 Depois dos pendentes acima, os próximos são os de sempre: rodar
-`python -m scripts.lacunas` semanalmente como fila de ingestão, ampliar o
-dataset de eval (hoje 25 perguntas) com perguntas reais de aluno, e fixar a
-dimensão do embedding + criar índice HNSW quando o corpus crescer além de
-~50k chunks.
+`python -m scripts.lacunas` e `python -m scripts.crawl` semanalmente (lacuna
+amarela recorrente → conferir e adicionar o `path_prefix`), ampliar o dataset de
+eval (hoje 25 perguntas) com perguntas reais de aluno, e fixar a dimensão do
+embedding + criar índice HNSW quando o corpus crescer além de ~50k chunks.
