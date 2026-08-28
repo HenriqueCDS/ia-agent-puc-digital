@@ -5,98 +5,107 @@
 (~15s vs ~300ms). A ação registrada era "priorizar indexação das lacunas
 amarelas". Esta análise detalha o *como*.
 
+**Decisão (2026-08-28):** meio-termo — **pré-crawl** dos domínios da allowlist
+para o pgvector + **manter a busca ao vivo** só como último recurso quando o
+índice (agora incluindo o conteúdo crawlado) não cobre.
+
+**Status:** crawler implementado em `scripts/crawl.py` (2026-08-28). Falta: 1ª
+execução contra o pgvector de produção e agendar o re-crawl semanal (`/schedule`
+ou cron). O `web_fallback` ao vivo segue ligado.
+
 ---
 
 ## 1. O que o fallback realmente custa hoje
 
-Por request que cai no fallback (`_responder_pela_web`):
+Por request que cai em `_responder_pela_web`:
 
 | etapa | custo |
 |---|---|
-| `_coletar` — 1..3 queries `site:` em paralelo no `ddgs` | orçamento `WEB_SEARCH_TIMEOUT=8s`, 2ª rodada até 16s |
-| `_relevantes` — `embed_query` + `embed_documents` dos snippets | CPU local, sem API |
-| `llm.invoke` com `ANSWER_PROMPT_WEB` | 1 chamada paga ao Gemini |
-| 2ª rodada quando há assunto e a 1ª volta vazia | dobra o tempo de busca |
+| `_coletar` — 1..3 queries `site:` no `ddgs` (raspa HTML, sem API oficial) | `WEB_SEARCH_TIMEOUT=8s`, 2ª rodada até 16s; rate limit / `No results found` após ~25s |
+| `_relevantes` — embeddings locais dos snippets | CPU local, sem API |
+| `llm.invoke` com `ANSWER_PROMPT_WEB` | 1 chamada paga (a base também paga) |
 
-Ou seja: latência dominada pela raspagem do DuckDuckGo (sem API oficial, sujeita
-a rate limit e a `No results found` após ~25s), e uma chamada de LLM que o
-caminho da base também paga — **o delta de custo é quase todo a busca**.
+O delta de custo vs. a base é **quase todo a raspagem do DuckDuckGo**. E o
+resultado é pior: `grounded=False`, citação é uma URL que pode mudar, sem cache.
 
-E o resultado é pior: `grounded=False`, citação é uma URL que pode mudar sem
-aviso, sem cache (a `_cache_key` depende de ids de chunk).
+## 2. Solução: pré-crawl + fallback ao vivo como rede
 
-## 2. Três frentes de melhoria
+### 2.1. Pré-crawl dos domínios da allowlist para o pgvector (principal)
 
-### 2.1. Fechar a lacuna na fonte — indexar o que a web respondeu (maior valor)
+Em vez de baixar PDF à mão (a ação original do backlog), um crawler sobe o
+conteúdo das páginas curadas para o índice. O `web_fallback` ao vivo passa a
+ser exceção rara — o que mantém o `ddgs` abaixo do rate limit.
 
-O relatório `scripts.lacunas` já classifica cada tema:
+**Por que agora é viável:** o KB-2 enxugou a allowlist para um conjunto pequeno
+e estável (`/calendario/`, `/secretaria-geral/`, `/biblioteca/` do portal
+`puc-campinas.edu.br`). Sem vestibular / notícia / LP de campanha, o que
+sobra é conteúdo que muda devagar — bom para cachear no índice.
 
-- **`coberta pela web` (amarelo)** — a resposta existe numa página oficial, a URL
-  já está identificada na telemetria (`origem_por_hash`). É a lacuna mais barata:
-  não precisa descobrir a fonte, só baixá-la para `data/raw/<assunto>/` e rodar
-  `python -m scripts.ingest <assunto> --apenas-novos`.
-- **`sem resposta` (vermelho)** — nem a web cobriu. Exige conteúdo novo (a
-  secretaria precisa escrever), então não é candidato a automação.
+**Infra já preparada:**
+- [`pipeline._enrich`](../../app/ingestion/pipeline.py) grava `source_type` /
+  `source_uri` "para conviver com scraping mais tarde";
+- o [registry de loaders](../../app/ingestion/loaders/registry.py) tem o exemplo
+  `register("http", WebBaseLoader)` no docstring.
 
-**Proposta concreta:** um passo semanal no procedimento de calibração —
+**Esboço:**
+1. `scripts/crawl.py` — por `FonteWeb` da allowlist:
+   - descobre URLs pelo `sitemap.xml` (o portal é WordPress, tem; não sair
+     seguindo link a esmo);
+   - filtra pelos `path_prefixes` da entrada;
+   - fetch + extração do conteúdo principal (o `WebBaseLoader` do LangChain
+     serve; site é HTML estático, sem JS);
+   - `Document(metadata={source_type: "web", source_uri: <url>,
+     source_path: <url>, assunto: fonte.assunto})`.
+2. Passa pelo **mesmo** `pipeline` (chunk → embed → store).
+   `delete_by_source(<url>)` antes, para re-crawl substituir sem duplicar.
+3. Cron semanal de re-crawl (`/schedule`) — cobre página nova e correção de
+   calendário dentro de uma semana.
 
-```
-python -m scripts.lacunas --json > eval/analises/lacunas-<data>.json
-```
+**Efeitos:**
+- conteúdo crawlado é recuperado por `retrieve` junto com os PDFs → resposta
+  `~300ms`, `grounded=True`, cacheável pela `_cache_key` de sempre;
+- `source_type="web"` separa de PDF oficial para ops (re-crawl, e citar a URL em
+  vez de um nome de arquivo);
+- perde o sinal de lacuna (`scripts.lacunas`) para esse conteúdo — aceitável,
+  foi decisão deliberada de que aquilo pertence à base.
 
-e, para cada item `coberta pela web` com `perguntas_distintas >= 2`:
-1. abrir a URL citada (agora restrita a páginas curadas — ver KB-2);
-2. se for conteúdo estável (calendário, regulamento, procedimento), salvar
-   como PDF/MD em `data/raw/puc-digital/` e reingerir;
-3. se for volátil (notícia, prazo do semestre), **não** indexar — deixar no
-   fallback é o comportamento certo.
+**Escopo do crawler:** só o domínio da PUC. O Canvas
+(`community.instructure.com/en/kb/`) fica de fora — os guias **já estão
+indexados como PDF** (`Canvas_Student_Guide.pdf`), e há ToS/robots a conferir.
 
-Isso converte cada tema recorrente de ~15s + chamada web para ~300ms de RAG
-cacheável, uma vez só.
+### 2.2. Busca ao vivo (`web_fallback`) — mantida como último recurso
 
-### 2.2. Cachear o resultado da busca web
+Sem mudança no fluxo do [`_responder`](../../app/agent/responder.py): se
+`retrieve` (agora com o conteúdo crawlado) não achar nada **ou** o LLM vetar os
+chunks, ainda tenta `_responder_pela_web`; se essa também falhar, encaminha para
+a secretaria — que já é o comportamento atual.
 
-Hoje `_responder_pela_web` não cacheia "de propósito" (ids de chunk não existem
-para web, conteúdo externo muda). Mas a maior parte do custo é a **busca**, não
-a síntese. Um cache só da camada de coleta —
+A diferença é a frequência: com o crawl absorvendo o caso comum, o `ddgs` é
+chamado poucas vezes por dia (página nova ainda não crawlada, pergunta cuja
+resposta está fora dos `path_prefixes`), longe do rate limit.
 
-- chave: `sha256(pergunta_normalizada + assunto)`;
-- valor: a lista de `{url, titulo, snippet}` que passou pela allowlist;
-- TTL curto (6–24h), numa tabela própria ou reusando `resposta_cache` com
-  coluna de expiração.
+`WEB_FALLBACK_ENABLED` continua como kill switch — não desligar por padrão
+enquanto o crawl não estiver rodando estável.
 
-Ganho: a 2ª vez que o mesmo tema amarelo é perguntado (antes de alguém indexar)
-pula os 8–16s de raspagem e paga só o LLM. Baixo risco: o conteúdo continua
-sendo revalidado contra a allowlist na leitura, e o TTL limita o stale.
+### 2.3. Ajustes menores (só se o fallback ao vivo continuar relevante)
 
-Também resolve parte de INF-3 (oscilação `web`↔`nenhuma` da busca externa entre
-rodadas de avaliação): com a busca cacheada dentro da bateria, o item para de
-trocar de desfecho sozinho.
-
-### 2.3. Reduzir a latência da busca quando ela acontece
-
-- **Cortar a 2ª rodada por padrão.** `buscar_na_web` faz uma 2ª rodada com a
-  allowlist inteira quando a 1ª (restrita ao assunto) volta vazia. Com a
-  allowlist enxugada em KB-2 (2 hosts de `puc-digital`, 1 de `canvas`), a 1ª
-  rodada já é quase a allowlist toda — a 2ª quase nunca acrescenta e dobra o
-  pior caso. Medir quantas respostas de fato vêm só da 2ª rodada (telemetria) e,
-  se for <5%, removê-la ou colocá-la atrás de uma flag.
-- **`WEB_SEARCH_TIMEOUT` de 8s → 5s.** O p50 de uma busca bem-sucedida no `ddgs`
-  fica abaixo de 3s; 8s é quase todo espera de backend que já falhou. Um teto
-  menor troca alguns recalls de cauda por uma degradação mais rápida para a
-  secretaria — que neste caminho já é o desfecho aceitável.
+- **Cache da camada de coleta web** — chave `sha256(pergunta_normalizada +
+  assunto)`, valor = lista `{url, titulo, snippet}` pós-allowlist, TTL 6–24h.
+  Corta a raspagem na repetição antes de alguém crawlar aquela página.
+- **`WEB_SEARCH_TIMEOUT` 8s → 5s** e **cortar a 2ª rodada** (com a allowlist do
+  KB-2 a 1ª já é quase tudo) — medir na telemetria antes de cortar recall.
 
 ## 3. Ordem sugerida
 
-1. **2.1** (indexar lacunas amarelas) — sem código, maior retorno, começa já.
-2. **2.2** (cache da coleta web) — ~1 tabela + 1 função; corta o custo do que
-   ainda cair no fallback e estabiliza a avaliação.
-3. **2.3** (timeouts / 2ª rodada) — só depois de medir, para não cortar recall
-   às cegas.
+1. **2.1** — `scripts/crawl.py` + cron. É o que resolve o KB-3.
+2. **2.3 (cache)** — se ainda houver volume no fallback ao vivo depois do crawl.
+3. **2.3 (timeouts)** — só depois de medir.
 
 ## 4. O que NÃO fazer
 
-- Indexar página volátil (notícia, prazo do semestre) só para ganhar latência:
-  vira resposta desatualizada com `grounded=True`, que é pior que 15s de busca.
-- Aumentar `top_k` / baixar `relevance_threshold` para "forçar" a base a
-  responder e evitar o fallback: reintroduz o lixo que RET-1 quer cortar.
+- Crawlar conteúdo volátil (notícia, prazo do semestre): vira resposta
+  desatualizada com `grounded=True`, pior que 15s de busca. O KB-2 já os
+  excluiu da allowlist — manter assim.
+- Aumentar `top_k` / baixar `relevance_threshold` para forçar a base a
+  responder: reintroduz o lixo que o RET-1 quer cortar.
+- Desligar `WEB_FALLBACK_ENABLED` antes do crawl estar estável.

@@ -31,6 +31,13 @@ openpyxl>=3.1   # engine de .xlsx que o pandas.read_excel usa por baixo
 # --- Busca externa (fallback quando o RAG nao encontra) ---
 ddgs>=9.0,<10   # DuckDuckGo; ver app/agent/web_fallback.py
 
+# --- Crawler da allowlist (KB-3, scripts/crawl.py) ---
+# Pré-indexa as páginas oficiais no pgvector para não raspar o DuckDuckGo em
+# runtime. Os dois já vêm transitivos de langchain-community; explícitos porque
+# scripts/crawl.py os importa direto.
+requests>=2.31
+beautifulsoup4>=4.12
+
 # --- Config e CLI ---
 pydantic-settings>=2.0
 python-dotenv>=1.0

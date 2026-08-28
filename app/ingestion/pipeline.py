@@ -50,13 +50,34 @@ def _enrich(documents: list[Document], path: Path, assunto: str) -> list[Documen
     return documents
 
 
+def _indexar_chunks(chunks: list[Document], source_path: str) -> tuple[int, int]:
+    """Substitui os chunks de `source_path` pelos novos, pulando os que já existem
+    com o mesmo texto em outra fonte.
+
+    Núcleo comum de `ingest_file` (fonte = arquivo em data/raw) e
+    `ingest_documents` (fonte = URL crawlada da allowlist, ver scripts/crawl.py).
+    O `delete_by_source` antes torna a operação idempotente inclusive quando a
+    fonte encolhe; o filtro por `content_hash` evita que o mesmo texto vindo de
+    duas fontes (um aviso repetido em vários PDFs, ou a mesma nota numa página e
+    num PDF) vire duas linhas quase idênticas competindo pelo `top_k`.
+    """
+    store = get_vector_store()
+    delete_by_source(store, source_path)
+
+    hashes = [c.metadata["content_hash"] for c in chunks]
+    duplicados = existing_content_hashes(store, hashes)
+    novos = [c for c in chunks if c.metadata["content_hash"] not in duplicados]
+
+    if novos:
+        store.add_documents(novos, ids=[chunk_id(c) for c in novos])
+    return len(novos), len(chunks) - len(novos)
+
+
 def ingest_file(path: Path, assunto: str) -> tuple[int, int]:
     """Indexa um arquivo. Reingerir o mesmo arquivo substitui o conteúdo anterior.
 
     Devolve (chunks indexados, chunks descartados por já existir com o mesmo
-    conteúdo em outra fonte). O descarte evita que o mesmo texto colado em dois
-    arquivos (ex.: um aviso repetido em vários PDFs) vire duas linhas quase
-    idênticas competindo pelo `top_k` na hora da busca.
+    conteúdo em outra fonte).
     """
     loader = loader_for(path)
     if loader is None:
@@ -66,17 +87,22 @@ def ingest_file(path: Path, assunto: str) -> tuple[int, int]:
     chunks = split_documents(documents)
     if not chunks:
         return 0, 0
+    return _indexar_chunks(chunks, str(path))
 
-    store = get_vector_store()
-    delete_by_source(store, str(path))
 
-    hashes = [c.metadata["content_hash"] for c in chunks]
-    duplicados = existing_content_hashes(store, hashes)
-    novos = [c for c in chunks if c.metadata["content_hash"] not in duplicados]
+def ingest_documents(documents: list[Document], source_path: str) -> tuple[int, int]:
+    """Indexa `Document`s já montados — que NÃO vêm de um arquivo em data/raw.
 
-    if novos:
-        store.add_documents(novos, ids=[chunk_id(c) for c in novos])
-    return len(novos), len(chunks) - len(novos)
+    Usado pelo crawler da allowlist web (`scripts/crawl.py`): a metadata de
+    origem (`source_path`, `source_type="web"`, `assunto`, `source_uri`, ...) é
+    responsabilidade de quem chama; aqui só chunka e indexa. `source_path` tem
+    que ser estável entre execuções (a URL da página) para o re-crawl semanal
+    substituir aquela página em vez de duplicá-la.
+    """
+    chunks = split_documents(documents)
+    if not chunks:
+        return 0, 0
+    return _indexar_chunks(chunks, source_path)
 
 
 def ingest_assunto(assunto: str, apenas_novos: bool = False) -> IngestionReport:

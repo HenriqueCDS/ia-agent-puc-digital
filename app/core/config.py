@@ -68,16 +68,12 @@ class FonteWeb:
 #    institucional, notícias, landing pages de campanha e PDFs soltos em
 #    /wp-content/ — conteúdo que respondia com confiança aparente sobre assunto
 #    que não é do agente (Q7 "nota mínima PUC" citou página de vestibular; ver
-#    eval/backlog-problemas.md KB-2). O que entra agora: o subdomínio `pucdigital`
-#    (o site do programa, curado por natureza) e uma LISTA de páginas conferidas
-#    do portal. Página nova só entra aqui depois de alguém abrir e conferir.
+#    eval/backlog-problemas.md KB-2). O que entra agora: uma LISTA de caminhos
+#    conferidos do portal (`/calendario/`, `/secretaria-geral/`, `/biblioteca/`).
+#    NÃO existe subdomínio `pucdigital.puc-campinas.edu.br` — o conteúdo da PUC
+#    Digital fica no portal. Caminho novo só entra depois de alguém abrir e
+#    conferir.
 WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
-    # Site do programa PUC Digital — subdomínio dedicado, todo o conteúdo é do
-    # próprio programa, então entra inteiro (`path_prefixes=("/",)`, o default).
-    FonteWeb(
-        host="pucdigital.puc-campinas.edu.br",
-        assunto="puc-digital",
-    ),
     # Portal institucional: SÓ as páginas curadas (ver regra 5 acima). Sem
     # `subdominios` — vestibular/pos/educacional são outros subdomínios e cada um
     # traria o próprio ruído. `host` sem `www.`: `fonte_permitida` normaliza os

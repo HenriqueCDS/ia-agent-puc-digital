@@ -40,7 +40,7 @@ def _resultado(href, body="conteúdo RELEVANTE", title="titulo"):
         "https://community.instructure.com/en/kb/articles/661210-how-do-i-submit",
         "https://www.puc-campinas.edu.br/calendario/",  # path curado do portal
         "https://www.puc-campinas.edu.br/biblioteca/servicos/",
-        "https://pucdigital.puc-campinas.edu.br/pagina",  # subdomínio do programa: inteiro
+        "https://www.puc-campinas.edu.br/secretaria-geral/matriculas/",
     ],
 )
 def test_url_oficial_e_permitida(url):

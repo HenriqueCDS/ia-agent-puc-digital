@@ -62,9 +62,8 @@ da cadeia normal.
 **Fallback de busca externa** — quando o retrieval não devolve nada, o agente
 procura a resposta em páginas públicas oficiais antes de encaminhar para a
 secretaria. A busca é restrita por uma allowlist (`WEB_ALLOWLIST` em
-`app/core/config.py`): o site do programa PUC Digital
-(`pucdigital.puc-campinas.edu.br`), uma lista de páginas curadas do portal
-institucional (calendário, secretaria-geral, biblioteca) e a base de
+`app/core/config.py`): uma lista de caminhos curados do portal da PUC-Campinas
+(`/calendario/`, `/secretaria-geral/`, `/biblioteca/`) e a base de
 conhecimento oficial do Canvas (`community.instructure.com/en/kb/`). A restrição
 tem duas camadas — uma query `site:<host>` por fonte, e a revalidação de **toda**
 URL devolvida contra `(host, path_prefixes)`, porque o operador `site:` do buscador vaza resultado fora
@@ -73,6 +72,13 @@ do escopo em silêncio. Os snippets ainda passam por um corte de similaridade
 do LLM, que responde com o marcador `#SEM_COBERTURA#` quando os trechos não
 bastam. Nada relevante encontrado → resposta com o contato da secretaria.
 Liga/desliga com `WEB_FALLBACK_ENABLED`; ver `app/agent/web_fallback.py`.
+
+O caminho comum, porém, não é a busca ao vivo: `python -m scripts.crawl`
+pré-indexa as páginas da allowlist no pgvector (`source_type="web"`,
+`categoria="web"`, mesmo `assunto` da fonte), rodando semanalmente. Com isso a
+pergunta cujo conteúdo já foi crawlado é respondida pelo RAG normal (~300ms,
+`grounded=true`) e o DuckDuckGo só é raspado quando nem a base nem o conteúdo
+crawlado cobrem — ver `eval/analises/kb-3-melhorar-fallback-na-base.md`.
 
 **Triagem por assunto** — antes de qualquer coisa, a pergunta que é de outro
 departamento (cobrança, diploma, rematrícula…) é encaminhada com o contato certo,
@@ -285,6 +291,8 @@ por quantas vezes a pergunta apareceu:
 ```bash
 python -m scripts.lacunas                    # últimos 7 dias
 python -m scripts.lacunas --dias 7 --json    # para pipeline
+python -m scripts.crawl --dry-run            # URLs da allowlist que entrariam no índice
+python -m scripts.crawl                      # crawla e indexa (rodar semanal)
 ```
 
 ```
