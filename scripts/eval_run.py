@@ -32,9 +32,13 @@ Flags que existem por causa de rate limit / cota do tier gratuito:
 - `--limpar-cache/-c` apaga a `resposta_cache` antes de rodar — sem isso a
   rodada mede o cache, não o pipeline, e a única pergunta não-cacheada pode
   derrubar tudo num 413.
-- `--timeout` sobrescreve `LLM_TIMEOUT` só nesta execução: com o provider do
-  topo sem cota, cada pergunta queima o timeout inteiro antes do fallback —
-  15s corta esse tempo morto pela metade.
+- `--timeout` define `LLM_TIMEOUT` desta execução, e o default é 20s (não os 30
+  do `.env`): com o provider do topo sem cota, cada pergunta queima o timeout
+  inteiro antes do fallback. Passe `--timeout 30` para medir com o valor de
+  produção.
+
+O modelo de embeddings é pré-carregado antes da 1ª pergunta (INF-8) — sem isso
+o cold start de ~40s cairia no item 1 e inflaria o `ms_retrieve` dele.
 
 FORMATO DO DATASET — cada item tem `pergunta` e `origem_esperada`
 (`base`/`web`/`encaminhado`/`nenhuma`), e opcionalmente:
@@ -62,10 +66,33 @@ from app.core.config import settings
 from app.core.models import Answer, Query
 from app.db import telemetry_store
 from app.db.response_cache import clear_cache
+from app.db.vector_store import aquecer
+from app.providers.base import TodosProvidersFalharam
 
 app = typer.Typer(add_completion=False, help="Roda o dataset de avaliação contra o agente.")
 
 _CANAL = "eval"
+
+# Desfecho de uma pergunta cuja rodada seguiu viva mas em que NENHUM provedor de
+# LLM respondeu (cota estourada em todos, `Cancelled: 499` do Gemini sem chave
+# de reserva de pé...). Fica como `origem_obtida` no lugar de `None` para que o
+# resumo distinga "a infra caiu nesta pergunta" de "o agente roteou errado" —
+# ver INF-6 em eval/backlog-problemas.md. Não é um valor de `models.Origem`: só
+# o harness de avaliação o produz, e só a partir de `TodosProvidersFalharam`.
+_ORIGEM_PROVEDORES_INDISPONIVEIS = "provedores_indisponivel"
+
+
+def _origem_de_erro(erro: str | None) -> str | None:
+    """`provedores_indisponivel` quando a falha foi a cadeia de LLM inteira.
+
+    Casada pelo NOME da exceção (`_rodar` já serializou para `"Tipo: mensagem"`):
+    amarra ao contrato de `TodosProvidersFalharam` sem reintroduzir o try/except
+    tipado que `_rodar` deixou genérico de propósito. Qualquer outra falha
+    (413 de formato, bug nosso) continua com `origem_obtida=None`.
+    """
+    if erro and erro.startswith(TodosProvidersFalharam.__name__ + ":"):
+        return _ORIGEM_PROVEDORES_INDISPONIVEIS
+    return None
 
 # Campos do registro de telemetria copiados para cada linha do resultado. O
 # arquivo passa a ser autossuficiente: dá para analisar a rodada sem cruzar com
@@ -170,12 +197,13 @@ def _linha(item: dict, resultado: Answer | None, registro: dict, erro: str | Non
     nunca o procedimento que se quer auditar.
     """
     aceitas = _origens_aceitas(item)
+    origem_obtida = resultado.origem if resultado else _origem_de_erro(erro)
     return {
         "pergunta": item["pergunta"],
         "assunto": item.get("assunto"),
         "origem_esperada": item["origem_esperada"],
         "origem_tambem_ok": item.get("origem_tambem_ok") or None,
-        "origem_obtida": resultado.origem if resultado else None,
+        "origem_obtida": origem_obtida,
         "acertou": bool(resultado and resultado.origem in aceitas),
         "grounded": resultado.grounded if resultado else None,
         "cached": resultado.cached if resultado else None,
@@ -265,6 +293,17 @@ def _resumo(linhas: list[dict]) -> None:
         for l in erros:
             typer.echo(f"  esperado={l['origem_esperada']:<11} obtido={str(l['origem_obtida']):<11} {l['pergunta']}")
 
+    indisponiveis = [l for l in linhas
+                     if l["origem_obtida"] == _ORIGEM_PROVEDORES_INDISPONIVEIS]
+    if indisponiveis:
+        typer.secho(
+            f"\n{len(indisponiveis)} pergunta(s) sem resposta: NENHUM provedor de LLM "
+            "respondeu (a rodada seguiu). Re-rode estas isoladas com outra chave:",
+            fg=typer.colors.RED,
+        )
+        for l in indisponiveis:
+            typer.echo(f"  {l['pergunta'][:70]}")
+
     falhas = [l for l in linhas if l["erro"]]
     if falhas:
         typer.secho(f"\n{len(falhas)} pergunta(s) com erro (a rodada seguiu):",
@@ -301,10 +340,11 @@ def main(
         False, "--limpar-cache", "-c",
         help="Apaga a resposta_cache antes de rodar (sem isso a rodada mede o cache).",
     ),
-    timeout: float | None = typer.Option(
-        None, "--timeout",
-        help="Sobrescreve LLM_TIMEOUT (s) só nesta rodada. Ex.: 15 corta pela metade "
-             "o tempo morto quando o provider do topo está sem cota.",
+    timeout: float = typer.Option(
+        20.0, "--timeout",
+        help="LLM_TIMEOUT (s) desta rodada. Default 20 (e não os 30 do .env): quando "
+             "o provider do topo está sem cota, cada pergunta queima o timeout inteiro "
+             "antes do fallback — INF-5. Passe 30 para usar o valor de produção.",
     ),
 ) -> None:
     if formato not in ("json", "csv"):
@@ -325,10 +365,10 @@ def main(
             err=True,
         )
 
-    if timeout is not None:
-        # Lido na construção dos providers (`providers/chain`), que é preguiçosa
-        # e só acontece na 1ª pergunta — então basta ajustar antes de `_rodar`.
-        settings.llm_timeout = timeout
+    # Lido na construção dos providers (`providers/chain`), que é preguiçosa e só
+    # acontece na 1ª pergunta — então basta ajustar antes de `_rodar`.
+    settings.llm_timeout = timeout
+    typer.secho(f"LLM_TIMEOUT desta rodada: {timeout:g}s", fg=typer.colors.CYAN, err=True)
 
     telemetry.configurar_logs()
     telemetry_store.habilitar()
@@ -341,6 +381,12 @@ def main(
         removidos = clear_cache()
         typer.secho(f"cache limpo: {removidos} entrada(s) removida(s).",
                     fg=typer.colors.CYAN, err=True)
+
+    # INF-8: carrega o modelo de embeddings ANTES da 1ª pergunta. Sem isto o
+    # cold start (~40-65s) cairia no item 1, inflando o `ms_retrieve` dele e o
+    # tempo de parede da rodada. Mesmo ponto de warm-up da API.
+    typer.secho("warm-up: carregando modelo de embeddings...", fg=typer.colors.CYAN, err=True)
+    aquecer()
 
     linhas = _rodar(itens, modelo, registros)
 

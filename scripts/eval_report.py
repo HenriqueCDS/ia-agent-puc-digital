@@ -96,8 +96,12 @@ def main(
             "modelo": achado.modelo if achado else None,
             "acertou": origem_obtida in _origens_aceitas(item),
             "sem_registro": achado is None,
+            # INF-7: nomes iguais aos de `scripts.eval_run` — são o que o
+            # RETRIEVAL trouxe (quase sempre `top_k`), não as fontes da resposta.
+            # `n_chunks` (nome do campo na telemetria/JSONB) chamado assim aqui
+            # fazia os dois relatórios parecerem se contradizer.
             "score_top": achado.score_top if achado else None,
-            "n_chunks": achado.n_chunks if achado else None,
+            "chunks_recuperados": achado.n_chunks if achado else None,
         })
 
     if formato_json:

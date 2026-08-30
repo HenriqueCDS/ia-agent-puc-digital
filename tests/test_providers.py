@@ -317,6 +317,27 @@ def test_413_request_too_large_cai_para_o_proximo():
     assert segundo.chamadas == 1
 
 
+def test_cancelled_499_do_gemini_cai_para_o_proximo():
+    """gRPC `Cancelled` do Gemini: chega como nome de exceção com "499" no texto,
+    sem `status_code` estruturado e sem o prefixo "error code". É transporte
+    cortado, não pedido inválido — INF-6: Q14/Q16 de 2026-08-28 morriam porque
+    o `Cancelled: 499` cru subia em vez de a cadeia tentar o próximo provedor.
+    """
+
+    class Cancelled(Exception):
+        pass
+
+    assert motivo_de_fallback(Cancelled("Cancelled: 499")) is not None
+    assert motivo_de_fallback(ErroHTTP(499, "client closed request")) is not None
+
+    segundo = FakeProvider("groq", resposta="Resposta do Groq.")
+    resposta = _cadeia(
+        FakeProvider("gemini", erro=Cancelled("Cancelled: 499")), segundo
+    ).invoke(MENSAGENS)
+    assert resposta.response_metadata["provider"] == "groq"
+    assert segundo.chamadas == 1
+
+
 def test_nome_da_excecao_vale_quando_nao_ha_status():
     """Timeout e falha de conexão nunca chegam com resposta HTTP para ler."""
 

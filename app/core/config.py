@@ -81,7 +81,7 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
     FonteWeb(
         host="puc-campinas.edu.br",
         path_prefixes=(
-            "/calendario/",       # calendário acadêmico (datas de prova, férias, recesso)
+            "/pos/",       # calendário acadêmico (datas de prova, férias, recesso)
             "/secretaria-geral/",  # competência da secretaria, procedimentos oficiais
             "/biblioteca/",        # serviços e regulamentos da biblioteca
         ),
@@ -92,7 +92,11 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
     # dos apps mobile — todos sob /en/kb/).
     FonteWeb(
         host="community.instructure.com",
-        path_prefixes=("/en/kb/",),
+         path_prefixes=(
+                    "/en/kb/canvas-lms-instructor-guide",       # calendário acadêmico (datas de prova, férias, recesso)
+                    "/en/kb/canvas-lms-basics-guide",  # competência da secretaria, procedimentos oficiais
+                    "/en/kb/canvas-lms-student-guide",        # serviços e regulamentos da biblioteca
+                ),
         assunto="canvas",
     ),
     # As aulas ao vivo da PUC Digital acontecem em salas do Teams (ver

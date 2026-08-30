@@ -110,7 +110,13 @@ def descobrir_urls(sessao: requests.Session, fonte: FonteWeb) -> list[str]:
     Só entra URL que a `fonte_permitida` (a MESMA revalidação da busca ao vivo)
     atribui a esta entrada da allowlist — sitemap não é confiado às cegas.
     """
-    a_visitar: list[str] = [f"https://{fonte.host}{c}" for c in _SITEMAPS]
+    # Tenta o host nu e o `www.`: o portal da PUC serve o sitemap só em
+    # `www.puc-campinas.edu.br` — o apex responde, mas com cert TLS inválido
+    # (só cobre o `www`), o que derruba o `requests.get` com SSLError.
+    hosts = [fonte.host]
+    if not fonte.host.startswith("www."):
+        hosts.append(f"www.{fonte.host}")
+    a_visitar: list[str] = [f"https://{h}{c}" for h in hosts for c in _SITEMAPS]
     vistos_sitemap: set[str] = set()
     urls: set[str] = set()
     algum_respondeu = False

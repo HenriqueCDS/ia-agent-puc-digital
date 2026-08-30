@@ -14,8 +14,10 @@ herda o erro. Estes testes travam três garantias que vieram de falhas reais:
 import json
 
 import pytest
+from typer.testing import CliRunner
 
 from app.core import telemetry
+from app.core.config import settings
 from app.core.models import Answer, RetrievedChunk
 from langchain_core.documents import Document
 
@@ -164,6 +166,39 @@ def test_pergunta_que_levanta_nao_derruba_a_rodada(monkeypatch):
     assert linhas[2]["erro"] is None               # seguiu depois da falha
 
 
+def test_todos_os_provedores_fora_viram_origem_propria(monkeypatch):
+    """INF-6: quando NENHUM provedor de LLM responde, a pergunta fica com
+    `origem_obtida='provedores_indisponivel'` — distinta do `None` de um bug
+    nosso — e a rodada segue."""
+    registros = []
+
+    def answer_falso(query, *a, **k):
+        registros.append({"erro": None})
+        if "sem provedor" in query.text:
+            raise eval_run.TodosProvidersFalharam("Nenhum provedor de IA respondeu (3 tentativas)")
+        return _answer()
+
+    monkeypatch.setattr(eval_run, "answer", answer_falso)
+
+    linhas = eval_run._rodar(
+        [_item("normal"), _item("sem provedor aqui"), _item("normal 2")], None, registros
+    )
+
+    assert linhas[1]["origem_obtida"] == "provedores_indisponivel"
+    assert linhas[1]["acertou"] is False
+    assert linhas[0]["origem_obtida"] == "base"
+    assert linhas[2]["erro"] is None  # a rodada seguiu
+
+
+def test_erro_que_nao_e_de_provedor_mantem_origem_none():
+    """Só `TodosProvidersFalharam` vira a origem nova — um 413 de formato ou bug
+    nosso continua com `origem_obtida=None` (ver regressão do 413 acima)."""
+    linha = eval_run._linha(
+        _item(), None, {}, erro="RuntimeError: Error code: 413 - request_too_large"
+    )
+    assert linha["origem_obtida"] is None
+
+
 def test_cada_linha_recebe_o_registro_da_sua_pergunta(monkeypatch):
     """1 registro por chamada de `answer()`, na ordem — o pareamento é por
     posição, e uma troca aqui atribuiria o score de uma pergunta a outra."""
@@ -179,6 +214,52 @@ def test_cada_linha_recebe_o_registro_da_sua_pergunta(monkeypatch):
     linhas = eval_run._rodar([_item("a"), _item("b"), _item("c")], None, registros)
 
     assert [l["score_top"] for l in linhas] == [0.81, 0.82, 0.83]
+
+
+# --- warm-up e timeout da rodada (INF-5 / INF-8) -----------------------------
+
+
+def _rodar_main(tmp_path, monkeypatch, *args):
+    """Roda `eval_run.main` com toda dependência de infra dublada."""
+    dataset = tmp_path / "d.json"
+    dataset.write_text(json.dumps([_item("pergunta?")]), encoding="utf-8")
+
+    eventos = []
+    monkeypatch.setattr(eval_run.telemetry_store, "habilitar", lambda: None)
+    monkeypatch.setattr(eval_run.telemetry, "configurar_logs", lambda: None)
+    monkeypatch.setattr(eval_run, "clear_cache", lambda: 0)
+    monkeypatch.setattr(eval_run, "aquecer", lambda: eventos.append("aquecer"))
+
+    def answer_falso(query, *a, **k):
+        eventos.append("answer")
+        return _answer()
+
+    monkeypatch.setattr(eval_run, "answer", answer_falso)
+
+    resultado = CliRunner().invoke(
+        eval_run.app, [str(dataset), "-o", str(tmp_path / "r.json"), "-m", "groq:x", *args]
+    )
+    assert resultado.exit_code == 0, resultado.output
+    return eventos
+
+
+def test_warm_up_roda_antes_da_primeira_pergunta(tmp_path, monkeypatch):
+    """INF-8: sem isto o cold start dos embeddings cairia no item 1."""
+    eventos = _rodar_main(tmp_path, monkeypatch)
+    assert eventos.index("aquecer") < eventos.index("answer")
+
+
+def test_timeout_default_da_rodada_e_20s(tmp_path, monkeypatch):
+    """INF-5: a rodada não herda os 30s do .env."""
+    monkeypatch.setattr(settings, "llm_timeout", 30.0)
+    _rodar_main(tmp_path, monkeypatch)
+    assert settings.llm_timeout == 20.0
+
+
+def test_timeout_pode_ser_sobrescrito(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "llm_timeout", 30.0)
+    _rodar_main(tmp_path, monkeypatch, "--timeout", "12")
+    assert settings.llm_timeout == 12.0
 
 
 # --- serialização ------------------------------------------------------------

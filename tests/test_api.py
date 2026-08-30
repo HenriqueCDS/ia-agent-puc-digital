@@ -50,6 +50,20 @@ def config_auth(monkeypatch):
     return CHAVE
 
 
+def test_lifespan_faz_warm_up_no_boot(monkeypatch):
+    """INF-8: o custo de carregar os embeddings (~40-65s) é pago no boot, não na
+    1ª request. `TestClient` COM `with` dispara o lifespan."""
+    monkeypatch.setattr(app_module.telemetry_store, "habilitar", lambda: None)
+    chamou = []
+    monkeypatch.setattr(app_module, "aquecer", lambda: chamou.append(True))
+
+    app = app_module.create_app()
+    with TestClient(app):
+        pass
+
+    assert chamou == [True]
+
+
 @pytest.fixture
 def app_sem_auth_config(monkeypatch, config_auth):
     monkeypatch.setattr(app_module.telemetry_store, "habilitar", lambda: None)

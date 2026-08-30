@@ -84,12 +84,16 @@ class TodosProvidersFalharam(RuntimeError):
 #   402      crédito acabado (o `:free` do OpenRouter devolve isso)
 #   408      timeout reportado pelo servidor
 #   429      cota/rate limit
+#   499      requisição cancelada / deadline estourado do lado do cliente-proxy
+#            (o gRPC do Gemini reporta `Cancelled` como 499 — bug real: Q14/Q16
+#            de 2026-08-28 morriam sem teste porque o `Cancelled: 499` cru
+#            subia em vez de a cadeia tentar o próximo provedor)
 #   5xx      falha do lado do provedor
 #
 # Tudo o que NÃO está aqui (nem em `_STATUS_DE_CONFIGURACAO` nem tratado à
 # parte abaixo) e tem status conhecido propaga: 400 (prompt/parâmetro
 # inválido), 422.
-_STATUS_DE_FALLBACK = frozenset({401, 402, 403, 408, 429})
+_STATUS_DE_FALLBACK = frozenset({401, 402, 403, 408, 429, 499})
 
 # 413 = `request_too_large`. Cai para o próximo provider, e a razão é a mesma do
 # 400 de contexto excedido tratado em `_MENSAGENS_DE_CONTEXTO_EXCEDIDO`: o teto
@@ -121,13 +125,20 @@ _STATUS_DE_CONFIGURACAO = frozenset({404})
 # mais precisa funcionar (o socket morreu, não houve resposta para ler).
 #
 # Inclui os nomes gRPC do Gemini (`ResourceExhausted`, `DeadlineExceeded`,
-# `PermissionDenied`, `Unauthenticated`, `ServiceUnavailable`), os do SDK da
-# OpenAI (`APITimeoutError`, `APIConnectionError`, `RateLimitError`) e os
-# builtins (`TimeoutError`, `ConnectionError`).
+# `PermissionDenied`, `Unauthenticated`, `ServiceUnavailable`, `Cancelled`), os
+# do SDK da OpenAI (`APITimeoutError`, `APIConnectionError`, `RateLimitError`) e
+# os builtins (`TimeoutError`, `ConnectionError`).
+#
+# `cancelled` cobre o `google.api_core.exceptions.Cancelled` do Gemini, que
+# chega como nome de exceção (status 499 no texto, sem `status_code`
+# estruturado, e sem o prefixo "error code" que `_STATUS_NO_TEXTO` exige). É
+# transporte, não pedido: o socket foi cortado antes da resposta, e o próximo
+# provedor aceitaria o mesmo `mensagens`.
 _NOMES_DE_FALLBACK = (
     "timeout",
     "deadline",
     "connection",
+    "cancelled",
     "unavailable",
     "resourceexhausted",
     "toomanyrequests",

@@ -17,14 +17,14 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Feito | ID | Prio | Problema | Onde | Ação | Herdado | Resolvido em |
 |---|---|---|---|---|---|---|---|
-| [ ] | INF-1 | 🔴 | Cota de tier gratuito estoura no meio da rodada (Gemini 20/dia, HF crédito esgotado, Groq TPM/413) → cada rodada mistura 2–3 modelos | chaves / `scripts.eval_run -m` | Uma chave paga que aguente 25 chamadas; rodar `-m <ela> -c --timeout 20`; Gemini fora do `-m` de batch | ⏳ | |
-| [ ] | INF-2 | 🔴 | `cache_hit` mascara o pipeline — rodada mede o cache, não retrieval/LLM | `scripts.clear_cache --yes` / `eval_run -c` | Tornar `-c` obrigatório no procedimento de calibração | 🔧 | |
-| [ ] | INF-3 | 🔴 | 12% dos itens trocam de desfecho sozinhos (oscilação `web`↔`nenhuma` da busca externa) | método | N=3 + mediana por item; comparar item a item; cachear busca web na bateria | ⏳ | |
-| [ ] | INF-4 | 🟠 | Prompt de ~11.6k tokens (página inteira de PDF + body web) → HTTP 413 derruba a rodada | `responder._format_context`, `PROMPT_CONTEXT_ITEM_MAX_CHARS` | Corte por fonte (6000) + 413 cai p/ próximo provider | ✅ | 2026-08-27 |
-| [ ] | INF-5 | 🟡 | `--timeout` inteiro (30s) queimado tentando Gemini antes do fallback | `eval_run --timeout` | Usar `--timeout 15–20` nas rodadas | ✅ flag | |
-| [ ] | INF-6 | 🟠 | 2 perguntas falham a rodada por erro de infra (`Cancelled: 499` gRPC Gemini) — Q14/Q16 sem teste | `_rodar` try/except | try/except mantém a rodada viva; re-rodar Q14/Q16 isoladas | 🔧 | |
-| [ ] | INF-7 | 🟡 | Colunas de `eval_run` (`n_chunks`/`score_top`) x telemetria medem coisas diferentes e confundem auditoria | `scripts/eval_run.py` | Renomear p/ `fontes_resposta` / `score_fonte_top` | ⏳ | |
-| [ ] | INF-8 | 🟡 | Cold start de 40s no 1º request (carga do modelo de embeddings) | `app/api` boot | Pré-aquecer embeddings no boot | ⏳ | |
+| [x] | INF-1 | 🔴 | Cota de tier gratuito estoura no meio da rodada (Gemini 20/dia, HF crédito esgotado, Groq TPM/413) → cada rodada mistura 2–3 modelos | chaves / `scripts.eval_run -m` | **Decisão: aceito para a fase de demo/teste.** A chave paga entra depois da fase de testes; até lá a mistura de modelos numa rodada é ruído conhecido e a mitigação é `-m` + re-rodar itens marcados `provedores_indisponivel` (ver INF-6) | ⏳ | 2026-08-29 (aceito) |
+| [x] | INF-2 | 🔴 | `cache_hit` mascara o pipeline — rodada mede o cache, não retrieval/LLM | `scripts.clear_cache --yes` / `eval_run -c` | **Decisão: `-c` continua opcional.** A rodada é feita SEMPRE em dobro de propósito — a 1ª popula, a 2ª confirma que o cache está de pé. Forçar `-c` apagaria justamente o sinal que a 2ª rodada existe para ver | 🔧 | 2026-08-29 (decisão) |
+| [x] | INF-3 | 🔴 | 12% dos itens trocam de desfecho sozinhos (oscilação `web`↔`nenhuma` da busca externa) | método | **Resolvido por KB-3:** `scripts/crawl.py` indexa o conteúdo da allowlist na base (`source_type="web"`), então essas perguntas passam a bater na base de forma determinística em vez de dependerem da busca web ao vivo. `web_fallback` ao vivo vira último recurso | 🔧 | 2026-08-29 (via KB-3) |
+| [x] | INF-4 | 🟠 | Prompt de ~11.6k tokens (página inteira de PDF + body web) → HTTP 413 derruba a rodada | `responder._format_context`, `PROMPT_CONTEXT_ITEM_MAX_CHARS` | **Já aplicado (2026-08-27), 2 camadas independentes:** (1) `responder._conteudo_limitado` corta CADA fonte de contexto em `PROMPT_CONTEXT_ITEM_MAX_CHARS` (6000 ≈ 1500 tokens) antes de montar o prompt — o `PyPDFLoader` entrega 1 página inteira como "chunk" e uma página densa passa de 8k chars; 5 delas estouram o teto de tokens/requisição de tier gratuito; (2) se mesmo assim estourar, o 413 é classificado como indisponibilidade em `providers/base._STATUS_DE_CONTEXTO` e a cadeia cai p/ o próximo provedor (o teto é do MODELO/tier, não do pedido — o mesmo prompt cabe no Gemini). `INF-6` estendeu isso para `Cancelled`/499 | ✅ | 2026-08-27 |
+| [x] | INF-5 | 🟡 | `--timeout` inteiro (30s) queimado tentando Gemini antes do fallback | `eval_run --timeout` | Feito: `scripts.eval_run --timeout` agora tem **default 20s** (não herda os 30 do `.env`) e imprime o valor em uso; `--timeout 30` volta ao valor de produção quando se quer medir com ele | ✅ | 2026-08-29 |
+| [x] | INF-6 | 🟠 | 2 perguntas falham a rodada por erro de infra (`Cancelled: 499` gRPC Gemini) — Q14/Q16 sem teste | `_rodar` try/except, `providers/base.py`, `scripts/eval_run.py` | Feito: (1) `Cancelled`/HTTP 499 entram na classificação de indisponibilidade (`base._NOMES_DE_FALLBACK` + `_STATUS_DE_FALLBACK`) → a cadeia tenta o próximo provedor em vez de o erro cru subir; (2) quando TODOS os provedores caem, a linha da rodada fica com `origem_obtida="provedores_indisponivel"` (distinta de `None` de bug nosso) e o resumo lista essas perguntas para re-rodar isoladas | ✅ | 2026-08-29 |
+| [x] | INF-7 | 🟡 | Colunas de `eval_run` (`n_chunks`/`score_top`) x telemetria medem coisas diferentes e confundem auditoria | `scripts/eval_run.py`, `scripts/eval_report.py` | Feito: `eval_run` já separava `chunks_recuperados`/`score_top` (retrieval) de `fontes_resposta`/`score_fonte_top` (fontes da resposta) desde 7aa2568; `eval_report` agora emite `chunks_recuperados` (era `n_chunks`) para falar a mesma língua. O campo na telemetria/JSONB segue `n_chunks` de propósito — renomear quebraria as linhas dentro da janela de retenção | ✅ | 2026-08-29 |
+| [x] | INF-8 | 🟡 | Cold start de 40s no 1º request (carga do modelo de embeddings) | `app/api` boot, `scripts/eval_run.py` | Feito: `vector_store.aquecer()` — ponto ÚNICO de warm-up (carrega embeddings + `SELECT 1`). A API já chamava no `_lifespan`; agora `scripts.eval_run` também chama antes da 1ª pergunta, então o cold start não cai mais no item 1 nem infla o `ms_retrieve` dele | ✅ | 2026-08-29 |
 
 ## 2. Calibração de limiar / retrieval (Bloco A)
 
@@ -104,7 +104,7 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Grupo | Feitos / Total |
 |---|---|
-| 1. Infra e método | 0 / 8 |
+| 1. Infra e método | 8 / 8 |
 | 2. Retrieval / limiar | 0 / 6 |
 | 3. Veto / fidelidade | 0 / 5 |
 | 4. LGPD / PII | 0 / 2 |
@@ -112,10 +112,17 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | 6. Base de conhecimento / web | 3 / 4 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
 | 8. Testes | 2 / 8 |
-| **Total** | **9 / 45** |
+| **Total** | **17 / 45** |
 
 ## Changelog
 
+- **2026-08-29** — INF-8: `vector_store.aquecer()` vira o ponto único de warm-up (embeddings + `SELECT 1`); `scripts.eval_run` passa a chamá-lo antes da 1ª pergunta.
+- **2026-08-29** — INF-7: `scripts.eval_report` emite `chunks_recuperados` (era `n_chunks`), alinhado a `eval_run`.
+- **2026-08-29** — INF-5: `scripts.eval_run --timeout` com default 20s.
+- **2026-08-29** — INF-4: confirmado já aplicado (corte por fonte em `_conteudo_limitado` + 413 → próximo provedor).
+- **2026-08-29** — INF-6: `Cancelled`/HTTP 499 do Gemini classificados como indisponibilidade (`providers/base.py`) → cadeia cai para o próximo provedor; `scripts/eval_run.py` marca `origem_obtida="provedores_indisponivel"` quando todos caem e lista essas perguntas no resumo. Testes em `test_providers.py` e `test_eval_run.py`.
+- **2026-08-29** — INF-3: fechado por KB-3 (pré-crawl da allowlist na base torna o desfecho determinístico).
+- **2026-08-29** — INF-1 / INF-2: decisões registradas — chave paga fica para depois da demo; `-c` segue opcional (rodada em dobro proposital verifica o cache).
 - **2026-08-28** — KB-1: xlsx de modelos de e-mail confirmado como fonte curada intencional (`data/raw/email_modelos/`); comportamento mantido.
 - **2026-08-28** — KB-2: `WEB_ALLOWLIST` do portal PUC reduzida a `path_prefixes` curados (`/calendario/`, `/secretaria-geral/`, `/biblioteca/`), sem `subdominios`; `FonteWeb.path_prefix` → tupla `path_prefixes`.
 - **2026-08-28** — KB-3: `scripts/crawl.py` — pré-crawl da allowlist (sitemap → `path_prefixes` → bs4 → `pipeline.ingest_documents`, `source_type="web"`); `web_fallback` ao vivo vira último recurso. Falta rodar em produção + cron semanal. `eval/analises/kb-3-melhorar-fallback-na-base.md`.

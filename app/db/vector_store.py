@@ -1,5 +1,7 @@
 """Acesso ao pgvector via LangChain."""
 
+import logging
+
 from functools import lru_cache
 
 from langchain_postgres import PGVector
@@ -7,6 +9,8 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.providers.embeddings import get_embeddings
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -24,6 +28,29 @@ def get_vector_store() -> PGVector:
         connection=settings.database_url,
         use_jsonb=True,
     )
+
+
+def aquecer() -> None:
+    """Carrega o modelo de embeddings e confirma o Postgres AGORA, não na 1ª pergunta.
+
+    `get_embeddings()` (chamado por `get_vector_store()`) lê ~1GB de pesos do
+    disco na primeira vez que roda — medido em até 65s neste projeto. Sem este
+    pré-aquecimento o custo cai em (a) no primeiro `/v1/ask` depois do deploy ou
+    (b) na primeira pergunta de uma rodada de `scripts.eval_run` — onde além da
+    espera ainda contamina o `ms_retrieve` daquele item e o tempo de parede da
+    rodada. O `SELECT 1` prova a conexão pelo mesmo princípio: falhar visível no
+    boot é melhor que falhar na 1ª pergunta.
+
+    Idempotente — `lru_cache` em `get_vector_store`/`get_embeddings`, então
+    chamar de novo custa só o `SELECT 1`. É o ponto ÚNICO de warm-up: a API
+    (`app/api/app._lifespan`) e a bateria de testes chamam esta função, em vez de
+    cada uma repetir a sequência e uma delas esquecer um passo.
+    """
+    logger.info("warm-up: carregando modelo de embeddings...")
+    store = get_vector_store()
+    with store.session_maker() as session:
+        session.execute(text("SELECT 1"))
+    logger.info("warm-up: concluído, conexão com o Postgres confirmada.")
 
 
 # Subquery reaproveitada por TODAS as funções abaixo: escopa toda leitura/escrita

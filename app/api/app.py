@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -20,8 +19,7 @@ from app.api.routers.v1 import router as v1_router
 from app.core.config import settings
 from app.core import telemetry
 from app.db import telemetry_store
-from app.db.vector_store import get_vector_store
-from app.providers.embeddings import get_embeddings
+from app.db.vector_store import aquecer
 
 logger = logging.getLogger(__name__)
 
@@ -30,21 +28,12 @@ logger = logging.getLogger(__name__)
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Warm-up no boot, não na 1ª request.
 
-    `get_embeddings()` carrega ~1GB de pesos do disco na primeira vez que é
-    chamado — sem isto, o primeiro `/v1/ask` depois do deploy paga esse custo
-    (medido: até 65s neste projeto). Feito aqui, o custo vira parte do boot do
-    servidor, que já é esperado, e não da experiência do primeiro aluno.
-    `SELECT 1` prova a conexão com o Postgres pela mesma razão: falhar agora,
-    de forma visível no boot, é melhor que falhar silenciosamente na 1ª pergunta.
+    O custo de carregar o modelo de embeddings (~1GB, até 65s neste projeto)
+    vira parte do boot do servidor — que já é esperado — em vez da experiência
+    do primeiro aluno. Mesma sequência que a bateria de testes usa; ver
+    `app/db/vector_store.aquecer`.
     """
-    logger.info("warm-up: carregando modelo de embeddings...")
-    get_embeddings()
-
-    store = get_vector_store()
-    with store.session_maker() as session:
-        session.execute(text("SELECT 1"))
-    logger.info("warm-up: concluído, conexão com o Postgres confirmada.")
-
+    aquecer()
     yield
 
 
