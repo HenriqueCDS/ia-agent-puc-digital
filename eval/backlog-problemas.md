@@ -30,12 +30,12 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Feito | ID | Prio | Problema | Onde | Ação | Herdado | Resolvido em |
 |---|---|---|---|---|---|---|---|
-| [ ] | RET-1 | 🔴 | `RELEVANCE_THRESHOLD=0.35` inerte — pergunta 100% fora de domínio recupera 5 chunks a 0.82 (Q4 fotossíntese) | `config.RELEVANCE_THRESHOLD` | Subir p/ **0.80** como rede contra lixo (corta Q4 0.8215; menor acerto real 0.8451). Não precisa reingestão | ⏳ | |
-| [ ] | RET-2 | 🔴 | Score absoluto não separa "base cobre" de "base não cobre" — Q2 vs Q3 `score_top` difere 0.004; sobreposição total | `retriever` | Margem relativa (`score_top − score_min`) como **feature** de reranker/confiança, não como `if`. Acumular N=3–5 | 🔧 | |
-| [ ] | RET-3 | 🟠 | Sem reranker — o `PONTO DE EXTENSÃO` de `retriever.retrieve` está vazio; é o que resolve RET-2 | `retriever.retrieve` | Cross-encoder local; decidir após acumular dados de margem | ⏳ | |
-| [ ] | RET-4 | 🟡 | `alta_confianca`/`is_exact_match` só dispara por artefato do corpus (doc gigante em inglês repetitivo), não por confiança real (Q23) | `retriever.py:37`, `EXACT_MATCH_THRESHOLD` | Baixar p/ ~0.87 **ou** exigir "2 fontes fortes de documentos diferentes" | ⏳ | |
-| [ ] | RET-5 | 🟡 | `CHUNK_SIZE` quase inerte — `PyPDFLoader` entrega 1 Document por página; granularidade real ≤254 tokens | `config.CHUNK_SIZE` | Calibrar p/ cima não tem efeito; só p/ baixo. Documentado | ✅ doc | |
-| [ ] | RET-6 | 🟡 | `Canvas_Student_Guide.pdf` (1108 pág.) devolve 5 chunks quase idênticos → margem ~0 por repetição (Q11/Q23) | ingestão | Dedup de chunks quase idênticos na ingestão ou no top-k | ⏳ | |
+| [x] | RET-1 | 🔴 | `RELEVANCE_THRESHOLD=0.35` inerte — pergunta 100% fora de domínio recupera 5 chunks a 0.82 (Q4 fotossíntese) | `config.RELEVANCE_THRESHOLD` | Feito: `relevance_threshold` de 0.35 → **0.85** no `.env.example` e no default de `config.py` (os dois alinhados). Rede contra lixo óbvio, não classificador. ⚠️ 0.85 raspa o menor acerto real registrado (0.8451) — se uma rodada mostrar acerto perdido entre 0.80–0.845, baixar p/ 0.80/0.78. Não exige reingestão | ✅ | 2026-08-30 |
+| [x] | RET-2 | 🔴 | Score absoluto não separa "base cobre" de "base não cobre" — Q2 vs Q3 `score_top` difere 0.004; sobreposição total | `retriever`, `scripts/eval_run.py`, `scripts/eval_report.py`, `telemetry_store` | Feito: `margem_relativa` (`score_top − score_min`) virou coluna DERIVADA do arquivo de rodada (`eval_run`) e do relatório de telemetria (`eval_report` + `--detalhe`), com `score_min`/`score_mean` agora expostos por `origem_por_hash`. É FEATURE p/ acumular N rodadas e tirar mediana por item — **não entra em nenhum `if`**. Bruto continua o que a telemetria grava; a margem é sempre recalculada | ✅ | 2026-08-30 |
+| [ ] | RET-3 | 🟠 | Sem reranker — o `PONTO DE EXTENSÃO` de `retriever.retrieve` está vazio; é o que resolve RET-2 | `retriever.retrieve` | Cross-encoder local em 2 estágios. Desenho completo (problema, solução, trade-offs, arquitetura, pré-requisitos) em **`eval/future_feature/cross-encoder.md`**. Decidir após acumular N rodadas de `margem_relativa` (RET-2) + ter a suíte de fidelidade (T-1) | ⏳ | |
+| [x] | RET-4 | 🟡 | `alta_confianca`/`is_exact_match` só dispara por artefato do corpus (doc gigante em inglês repetitivo), não por confiança real (Q23) | `retriever.py:37`, `EXACT_MATCH_THRESHOLD` | Feito: `EXACT_MATCH_THRESHOLD` 0.90 → **0.87** (`config.py` + `.env.example`). Deixa o ramo `alta_confianca` disparar também no corpus PT (score preso em 0.82–0.87). Se ligar demais, o passo seguinte (não este) é trocar o critério por "2 fontes de DOCUMENTOS DIFERENTES" | ✅ | 2026-08-30 |
+| [x] | RET-5 | 🟡 | `CHUNK_SIZE` quase inerte — `PyPDFLoader` entrega 1 Document por página; granularidade real ≤254 tokens | `config.CHUNK_SIZE`, `scripts/chunk_stats.py` | Feito: `scripts/chunk_stats.py` mede a distribuição real (5371 páginas: mediana 403 chars / 103 tokens, p75 695, p90 1073). `CHUNK_SIZE` 1000 → **700** (≈ p75 — mantém ~75% das páginas inteiras, quebra só o quartil denso; índice +18%; p99 do chunk ~185 tokens « 512 do E5). **Exige reingestão.** Voltar a 1000 se a eval piorar | ✅ | 2026-08-30 |
+| [x] | RET-6 | 🟡 | `Canvas_Student_Guide.pdf` (1108 pág.) devolve 5 chunks quase idênticos → margem ~0 por repetição (Q11/Q23) | `ingestion/chunker.py`, `config.INGEST_DEDUP_SIMILARIDADE` | Feito: `chunker.deduplicar_similares` na ingestão — descarta chunk com Jaccard (shingles de 4 palavras) ≥ `INGEST_DEDUP_SIMILARIDADE` (0.9) contra outro já mantido do mesmo lote. Pega a quase-cópia que o `content_hash` (exato) não pega. 1ª ocorrência vence. Só na ingestão, fora do caminho de resposta. **Não** substitui dedup por top-k nem reranking — reduz a repetição na fonte | ✅ | 2026-08-30 |
 
 ## 3. Veto / fidelidade / prompt (Bloco B)
 
@@ -105,17 +105,23 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | Grupo | Feitos / Total |
 |---|---|
 | 1. Infra e método | 8 / 8 |
-| 2. Retrieval / limiar | 0 / 6 |
+| 2. Retrieval / limiar | 5 / 6 |
 | 3. Veto / fidelidade | 0 / 5 |
 | 4. LGPD / PII | 0 / 2 |
 | 5. Triagem / guardrail | 1 / 6 |
 | 6. Base de conhecimento / web | 3 / 4 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
 | 8. Testes | 2 / 8 |
-| **Total** | **17 / 45** |
+| **Total** | **22 / 45** |
 
 ## Changelog
 
+- **2026-08-30** — RET-4: `EXACT_MATCH_THRESHOLD` 0.90 → 0.87.
+- **2026-08-30** — RET-5: `scripts/chunk_stats.py` (mede a distribuição real de chunk/página); `CHUNK_SIZE` 1000 → 700 (≈ p75 das páginas). Exige reingestão.
+- **2026-08-30** — RET-6: `chunker.deduplicar_similares` — dedup de chunks quase idênticos na ingestão (Jaccard de shingles ≥ `INGEST_DEDUP_SIMILARIDADE`).
+- **2026-08-30** — RET-1: `RELEVANCE_THRESHOLD` 0.35 → 0.85 (`.env.example` + default de `config.py`).
+- **2026-08-30** — RET-2: `margem_relativa` (`score_top − score_min`) como coluna derivada em `eval_run` e `eval_report`; `score_min`/`score_mean` expostos por `telemetry_store.origem_por_hash`. Feature, não `if`.
+- **2026-08-30** — RET-3: desenho da feature documentado em `eval/future_feature/cross-encoder.md` (não implementado).
 - **2026-08-29** — INF-8: `vector_store.aquecer()` vira o ponto único de warm-up (embeddings + `SELECT 1`); `scripts.eval_run` passa a chamá-lo antes da 1ª pergunta.
 - **2026-08-29** — INF-7: `scripts.eval_report` emite `chunks_recuperados` (era `n_chunks`), alinhado a `eval_run`.
 - **2026-08-29** — INF-5: `scripts.eval_run --timeout` com default 20s.
@@ -132,3 +138,16 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 - **2026-08-26** — TRI-2: `"bolsa"` movido para entrada própria com `excecoes`.
 - **2026-08-26** — DS-3: gabarito item 17 corrigido (`web`→`base`).
 - **2026-08-26** — DS-6: `GROQ_MODEL` sem prefixo duplicado.
+
+---
+
+## Notas de features futuras
+
+- **RET-3 — reranker cross-encoder:** desenho completo (problema, solução em 2
+  estágios, trade-offs de latência/memória/qualidade, arquitetura de módulo e
+  config, pré-requisitos) em [`eval/future_feature/cross-encoder.md`](future_feature/cross-encoder.md).
+  Resumo: a busca bi-encoder (E5) mede "mesmo assunto amplo", não "responde a
+  pergunta" — por isso o score fica ~0.82 pra tudo. O cross-encoder lê pergunta
+  e chunk juntos e dá um score de relevância real, mas custa *N* forward passes
+  por pergunta (CPU) e mais um modelo no boot. Decidir só depois de acumular
+  N rodadas de `margem_relativa` (RET-2) e ter a suíte de fidelidade (T-1).

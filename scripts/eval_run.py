@@ -94,6 +94,27 @@ def _origem_de_erro(erro: str | None) -> str | None:
         return _ORIGEM_PROVEDORES_INDISPONIVEIS
     return None
 
+
+def _margem_relativa(registro: dict) -> float | None:
+    """`score_top − score_min` do top-k — a feature de confiança da RET-2.
+
+    Onde o score ABSOLUTO não separa "a base cobre o tema" de "não cobre" (o E5
+    coloca quase todo par de textos em português na faixa 0.80–0.85), a DISPERSÃO
+    do top-k tem sinal: quando a base cobre, o chunk do topo se destaca dos
+    outros quatro; quando não cobre, os cinco chegam quase empatados (ver
+    eval/analises/analise-telemetria-2026-08-28.md §2.3).
+
+    Computada aqui, NÃO persistida na telemetria — lá ficam só os brutos
+    (`score_top`/`score_min`/`score_mean`, ver `telemetry.Registro`), de
+    propósito. Fica no arquivo da rodada para acumular N=3–5 rodadas e tirar a
+    mediana por item, que é o passo que RET-3 (cross-encoder) espera antes de
+    virar critério. Não entra em nenhum `if` de roteamento.
+    """
+    topo, minimo = registro.get("score_top"), registro.get("score_min")
+    if topo is None or minimo is None:
+        return None
+    return round(topo - minimo, 4)
+
 # Campos do registro de telemetria copiados para cada linha do resultado. O
 # arquivo passa a ser autossuficiente: dá para analisar a rodada sem cruzar com
 # o `.jsonl` exportado, que era o que a §7 de eval/analise-telemetria-2026-08-27
@@ -135,6 +156,7 @@ _CAMPOS_SAIDA = [
     "score_fonte_top",
     "fontes_citadas",
     *_CAMPOS_DA_TELEMETRIA,
+    "margem_relativa",  # score_top − score_min — feature da RET-2, ver _margem_relativa
     "erro",
     "criterio",
 ]
@@ -219,6 +241,7 @@ def _linha(item: dict, resultado: Answer | None, registro: dict, erro: str | Non
             campo: registro.get("n_chunks" if campo == "chunks_recuperados" else campo)
             for campo in _CAMPOS_DA_TELEMETRIA
         },
+        "margem_relativa": _margem_relativa(registro),
         # `erro` da telemetria já viria no dict acima se o campo estivesse na
         # lista; fica de fora de propósito para este aqui vencer — ele é o único
         # que também cobre a falha ANTES de `answer()` abrir o registro.

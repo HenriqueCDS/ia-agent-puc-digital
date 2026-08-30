@@ -227,6 +227,8 @@ SELECT DISTINCT ON (dados->>'pergunta_hash')
     dados->>'origem'        AS origem,
     (dados->>'grounded')::boolean AS grounded,
     (dados->>'score_top')::float  AS score_top,
+    (dados->>'score_min')::float  AS score_min,
+    (dados->>'score_mean')::float AS score_mean,
     (dados->>'n_chunks')::int     AS n_chunks,
     (dados->>'cache_hit')::boolean AS cache_hit,
     dados->>'resposta'    AS resposta,
@@ -247,11 +249,25 @@ class ResultadoTelemetria:
     origem: str | None
     grounded: bool | None
     score_top: float | None
+    score_min: float | None
+    score_mean: float | None
     n_chunks: int | None
     cache_hit: bool | None
     resposta: str | None
     chat_model: str | None
     provider: str | None
+
+    @property
+    def margem_relativa(self) -> float | None:
+        """`score_top − score_min` — feature de confiança da RET-2.
+
+        Derivada, não gravada: a telemetria guarda só os brutos (ver
+        `telemetry.Registro`). Exposta aqui para `scripts.eval_report` acumular a
+        mediana por item ao longo de N rodadas sem reprocessar o `.jsonl`.
+        """
+        if self.score_top is None or self.score_min is None:
+            return None
+        return round(self.score_top - self.score_min, 4)
 
     @property
     def modelo(self) -> str | None:
@@ -289,6 +305,8 @@ def origem_por_hash(
             origem=linha.origem,
             grounded=linha.grounded,
             score_top=linha.score_top,
+            score_min=linha.score_min,
+            score_mean=linha.score_mean,
             n_chunks=linha.n_chunks,
             cache_hit=linha.cache_hit,
             resposta=linha.resposta,

@@ -323,8 +323,29 @@ class Settings(BaseSettings):
     # Vazio = a URL padrão do router da HF (ver providers/openai_compat.py).
     hf_base_url: str = ""
 
-    chunk_size: int = 1000
+    # RET-5 — 1000 → 700. `CHUNK_SIZE` é em CARACTERES e só tem efeito para
+    # BAIXO: o `PyPDFLoader` entrega 1 Document por página e o splitter nunca
+    # junta páginas, então subir não junta nada (ver `embedding_model` acima).
+    # Medido no corpus atual com `python -m scripts.chunk_stats` (5371 páginas):
+    # página mediana = 403 chars / 103 tokens E5, p75 = 695, p90 = 1073.
+    # 700 ≈ p75: mantém ~75% das páginas como 1 chunk (a mediana fica folgada
+    # dentro) e quebra só o quartil denso — que costuma misturar mais de um
+    # assunto. Índice cresce ~18% (6174 → ~7300 chunks); p99 do chunk fica em
+    # ~185 tokens, bem abaixo do teto de 512 do E5. **Exige reingestão**
+    # (`python -m scripts.ingest`). Se uma rodada de eval piorar, volte a 1000.
+    chunk_size: int = 700
     chunk_overlap: int = 150
+
+    # RET-6 — na ingestão, descarta um chunk se ele for pelo menos ESTE tão
+    # parecido (Jaccard de shingles de 4 palavras) com outro chunk já mantido do
+    # mesmo lote. O `content_hash` só pega repetição EXATA; documentos como o
+    # `Canvas_Student_Guide.pdf` (1108 páginas) repetem o mesmo procedimento em
+    # dezenas de páginas com texto quase igual (número de página, cabeçalho
+    # mudam), e o retrieval acabava devolvendo 5 chunks idênticos — margem
+    # relativa zero (RET-2), resposta parecendo mais coberta do que é (Q11/Q23).
+    # 0.9 é conservador: só casa quase-cópia, não parágrafos que dividem jargão.
+    # 0 desliga. Só afeta a ingestão; não reindexa o que já está no banco.
+    ingest_dedup_similaridade: float = 0.9
 
     # Teto de caracteres POR fonte de contexto (chunk da base ou snippet da web)
     # ao montar o prompt — ver `responder._format_context`. Guarda contra o caso
@@ -339,12 +360,31 @@ class Settings(BaseSettings):
     prompt_context_item_max_chars: int = 6000
 
     top_k: int = 5
-    relevance_threshold: float = 0.35
+    # RET-1 — subido de 0.35 (inerte: o E5 pontua ~0.82 para QUALQUER par de
+    # textos em português, então 0.35 nunca cortava nada — ver
+    # eval/analises/analise-telemetria-2026-08-28.md §2.2). Não separa "a base
+    # cobre" de "não cobre" (isso é a margem relativa, RET-2/RET-3) — é só uma
+    # REDE contra lixo óbvio: corta a Q4 (fotossíntese, 0.8215) e pares fora de
+    # domínio parecidos, enquanto o reranker não vem. O menor score de acerto
+    # real registrado até 28-08 foi 0.8451, então 0.85 raspa esse limite —
+    # baixar para 0.80/0.78 se uma rodada mostrar acerto perdido nessa faixa.
+    # Não exige reingestão. Espelha RELEVANCE_THRESHOLD no .env.example.
+    relevance_threshold: float = 0.85
 
     # Acima disso, as 2 fontes do topo são tratadas como alta confiança (ver
     # retrieval/retriever.is_exact_match): a base tem muita informação repetida,
     # então 2 fontes fortes concordando já é sinal de resposta certa.
-    exact_match_threshold: float = 0.90
+    #
+    # RET-4 — baixado de 0.90 → 0.87. A 0.90 só disparava por artefato de corpus:
+    # a única vez em 3 rodadas foi a Q23 (0.9046/0.9020), porque o
+    # `Canvas_Student_Guide.pdf` repete o mesmo trecho em dezenas de páginas —
+    # não porque a resposta fosse mais confiável (análise de 28-08 §2.4). Para o
+    # corpus PT (1 página por PDF, sem repetição) os scores ficam presos em
+    # 0.82–0.87 e nunca chegavam lá. 0.87 deixa o ramo `alta_confianca` disparar
+    # também nesse corpus; se ligar demais, o passo seguinte (não este) é trocar
+    # o critério por "2 fontes fortes de DOCUMENTOS DIFERENTES" — hoje
+    # `is_exact_match` não checa a origem, só o score.
+    exact_match_threshold: float = 0.87
 
     # Nome da coleção no pgvector. Trocar isola um índice novo do antigo.
     # Sufixo pelo MODELO de embedding: a dimensão do vetor muda a cada troca

@@ -101,7 +101,11 @@ def main(
             # `n_chunks` (nome do campo na telemetria/JSONB) chamado assim aqui
             # fazia os dois relatórios parecerem se contradizer.
             "score_top": achado.score_top if achado else None,
+            "score_min": achado.score_min if achado else None,
             "chunks_recuperados": achado.n_chunks if achado else None,
+            # RET-2: score_top − score_min. Feature de confiança para acumular a
+            # mediana por item ao longo de N rodadas — não é critério de rota.
+            "margem_relativa": achado.margem_relativa if achado else None,
         })
 
     if formato_json:
@@ -148,6 +152,11 @@ def main(
                 esp += f"(+{'/'.join(l['origem_tambem_ok'])})"
             typer.secho(f"\n[{esp} -> {l['origem_obtida'] or '(sem registro)'}] ", fg=cor, nl=False)
             typer.echo(f"modelo={l['modelo'] or '—'}")
+            margem = l["margem_relativa"]
+            typer.echo(
+                f"  score_top={l['score_top'] if l['score_top'] is not None else '—'}"
+                f"  margem_relativa={margem if margem is not None else '—'}"
+            )
             typer.echo(f"  P: {l['pergunta']}")
             typer.echo(f"  R: {_resumir(l['resposta'])}")
 

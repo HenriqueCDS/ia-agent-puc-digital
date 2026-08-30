@@ -86,6 +86,27 @@ def test_linha_traz_os_scores_do_retrieval_e_nao_so_as_fontes_da_resposta():
     assert (linha["score_top"], linha["score_min"], linha["score_mean"]) == (0.88, 0.84, 0.86)
     assert linha["score_fonte_top"] == 0.87
     assert linha["provider"] == "huggingface"
+    # RET-2: margem relativa = score_top − score_min, derivada no arquivo da rodada
+    assert linha["margem_relativa"] == pytest.approx(0.04)
+
+
+def test_margem_relativa_e_none_sem_os_scores():
+    """Origem `nenhuma`/`encaminhado` não tem retrieval — nada de margem."""
+    assert eval_run._linha(_item(), _answer(), {}, erro=None)["margem_relativa"] is None
+    assert eval_run._margem_relativa({"score_top": 0.9}) is None
+
+
+def test_resultado_telemetria_expoe_a_mesma_margem():
+    """`scripts.eval_report` lê a margem da telemetria persistida — mesma conta
+    de `_margem_relativa`, para acumular N rodadas sem reprocessar o jsonl."""
+    from app.db.telemetry_store import ResultadoTelemetria
+
+    campos = dict(
+        origem="base", grounded=True, score_top=0.90, score_min=0.86, score_mean=0.88,
+        n_chunks=5, cache_hit=False, resposta=None, chat_model="x", provider="groq",
+    )
+    assert ResultadoTelemetria(**campos).margem_relativa == pytest.approx(0.04)
+    assert ResultadoTelemetria(**{**campos, "score_min": None}).margem_relativa is None
 
 
 def test_linha_grava_a_resposta_e_as_fontes_citadas():
