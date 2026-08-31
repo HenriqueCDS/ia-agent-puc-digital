@@ -68,6 +68,18 @@ def test_toda_query_de_chunks_e_escopada_a_colecao_ativa():
     )
 
 
+def test_delete_by_assunto_nao_toca_no_conteudo_crawlado():
+    """`--assunto` limpa ARQUIVOS de uma pasta. As páginas da WEB_ALLOWLIST são
+    gravadas com o mesmo `assunto` da FonteWeb (não `"web"`), então sem excluir
+    `source_type='web'` no DELETE um `--assunto puc-digital` para tirar 3 PDFs
+    levava junto todo o crawl daquele assunto, em silêncio."""
+    bloco = next(
+        b for b in _BLOCOS_SQL
+        if "DELETE FROM langchain_pg_embedding" in b and ":assunto" in b
+    )
+    assert "source_type" in bloco and "IS DISTINCT FROM 'web'" in bloco
+
+
 def test_o_escopo_vem_do_nome_da_colecao_ativa_e_nao_de_um_id_solto():
     """O outro lado da invariante: a constante que as queries usam tem que
     resolver a coleção pelo NOME configurado, ligado como parâmetro. Se ela

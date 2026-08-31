@@ -1,7 +1,7 @@
 """CLI para remover arquivos já indexados do pgvector.
 
     python -m scripts.remove_ingested guia-canvas.pdf        # por trecho do caminho
-    python -m scripts.remove_ingested --assunto puc-digital  # pasta inteira
+    python -m scripts.remove_ingested --assunto puc-digital  # só os ARQUIVOS da pasta
     python -m scripts.remove_ingested guia --yes              # sem confirmar
 
 Mostra o que casou (com `scripts.list_ingested` como referência) e pede
@@ -22,7 +22,11 @@ def main(
         None, help="Trecho do caminho do arquivo (case-insensitive). Ex: guia-canvas.pdf"
     ),
     assunto: str = typer.Option(
-        None, "--assunto", "-a", help="Remove a pasta/assunto inteiro, em vez de um arquivo."
+        None,
+        "--assunto",
+        "-a",
+        help="Remove os ARQUIVOS da pasta/assunto inteira (não o conteúdo crawlado da web; "
+        "para esse, passe um trecho da URL como termo).",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Não pede confirmação."),
 ) -> None:

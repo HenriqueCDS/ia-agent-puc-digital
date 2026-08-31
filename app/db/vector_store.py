@@ -94,17 +94,28 @@ def delete_by_source(store: PGVector, source_path: str) -> int:
 
 
 def delete_by_assunto(store: PGVector, assunto: str) -> int:
-    """Remove todos os chunks de um assunto (pasta) inteiro.
+    """Remove os chunks de ARQUIVOS de um assunto (pasta) inteiro.
 
     Complementa `delete_by_source`: aquela apaga um arquivo por vez (uso interno
     da reingestão), esta apaga uma pasta inteira de uma vez — o caso de uso da
     CLI de limpeza (`scripts/remove_ingested.py`), quando um assunto sai do
     escopo do agente.
+
+    NÃO toca no conteúdo crawlado (`source_type='web'`): as páginas da
+    `WEB_ALLOWLIST` são gravadas com o `assunto` da `FonteWeb`
+    (`puc-digital`/`canvas`, não `"web"`, para o retrieval filtrado enxergá-las —
+    ver `scripts/crawl.py`), então sem esta cláusula um `--assunto puc-digital`
+    para limpar 3 PDFs levava junto todas as páginas web daquele assunto, em
+    silêncio (a CLI só pré-visualiza os arquivos, não as URLs). Para apagar o
+    crawl use `remove_ingested` com um trecho da URL como termo, ou
+    `delete_by_source` por URL. `IS DISTINCT FROM` mantém os chunks antigos sem a
+    chave `source_type` (NULL) no resultado.
     """
     stmt = text(
         f"""
         DELETE FROM langchain_pg_embedding
         WHERE cmetadata->>'assunto' = :assunto
+          AND cmetadata->>'source_type' IS DISTINCT FROM 'web'
           AND collection_id = {_COLLECTION_ID}
         """
     )
