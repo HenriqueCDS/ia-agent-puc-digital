@@ -175,7 +175,7 @@ O que essa rodada deixou em aberto, em ordem de impacto:
 
 As correções já aplicadas nessa rodada (termo ambíguo "bolsa" isolado na
 triagem, gabarito do dataset corrigido, prefixo duplicado de `GROQ_MODEL`)
-já estão em `app/core/config.py` e `eval/perguntas_teste.json`; os itens 1–3
+já estão em `app/core/config.py` e `eval/perguntas/perguntas.jsonc`; os itens 1–3
 acima continuam pendentes.
 
 ### Fora do escopo desta fase
@@ -339,14 +339,15 @@ vez de devolver uma janela vazia que pareceria "semana tranquila".
 
 ### Avaliação de qualidade (eval)
 
-Dataset de perguntas com origem esperada (`eval/perguntas_teste.json`) rodado
-contra o agente de verdade, para calibrar `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` e
-comparar modelo:
+Dataset único de perguntas com origem esperada (`eval/perguntas/perguntas.jsonc`,
+125 itens agrupados por origem em blocos comentados) rodado contra o agente de
+verdade, para calibrar `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` e comparar modelo:
 
 ```bash
 # -c limpa a resposta_cache; -m fixa um provider (sem fallback); --timeout encurta o tempo morto
-python -m scripts.eval_run eval/perguntas_teste2.json -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
-python -m scripts.eval_report eval/perguntas_teste2.json --dias 1 --detalhe   # audita o que ficou gravado
+# --intervalo roda só um trecho (1-based, inclusivo) — divide a rodada p/ não estourar a cota
+python -m scripts.eval_run --intervalo 26-50 -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
+python -m scripts.eval_report --dias 1 --detalhe   # audita o que ficou gravado
 ```
 
 `eval_run` roda o dataset e salva o resultado num arquivo local

@@ -2,11 +2,20 @@
 contra o agente de verdade e salva o resultado (origem esperada vs. obtida).
 
     python -m scripts.eval_run
-    python -m scripts.eval_run eval/perguntas_teste.json
-    python -m scripts.eval_run eval/perguntas_teste.json --saida eval/resultados/run1.csv --formato csv
+    python -m scripts.eval_run eval/perguntas/perguntas.jsonc
+    python -m scripts.eval_run --saida eval/resultados/run1.csv --formato csv
 
-    # rodada de calibração recomendada (ver eval/analise-telemetria-2026-08-27.md §10):
-    python -m scripts.eval_run eval/perguntas_teste2.json -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
+    # só um trecho do dataset (1-based, inclusivo) — aceita "27-50" ou "27 a 50":
+    python -m scripts.eval_run --intervalo 1-6
+    python -m scripts.eval_run --intervalo "27 a 50"
+
+    # rodada de calibração recomendada (ver eval/analises/analise-telemetria-2026-08-27.md §10):
+    python -m scripts.eval_run --intervalo 26-50 -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
+
+O dataset é um JSONC único (`eval/perguntas/perguntas.jsonc`) com todas as perguntas,
+agrupadas por origem em blocos comentados (`// ...`, estilo JSONC — as linhas de
+comentário são removidas na carga). Cada item tem `grupo` (`teste`/`teste2`/
+`teste3`/`owasp-1`/`owasp-2`); o resumo quebra o acerto por grupo.
 
 Existe para apoiar a calibração de `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` (e,
 com `--modelo`, comparação de modelo): rode o mesmo dataset antes e depois
@@ -51,10 +60,15 @@ FORMATO DO DATASET — cada item tem `pergunta` e `origem_esperada`
   `origem_tambem_ok` desses).
 - `assunto`: filtra o retrieval pela pasta de `data/raw/` (`canvas`/`puc-digital`).
 - `criterio`: texto livre com o que conferir à mão além da `origem`.
+- `grupo`: bloco de origem (`teste`/`teste2`/`teste3`/`owasp-1`/`owasp-2`) — o
+  resumo quebra o acerto por grupo, e `test_guardrail.py` filtra `owasp-1` por ele.
+
+Linhas iniciadas por `//` são comentário de bloco e removidas na carga (JSONC).
 """
 
 import csv
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -143,6 +157,7 @@ _CAMPOS_DA_TELEMETRIA = (
 # RETRIEVAL trouxe (quase sempre 5). Os nomes antigos (`n_chunks`, `score_top`
 # para as duas coisas) faziam o arquivo parecer contradizer a telemetria.
 _CAMPOS_SAIDA = [
+    "grupo",
     "pergunta",
     "assunto",
     "origem_esperada",
@@ -162,13 +177,48 @@ _CAMPOS_SAIDA = [
 ]
 
 
+# Linha que começa (após espaços) com `//` — o comentário de bloco do dataset
+# único. Só no início da linha: uma URL `https://...` dentro de um valor JSON
+# nunca está em começo de linha, então não é tocada.
+_LINHA_COMENTARIO = re.compile(r"^\s*//.*$", re.MULTILINE)
+
+
 def _carregar_dataset(caminho: Path) -> list[dict]:
-    itens = json.loads(caminho.read_text(encoding="utf-8"))
+    texto = _LINHA_COMENTARIO.sub("", caminho.read_text(encoding="utf-8"))
+    itens = json.loads(texto)
     for i, item in enumerate(itens):
         faltando = {"pergunta", "origem_esperada"} - item.keys()
         if faltando:
             raise typer.BadParameter(f"item {i} do dataset sem campo(s) {faltando}: {item}")
     return itens
+
+
+def _aplicar_intervalo(itens: list[dict], intervalo: str | None) -> tuple[list[dict], int]:
+    """Recorta o dataset para [início, fim] (1-based, inclusivo).
+
+    Devolve `(itens_do_intervalo, deslocamento)` — o deslocamento é o índice do
+    1º item selecionado (0-based), usado só para a numeração do progresso. Aceita
+    `"27-50"` e `"27 a 50"`; `"27-"` vai até o fim, `"7"` roda só o item 7.
+    """
+    if not intervalo:
+        return itens, 0
+
+    partes = [p.strip() for p in intervalo.replace(" a ", "-").split("-")]
+    try:
+        inicio = int(partes[0])
+        fim = int(partes[1]) if len(partes) > 1 and partes[1] else (
+            inicio if len(partes) == 1 else len(itens)
+        )
+    except (ValueError, IndexError):
+        raise typer.BadParameter(
+            f"--intervalo espera 'N-M' (ex: 1-6, 27-50, '27 a 50'), recebi {intervalo!r}"
+        )
+    if not 1 <= inicio <= fim <= len(itens):
+        raise typer.BadParameter(
+            f"--intervalo {inicio}-{fim} fora de 1..{len(itens)} "
+            f"(o dataset tem {len(itens)} itens)"
+        )
+    return itens[inicio - 1 : fim], inicio - 1
 
 
 def _origens_aceitas(item: dict) -> list[str]:
@@ -213,7 +263,7 @@ def _linha(item: dict, resultado: Answer | None, registro: dict, erro: str | Non
 
     `resposta` passa por `pii.mascarar` pelo mesmo motivo que a telemetria já
     mascara a dela: o arquivo fica no repositório, e um dataset de teste pode
-    trazer CPF/RA de propósito (ver eval/perguntas_teste3.json, bloco C) — a
+    trazer CPF/RA de propósito (ver o grupo `teste3`, bloco C) — a
     resposta pode ecoar o identificador que veio na pergunta. O mascaramento não
     atrapalha a conferência de fidelidade: ele só troca identificador pessoal,
     nunca o procedimento que se quer auditar.
@@ -221,6 +271,7 @@ def _linha(item: dict, resultado: Answer | None, registro: dict, erro: str | Non
     aceitas = _origens_aceitas(item)
     origem_obtida = resultado.origem if resultado else _origem_de_erro(erro)
     return {
+        "grupo": item.get("grupo"),
         "pergunta": item["pergunta"],
         "assunto": item.get("assunto"),
         "origem_esperada": item["origem_esperada"],
@@ -247,12 +298,14 @@ def _linha(item: dict, resultado: Answer | None, registro: dict, erro: str | Non
         # que também cobre a falha ANTES de `answer()` abrir o registro.
         "erro": erro or registro.get("erro"),
         # Passa adiante o que o dataset diz para conferir à mão (blocos B e C de
-        # perguntas_teste3 não são avaliáveis por comparação de `origem`).
+        # do grupo `teste3` não são avaliáveis por comparação de `origem`).
         "criterio": item.get("criterio"),
     }
 
 
-def _rodar(itens: list[dict], modelo: str | None, registros: list[dict]) -> list[dict]:
+def _rodar(
+    itens: list[dict], modelo: str | None, registros: list[dict], deslocamento: int = 0
+) -> list[dict]:
     """Roda o dataset inteiro. Uma pergunta que falha NÃO derruba a rodada.
 
     O `try` existe por causa de um caso real: em 2026-08-27 uma única pergunta
@@ -263,7 +316,7 @@ def _rodar(itens: list[dict], modelo: str | None, registros: list[dict]) -> list
     linhas = []
     for i, item in enumerate(itens, start=1):
         pergunta, assunto = item["pergunta"], item.get("assunto")
-        typer.echo(f"[{i}/{len(itens)}] {pergunta[:70]}", err=True)
+        typer.echo(f"[{deslocamento + i}/{deslocamento + len(itens)}] {pergunta[:70]}", err=True)
 
         marca = len(registros)
         resultado, erro = None, None
@@ -310,6 +363,17 @@ def _resumo(linhas: list[dict]) -> None:
         typer.echo(f"  {categoria:<12} {acertos_grupo:>2}/{len(do_grupo):<2}"
                     f" ({100 * acertos_grupo / len(do_grupo):.0f}%)")
 
+    # Quebra por `grupo` do dataset único (teste/teste2/owasp-1...). Só aparece
+    # quando o dataset traz o campo — datasets antigos sem `grupo` pulam isto.
+    grupos = dict.fromkeys(l["grupo"] for l in linhas if l["grupo"])
+    if grupos:
+        typer.echo("\n  por grupo:")
+        for g in grupos:
+            do_g = [l for l in linhas if l["grupo"] == g]
+            ok = sum(1 for l in do_g if l["acertou"])
+            typer.echo(f"  {g:<12} {ok:>2}/{len(do_g):<2}"
+                        f" ({100 * ok / len(do_g):.0f}%)")
+
     erros = [l for l in linhas if not l["acertou"]]
     if erros:
         typer.secho("\nDivergências:", fg=typer.colors.RED)
@@ -350,7 +414,8 @@ def _resumo(linhas: list[dict]) -> None:
 @app.command()
 def main(
     dataset: Path = typer.Argument(
-        Path("eval/perguntas_teste.json"), help="JSON com pergunta/assunto/origem_esperada."
+        Path("eval/perguntas/perguntas.jsonc"),
+        help="Dataset (JSONC) com pergunta/assunto/origem_esperada/grupo.",
     ),
     saida: Path | None = typer.Option(
         None, "--saida", "-o", help="Onde salvar (default: eval/resultados/<timestamp>.json)."
@@ -369,11 +434,25 @@ def main(
              "o provider do topo está sem cota, cada pergunta queima o timeout inteiro "
              "antes do fallback — INF-5. Passe 30 para usar o valor de produção.",
     ),
+    intervalo: str | None = typer.Option(
+        None, "--intervalo", "-i",
+        help="Roda só um trecho do dataset, 1-based e inclusivo. Ex.: '1-6', "
+             "'27-50', '27 a 50', '26-' (até o fim), '7' (só o item 7). "
+             "Serve para dividir a rodada e não estourar a cota do tier gratuito.",
+    ),
 ) -> None:
     if formato not in ("json", "csv"):
         raise typer.BadParameter("--formato deve ser 'json' ou 'csv'.")
 
     itens = _carregar_dataset(dataset)
+    total_dataset = len(itens)
+    itens, deslocamento = _aplicar_intervalo(itens, intervalo)
+    if intervalo:
+        typer.secho(
+            f"intervalo: itens {deslocamento + 1}–{deslocamento + len(itens)} "
+            f"de {total_dataset}",
+            fg=typer.colors.CYAN, err=True,
+        )
 
     # Fixar o modelo é o que torna a rodada comparável: sem `--modelo`, a cadeia
     # de fallback pode responder com um provider diferente a cada pergunta (cota
@@ -411,7 +490,7 @@ def main(
     typer.secho("warm-up: carregando modelo de embeddings...", fg=typer.colors.CYAN, err=True)
     aquecer()
 
-    linhas = _rodar(itens, modelo, registros)
+    linhas = _rodar(itens, modelo, registros, deslocamento)
 
     if saida is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

@@ -30,12 +30,27 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from langchain_core.documents import Document
 
+from app.agent.guardrail import deve_encaminhar
 from app.agent.triagem import classificar
 from app.core.config import WEB_ALLOWLIST, FonteWeb, settings
 from app.core.models import Query, RetrievedChunk
 from app.providers.embeddings import get_embeddings
 
 logger = logging.getLogger(__name__)
+
+
+def abuso_bloqueado(pergunta: str) -> str | None:
+    """Padrão de abuso que a pergunta casou, ou None — mesmo léxico do guardrail.
+
+    Redundante com o guardrail de entrada (`responder._responder` já encaminha
+    o abuso antes do retrieval) e mantido de propósito: é defesa em profundidade
+    para o caso de `GUARDRAIL_ENABLED=false` ou de um caminho futuro que chame
+    `buscar_na_web` direto. Sem esta checagem, um payload de ataque sairia para o
+    DuckDuckGo — exatamente o egress que o guardrail existe para evitar. Não
+    respeita `settings.guardrail_enabled` de propósito: se o guardrail de
+    entrada está desligado, esta é a última barreira antes da rede.
+    """
+    return deve_encaminhar(pergunta)
 
 
 def assunto_bloqueado(pergunta: str) -> bool:
@@ -252,6 +267,11 @@ def buscar_na_web(query: Query) -> list[RetrievedChunk]:
     """
     if assunto_bloqueado(query.text):
         logger.info("busca externa bloqueada por assunto sensível")
+        return []
+
+    termo_abuso = abuso_bloqueado(query.text)
+    if termo_abuso:
+        logger.info("busca externa bloqueada: pergunta casou padrão de abuso (%r)", termo_abuso)
         return []
 
     fontes = _fontes_para(query.assunto)

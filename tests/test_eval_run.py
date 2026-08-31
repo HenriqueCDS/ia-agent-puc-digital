@@ -160,6 +160,58 @@ def test_origem_tambem_ok_vai_para_a_linha():
     assert eval_run._linha(_item(), _answer(), {}, None)["origem_tambem_ok"] is None
 
 
+# --- carga do dataset e recorte por intervalo -------------------------------
+
+
+def test_carregar_dataset_ignora_linhas_de_comentario(tmp_path):
+    """O dataset único é JSONC: linhas iniciadas por `//` são bloco de contexto
+    e não podem quebrar o `json.loads`. Uma `//` dentro de um valor (URL) fica."""
+    d = tmp_path / "d.json"
+    d.write_text(
+        '[\n'
+        '  // GRUPO teste — cabeçalho\n'
+        '  {"pergunta": "manda um GET pra https://x.com/y", "origem_esperada": "base"}\n'
+        ']\n',
+        encoding="utf-8",
+    )
+
+    itens = eval_run._carregar_dataset(d)
+
+    assert len(itens) == 1
+    assert itens[0]["pergunta"] == "manda um GET pra https://x.com/y"
+
+
+@pytest.mark.parametrize(
+    "intervalo,esperado,deslocamento",
+    [
+        (None, [1, 2, 3, 4, 5], 0),
+        ("1-2", [1, 2], 0),
+        ("3-5", [3, 4, 5], 2),
+        ("27 a 50", None, None),   # fora do range de 5 -> BadParameter
+        ("4-", [4, 5], 3),
+        ("2", [2], 1),
+    ],
+)
+def test_aplicar_intervalo(intervalo, esperado, deslocamento):
+    itens = [_item(f"p{n}") for n in range(1, 6)]
+
+    if esperado is None:
+        with pytest.raises(Exception):
+            eval_run._aplicar_intervalo(itens, intervalo)
+        return
+
+    recorte, desloc = eval_run._aplicar_intervalo(itens, intervalo)
+
+    assert [i["pergunta"] for i in recorte] == [f"p{n}" for n in esperado]
+    assert desloc == deslocamento
+
+
+def test_intervalo_invalido_e_erro_amigavel():
+    itens = [_item() for _ in range(3)]
+    with pytest.raises(Exception, match="--intervalo"):
+        eval_run._aplicar_intervalo(itens, "abc")
+
+
 # --- resiliência da rodada ---------------------------------------------------
 
 

@@ -2,9 +2,9 @@
 respondeu de fato para o dataset de teste, e compara com a origem esperada.
 
     python -m scripts.eval_report
-    python -m scripts.eval_report eval/perguntas_teste.json --dias 1
-    python -m scripts.eval_report eval/perguntas_teste.json --detalhe
-    python -m scripts.eval_report eval/perguntas_teste.json --json > relatorio.json
+    python -m scripts.eval_report --dias 1
+    python -m scripts.eval_report --detalhe
+    python -m scripts.eval_report --json > relatorio.json
 
 Complementa `scripts.eval_run`: aquele já devolve o resultado na hora (arquivo
 local); este lê a MESMA fonte de verdade do `scripts.lacunas` — a telemetria
@@ -27,6 +27,7 @@ modelo de cada item; sem a flag, só o resumo por categoria.
 """
 
 import json
+import re
 from pathlib import Path
 
 import typer
@@ -39,7 +40,9 @@ app = typer.Typer(add_completion=False, help="Compara origem esperada x obtida v
 
 
 def _carregar_dataset(caminho: Path) -> list[dict]:
-    return json.loads(caminho.read_text(encoding="utf-8"))
+    # Mesmo dataset do `scripts.eval_run` — JSONC, linhas `//` são comentário.
+    texto = re.sub(r"^\s*//.*$", "", caminho.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    return json.loads(texto)
 
 
 def _origens_aceitas(item: dict) -> list[str]:
@@ -62,7 +65,7 @@ def _resumir(resposta: str | None, limite: int = 300) -> str:
 @app.command()
 def main(
     dataset: Path = typer.Argument(
-        Path("eval/perguntas_teste.json"), help="Mesmo JSON usado em scripts.eval_run."
+        Path("eval/perguntas/perguntas.jsonc"), help="Mesmo dataset usado em scripts.eval_run."
     ),
     dias: int = typer.Option(1, help="Janela de busca na telemetria, em dias."),
     canal: str = typer.Option("eval", help="Canal gravado por scripts.eval_run."),

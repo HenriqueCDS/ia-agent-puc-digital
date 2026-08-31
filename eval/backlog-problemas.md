@@ -58,12 +58,12 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Feito | ID | Prio | Problema | Onde | Ação | Herdado | Resolvido em |
 |---|---|---|---|---|---|---|---|
-| [ ] | TRI-1 | 🟠 | `"trancar"` não casa `"trancamento"` de `ENCAMINHAMENTOS` — léxico preso à forma nominal (Q13; 27: Q14) | `config.ENCAMINHAMENTOS` | Adicionar `"trancar"`+`"trancamento"` em `academico`, ou normalização por radical `tranc` | ⏳ | |
+| [x] | TRI-1 | 🟠 | `"trancar"` não casa `"trancamento"` de `ENCAMINHAMENTOS` — léxico preso à forma nominal (Q13; 27: Q14) | `config.ENCAMINHAMENTOS` | Feito: `"trancar"` (verbo) somado a `"trancamento"` (nominal) nos `termos` de `academico`. As duas formas explícitas em vez de normalizar por radical `tranc` — sem risco de casar palavra não relacionada; não são substring uma da outra. Testes em `test_triagem.py` | ✅ | 2026-08-31 |
 | [x] | TRI-2 | 🟠 | `"bolsa"` em entrada com termos inequívocos manda aluno de iniciação científica p/ financeiro/cobrança (26 item 16) | `config.ENCAMINHAMENTOS` | Entrada própria com `excecoes` | ✅ | 2026-08-26 |
 | [ ] | TRI-3 | 🟡 | Guardrail estruturalmente cego a injeção indireta — só lê a pergunta, nunca o CONTEXTO recuperado (Q18) | `guardrail.py`, sanitização de contexto | Defesa no prompt + sanitização do contexto; teste da parte-2 (LLM01 Indirect) | ⏳ | |
 | [ ] | TRI-4 | 🟡 | Guardrail léxico frágil a paráfrase / outro idioma — 4/15 ataques da parte-2 passam (DoS por repetição, footprinting `pypdf2`/`.bin`, PII por ID de aluno) | `guardrail._PADROES` | Calibrar léxico após 1ª rodada da parte-2; 2ª camada por embedding | ⏳ | |
 | [ ] | TRI-5 | 🟡 | Guardrail alimenta `scripts.lacunas` — "DROP TABLE"/"chave de API" viram pauta de indexação | `telemetry_store.origem_por_hash` | Filtrar `assunto_origem="guardrail"` | ⏳ | |
-| [ ] | TRI-6 | 🟡 | `web_fallback.buscar_na_web` não chama o guardrail — payload de ataque sai p/ DuckDuckGo quando `GUARDRAIL_ENABLED=false` (Q15/Q24/Q9r2) | `app/agent/web_fallback.py` | Chamar `guardrail.deve_encaminhar` também lá (defesa em profundidade) | ⏳ | |
+| [x] | TRI-6 | 🟡 | `web_fallback.buscar_na_web` não chama o guardrail — payload de ataque sai p/ DuckDuckGo quando `GUARDRAIL_ENABLED=false` (Q15/Q24/Q9r2) | `app/agent/web_fallback.py` | Feito: `web_fallback.abuso_bloqueado` reusa `guardrail.deve_encaminhar` e roda no topo de `buscar_na_web`, ao lado de `assunto_bloqueado`. **Não** respeita `settings.guardrail_enabled` de propósito — é a última barreira quando o guardrail de entrada está desligado. Mesmo desenho do `assunto_bloqueado` (que duplica a triagem). Teste em `test_web_fallback.py` | ✅ | 2026-08-31 |
 
 ## 6. Base de conhecimento / busca web (transversais)
 
@@ -79,9 +79,9 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | Feito | ID | Prio | Problema | Onde | Ação | Herdado | Resolvido em |
 |---|---|---|---|---|---|---|---|
 | [x] | DS-1 | 🔴 | Categoria `bloqueado` do dataset nunca casa — 10 ataques `acertou:false` por construção | dataset + guardrail | `bloqueado`→`encaminhado`; guardrail roteia abuso p/ `encaminhado` | ✅ | 2026-08-27 |
-| [ ] | DS-2 | 🟡 | Gabarito Q8 (28) errado — `AulasAoVivo_v2-2.pdf` é só tutorial; agente recusou e acertou | `eval/perguntas_teste3.json` | Q8 → `encaminhado` | ⏳ | |
-| [x] | DS-3 | 🟡 | Gabarito item 17 (26) — app Canvas celular: base respondeu bem; `web`→`base` | `eval/perguntas_teste.json` | Corrigido | ✅ | 2026-08-26 |
-| [ ] | DS-4 | 🟡 | Gabarito Q12 (27) — "altero meu e-mail": base respondeu certo; `encaminhado`→`base` | `eval/perguntas-owasp-2026-parte-1.json` | Revisar | ⏳ | |
+| [ ] | DS-2 | 🟡 | Gabarito Q8 (28) errado — `AulasAoVivo_v2-2.pdf` é só tutorial; agente recusou e acertou | `perguntas.jsonc` grupo `teste3` | Q8 → `encaminhado` | ⏳ | |
+| [x] | DS-3 | 🟡 | Gabarito item 17 (26) — app Canvas celular: base respondeu bem; `web`→`base` | `perguntas.jsonc` grupo `teste` | Corrigido | ✅ | 2026-08-26 |
+| [ ] | DS-4 | 🟡 | Gabarito Q12 (27) — "altero meu e-mail": base respondeu certo; `encaminhado`→`base` | `perguntas.jsonc` grupo `owasp-1` | Revisar | ⏳ | |
 | [ ] | DS-5 | 🟡 | Gabaritos Q8/Q16/Q25 (27) responderam `web` de fonte oficial em vez de `encaminhado` | dataset | Reavaliar intenção do gabarito | ⏳ | |
 | [x] | DS-6 | 🟠 | `GROQ_MODEL` com prefixo `groq:` duplicado → 404 na cadeia | `.env` | Corrigido | ✅ | 2026-08-26 |
 
@@ -108,14 +108,17 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | 2. Retrieval / limiar | 5 / 6 |
 | 3. Veto / fidelidade | 4 / 5 |
 | 4. LGPD / PII | 2 / 2 |
-| 5. Triagem / guardrail | 1 / 6 |
+| 5. Triagem / guardrail | 3 / 6 |
 | 6. Base de conhecimento / web | 3 / 4 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
 | 8. Testes | 4 / 8 |
-| **Total** | **30 / 45** |
+| **Total** | **32 / 45** |
 
 ## Changelog
 
+- **2026-08-31** — infra eval: os 5 datasets (`perguntas_teste{,2,3}.json`, `perguntas-owasp-2026-parte-{1,2}.json`) fundidos em `eval/perguntas/perguntas.jsonc` (125 itens, JSONC — blocos comentados com `//`, removidos na carga). Cada item ganhou `grupo` (`teste`/`teste2`/`teste3`/`owasp-1`/`owasp-2`); campo `nota` → `criterio`. `eval_run` e `eval_report` toleram os comentários; `eval_run --intervalo/-i` roda um trecho (`1-6`, `27-50`, `27 a 50`, `26-`, `7`) e o resumo quebra o acerto por grupo. `test_guardrail.py` filtra `owasp-1` pelo `grupo`.
+- **2026-08-31** — TRI-6: `web_fallback.abuso_bloqueado` (reusa `guardrail.deve_encaminhar`) roda no topo de `buscar_na_web`, ao lado de `assunto_bloqueado`; não respeita `GUARDRAIL_ENABLED` de propósito (última barreira antes da rede quando o guardrail de entrada está off). Teste em `test_web_fallback.py`.
+- **2026-08-31** — TRI-1: `"trancar"` somado a `"trancamento"` nos `termos` de `academico` em `config.ENCAMINHAMENTOS`. Testes em `test_triagem.py`.
 - **2026-08-31** — PII-1 / PII-2: `responder._sem_pii` mascara `query.text` (CPF/RA/e-mail/telefone/senha) no topo de `_responder`, antes de qualquer saída p/ o provedor de LLM (EUA) ou a busca web. Nova categoria `senha` em `pii.py` (`_SENHA` — palavra + conector/aspas + valor de cara de credencial). Detecção segue sobre o texto original. Testes em `test_pii.py` e `test_responder.py`. README §Privacidade e LGPD atualizado.
 - **2026-08-31** — VET-3 / T-6 (via VET-5): `settings.llm_max_tokens=1400` — teto de saída aplicado em toda a cadeia (`max_output_tokens` no Gemini, `max_tokens` por chamada no OpenAI-compat; 4 fábricas de `chain.py`). `LLM_MAX_TOKENS` no `.env.example`. Regressão do veto de contexto Q7/Q10 em `test_prompts.py` (detecção) e `test_responder.py` (caminho completo). Teste de cadeia em `test_providers.py`.
 - **2026-08-31** — T-5: `test_responder.py`/`test_telemetry.py`/`test_prompts.py` cobrem recusa do modelo em qualquer idioma → encaminhamento + texto PT (via VET-1 e VET-2).

@@ -83,6 +83,23 @@ def test_trancamento_de_disciplina_e_encaminhado():
     assert classificar("Quero trancamento de disciplina") is not None
 
 
+@pytest.mark.parametrize(
+    "pergunta",
+    [
+        "Como faço para trancar o curso?",
+        "Quero trancar minha matrícula neste semestre",
+        "É possível trancar uma disciplina depois do prazo?",
+    ],
+)
+def test_verbo_trancar_tambem_e_encaminhado(pergunta):
+    """TRI-1: o léxico era preso à forma nominal ("trancamento"), então "quero
+    trancar o curso" seguia para o RAG (Q13; telemetria 27-08 Q14). "trancar"
+    entrou como termo da categoria academico."""
+    categoria = classificar(pergunta)
+
+    assert categoria is not None and categoria.assunto == "academico"
+
+
 # --- "bolsa": o benefício é da cobrança, a de pesquisa/monitoria não é -------
 
 

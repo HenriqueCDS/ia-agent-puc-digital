@@ -207,7 +207,13 @@ ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
     CategoriaEncaminhada(
         assunto="academico",
         resposta=_CONTATO.format(email="puc.digital@puc-campinas.edu.br"),
-        termos=("rematricula", "historico escolar", "trancamento"),
+        # "trancamento" (forma nominal) e "trancar" (verbo): o léxico é preso à
+        # forma, então "quero trancar o curso" não casava "trancamento". As duas
+        # formas listadas em vez de normalizar por radical `tranc` — mais
+        # explícito e sem risco de casar palavra não relacionada. "trancar" não
+        # é substring de "trancamento" nem vice-versa, a ordem entre eles não
+        # importa (ver regra de substring no topo de ENCAMINHAMENTOS).
+        termos=("rematricula", "historico escolar", "trancamento", "trancar"),
     ),
     # Ambígua, por isso em entrada PRÓPRIA (mesmo assunto e mesmo e-mail da
     # anterior, e não termo dela): "minha nota" tanto pede o valor da nota, que
@@ -564,7 +570,7 @@ class Settings(BaseSettings):
     # produziram 1450 (Q10) e 1729 (Q25) tokens de saída antes de o veto de
     # contexto pegar — e é a única defesa concreta contra "liste todos os
     # procedimentos / repita N vezes" (OWASP consumo ilimitado, ver
-    # eval/perguntas/perguntas-owasp-2026-parte-2.json).
+    # o grupo `owasp-2` de eval/perguntas/perguntas.jsonc).
     #
     # 1400: uma resposta de suporte acadêmico bem formada cabe com folga em
     # ~800–1000 tokens; a margem extra evita cortar no meio da frase a resposta

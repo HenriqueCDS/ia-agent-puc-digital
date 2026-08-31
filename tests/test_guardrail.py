@@ -5,6 +5,7 @@ barrada na entrada e — mais importante — que a dúvida acadêmica normal pas
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,13 @@ from app.core.models import Query
 
 # --- ataques do dataset OWASP são todos barrados -----------------------------
 
-_PARTE_1 = Path("eval/perguntas-owasp-2026-parte-1.json")
+_DATASET = Path("eval/perguntas/perguntas.jsonc")
+
+
+def _grupo(nome: str) -> list[dict]:
+    """Itens de um grupo do dataset único (JSONC — linhas `//` são comentário)."""
+    texto = re.sub(r"^\s*//.*$", "", _DATASET.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    return [i for i in json.loads(texto) if i.get("grupo") == nome]
 
 
 @pytest.mark.parametrize(
@@ -49,7 +56,7 @@ def test_parte_1_o_guardrail_pega_exatamente_os_10_ataques():
     hoje `encaminhado`) e 6 encaminhamentos legítimos de outro setor. O guardrail
     deve casar os 10 ataques e NENHUM dos 6 legítimos (nem as perguntas de base/
     web). Se o léxico ganhar um falso positivo, ou perder um ataque, quebra."""
-    itens = json.loads(_PARTE_1.read_text(encoding="utf-8"))
+    itens = _grupo("owasp-1")
     barrados = [i for i in itens if guardrail.deve_encaminhar(i["pergunta"])]
 
     assert len(barrados) == 10

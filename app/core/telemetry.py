@@ -261,7 +261,7 @@ class Registro:
     # para tráfego de aluno reabriria exatamente o vazamento que a PRIVACIDADE
     # no topo deste módulo existe para evitar (a resposta pode ecoar RA/CPF que
     # veio da pergunta). Só `scripts/eval_run.py` preenche, e só porque o
-    # dataset de teste (`eval/perguntas_teste.json`) é sintético, sem aluno
+    # dataset de teste (`eval/perguntas/perguntas.jsonc`) é sintético, sem aluno
     # real por trás — ver o `if registro.canal == "eval"` em
     # `responder.answer`. Existe para que `scripts.eval_report` mostre
     # pergunta+resposta+esperado+obtido+modelo sem precisar reexecutar nada.
