@@ -37,6 +37,9 @@ ddgs>=9.0,<10   # DuckDuckGo; ver app/agent/web_fallback.py
 # scripts/crawl.py os importa direto.
 requests>=2.31
 beautifulsoup4>=4.12
+truststore>=0.9   # usa o trust store do SO no requests — sem isso, redes com
+                  # proxy TLS (CA corporativa) derrubam a busca de sitemap por
+                  # CERTIFICATE_VERIFY_FAILED. Já vem transitivo do httpx.
 
 # --- Config e CLI ---
 pydantic-settings>=2.0

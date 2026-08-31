@@ -67,11 +67,60 @@ _RE_PALAVRA_SOLTA = re.compile(r"\binsuf+icien(?:te|t)\b", re.IGNORECASE)
 # só por conter a palavra.
 _LIMITE_VETO_PALAVRA_SOLTA = 200
 
+# Camada 3: a recusa que o modelo escreve em PROSA, sem emitir marcador nenhum.
+# O `SYSTEM`/`SYSTEM_WEB` já PROÍBE essas frases e elas continuam aparecendo em
+# rodadas reais (ver eval/analises/analise-telemetria-2026-08-2{6,7}.md §4):
+# "infelizmente, não há informações específicas sobre X nos trechos fornecidos",
+# "não foi possível encontrar X", "não é possível fornecer/atender...". Sem
+# detecção, esse texto vira `origem="base"/"web"` com `grounded=True` — a
+# telemetria conta sucesso, `scripts/lacunas.py` rotula "coberto" e a busca
+# externa nunca chega a ser tentada (VET-1).
+#
+# O casamento é preso ao VOCABULÁRIO DE META-RESPOSTA (informação, trecho,
+# contexto, base, dado, menção) logo depois de uma negação — nunca a uma negação
+# solta: "não há prazo fixo para o trancamento" é resposta legítima. Cobre as
+# formas em PT (as observadas) e as equivalentes em EN, pelo mesmo motivo que
+# `_RE_PALAVRA_SOLTA` cobre "INSUFFICIENT": o modelo às vezes recusa no idioma
+# do contexto.
+_RE_RECUSA_PROSA = re.compile(
+    r"""(?ix)
+      n[ãa]o \s+ (?:
+          (?: h[áa]\w* | existe[m]? | consta\w* | possu\w+ | cont[ée]m\w*
+            | tem | t[êe]m | apresenta\w* | traz\w* | menciona\w* )
+              \s+ (?: nenhum[ao]? \s+ )?
+              (?: informa\w+ | dado | dados | detalhe\w* | men[çc]\w+ | refer[êe]ncia\w* )
+        | (?: foi | é | e | ser[áa] | est[áa] ) \s+ poss[íi]vel \s+
+              (?: responder | encontrar | fornecer | atender | informar
+                | determinar | localizar | precisar | confirmar | identificar )
+        | (?: encontrei | localizei | identifiquei
+            | consegui \s+ (?: encontrar | localizar ) )
+        | posso \s+ (?: responder | ajudar | fornecer | atender | confirmar )
+      )
+    | (?: o[s]? \s+ trecho[s]? | o \s+ contexto | a \s+ base
+        | o[s]? \s+ documento[s]? | o[s]? \s+ material\w* ) \s+
+        (?: fornecid\w+ \s+ | dispon\w+ \s+ | recuperad\w+ \s+ | acima \s+ )?
+        n[ãa]o \s+ (?: cont[ée]m\w* | traz\w* | menciona\w* | aborda\w* | cobre\w*
+                     | especifica\w* | detalha\w* | possu\w* | apresenta\w*
+                     | inclu\w* | permite\w* | trazem )
+    | no \s+ information | not \s+ (?: possible | able | enough \s+ information )
+    | unable \s+ to | does \s+ not \s+ (?: contain | mention | provide | specify | include )
+    | could \s+ not \s+ find | couldn't \s+ find
+    | i \s+ (?: cannot | can't | could \s+ not ) \s+ (?: find | provide | answer )
+    """,
+)
+
+# A recusa em prosa é FRONT-LOADED: nas ocorrências reais ela abre o texto
+# ("Infelizmente, não há..."), e mesmo a resposta que depois tenta compensar
+# ("...mas seguem outros contatos") abre com a recusa. Casar só nessa janela
+# curta separa isso de uma resposta real que, lá pelo meio, cita de passagem
+# uma limitação da fonte ("o material não detalha o tamanho máximo de anexo").
+_JANELA_RECUSA_PROSA = 160
+
 
 def eh_insuficiente(texto: str) -> bool:
     """O LLM vetou o contexto? Procura o marcador em qualquer posição do texto.
 
-    Duas camadas, porque o modelo erra de dois jeitos diferentes:
+    Três camadas, porque o modelo erra de três jeitos diferentes:
 
     1. o sentinela delimitado, em qualquer posição — a instrução do prompt pede
        "responda o marcador e mais nada", mas o modelo às vezes o embrulha num
@@ -79,19 +128,98 @@ def eh_insuficiente(texto: str) -> bool:
        aparece em texto natural;
     2. a palavra solta (`INSUFICIENTE`/`INSUFFICIENT`) em resposta curta — caso
        de o modelo ignorar os delimitadores ou traduzir o marcador, e de
-       entradas de cache gravadas antes desta versão.
+       entradas de cache gravadas antes desta versão;
+    3. a recusa em PROSA, sem marcador nenhum ("não há informações específicas
+       sobre X nos trechos fornecidos") — proibida no prompt e ainda assim
+       recorrente (VET-1). Casada só na abertura do texto e presa ao
+       vocabulário de meta-resposta, não a uma negação solta (ver
+       `_RE_RECUSA_PROSA`).
 
-    O corte por tamanho na camada 2 é o que separa "o modelo está recusando" de
-    "a resposta legítima usa a palavra". Na dúvida o certo é vetar: um falso
-    positivo só custa uma tentativa a mais (busca externa, depois secretaria),
-    enquanto um falso negativo bota o marcador cru na tela do aluno.
+    O corte por tamanho/janela nas camadas 2 e 3 é o que separa "o modelo está
+    recusando" de "a resposta legítima usa a palavra". Na dúvida o certo é
+    vetar: um falso positivo só custa uma tentativa a mais (busca externa,
+    depois secretaria), enquanto um falso negativo bota a recusa crua na tela do
+    aluno e cega a telemetria.
     """
     if _RE_SENTINELA.search(texto):
         return True
-    return (
-        len(texto.strip()) <= _LIMITE_VETO_PALAVRA_SOLTA
-        and bool(_RE_PALAVRA_SOLTA.search(texto))
-    )
+    limpo = texto.strip()
+    if len(limpo) <= _LIMITE_VETO_PALAVRA_SOLTA and _RE_PALAVRA_SOLTA.search(limpo):
+        return True
+    return bool(_RE_RECUSA_PROSA.search(limpo[:_JANELA_RECUSA_PROSA]))
+
+
+# VET-2 — a recusa de COMPLIANCE: o modelo se nega a OBEDECER o pedido. É outra
+# coisa que o veto de contexto (`eh_insuficiente`): lá o modelo diz "os trechos
+# não cobrem a pergunta"; aqui ele diz "eu não vou fazer isso". Acontece quando
+# um jailbreak / pedido abusivo passa pelo guardrail léxico — que não pega
+# paráfrase nem outro idioma (ver app/agent/guardrail.py) — e o próprio modelo
+# recusa, quase sempre EM INGLÊS ("I'm sorry, but I can't comply with that.").
+#
+# Sem detecção, esse texto sai como `origem="base"`, `grounded=True`: inglês na
+# tela do aluno e a telemetria contando um jailbreak como resposta fundamentada
+# (Q17, eval/analises/analise-telemetria-2026-08-28.md §6.3). O desfecho certo é
+# o MESMO do guardrail — `origem="encaminhado"`, texto PT-BR de contato —, não a
+# busca externa (a web não responderia a "ignore suas regras").
+#
+# BILÍNGUE e por ESTRUTURA, não por lista de frases (o frasado de recusa é
+# infinito): modal de negação ("não posso/vou", "can't/cannot/won't/unable to")
+# + verbo de AÇÃO recusada ("cumprir/atender a esse pedido/ajudar com isso",
+# "comply/assist/help with that/do that"), OU um apelo a diretriz ("contra
+# minhas diretrizes", "against my guidelines"). O vínculo com verbo de AÇÃO é o
+# que evita colidir com "não posso fornecer essa informação" (falta de
+# contexto, já tratada antes) — "fornecer informação" não é ação recusada.
+_RE_RECUSA_COMPLIANCE = re.compile(
+    r"""(?ix)
+    # --- PT: modal de negação + verbo de AÇÃO recusada -------------------------
+      n[ãa]o \s+ (?: posso | vou | irei | poderei | consigo | pretendo )
+        (?: \s+ (?! fornecer | dar | encontrar | localizar | informar | garantir ) \w+ ){0,3}? \s+
+        (?: cumprir | obedecer | acatar | executar
+          | seguir \s+ (?: essa | esse | esta | este | a | o ) \s+ (?: instru\w+ | ordem | pedido | solicita\w+ | comando )
+          | atender \s+ (?: a \s+ )? (?: esse | essa | esta | este | ao | o | a ) \s+ (?: pedido | solicita\w+ )
+          | ajudar \s+ (?: com \s+ (?: isso | isto | esse | essa | esta | este ) | nisso | nessa | nesse )
+          | te \s+ ajudar \s+ (?: com \s+ (?: isso | isto ) | nisso )
+          | fazer \s+ (?: isso | isto )
+          | realizar \s+ (?: essa | esse | esta | este ) \s+ (?: a[çc]\w+ | tarefa | opera\w+ )
+          | participar \s+ (?: disso | dessa | desse ) )
+    | n[ãa]o \s+ (?: é | seria ) \s+ (?: apropriado | adequado | [ée]tico ) \s+ (?: responder | atender | fazer | ajudar | fornecer )
+    | (?: isso \s+ (?: vai \s+ )? contra | isso \s+ viola\w* | est[áa] \s+ fora \s+ d[ao]s? ) \s+
+        (?: (?: as \s+ )? minhas? \s+ )?
+        (?: diretrizes | pol[íi]ticas | princ[íi]pios | orienta\w+ | regras \s+ de \s+ uso )
+    # --- EN: (I'm/I am)? + modal de negação + verbo de AÇÃO recusada ----------
+    #  can't = can '? t   |   won't = wo n '? t   |   wouldn't = would n '? t
+    | \b i \s* (?: 'm | am )? \s* (?: cannot | can '? t | can \s+ not | wo n '? t | will \s+ not
+                                   | am \s+ not \s+ able \s+ to | 'm \s+ not \s+ able \s+ to | must \s+ not )
+        (?: \s+ (?! provide | find | locate | give | share ) \w+ ){0,3}? \s+
+        (?: comply | obey | assist | help \s+ (?: with | you \s+ with )
+          | do \s+ (?: that | this ) | continue \s+ with | proceed \s+ with | fulfill
+          | engage \s+ (?: with | in ) | participate \s+ in | go \s+ along \s+ with )
+    | \b i \s+ (?: must | have \s+ to | 'll \s+ have \s+ to | will \s+ have \s+ to ) \s+ decline
+    | (?: sorry | apolog\w+ ) [,.!]? \s+ (?: but \s+ )? i \s* (?: 'm | am )? \s*
+        (?: cannot | can '? t | can \s+ not | wo n '? t )
+    | against \s+ my \s+ (?: guidelines | policies | principles | programming | instructions | rules )
+    | as \s+ an \s+ ai \b (?: [\s,;:]+ \w+ ){0,8}? [\s,;:]+ (?: cannot | can '? t | wo n '? t | not \s+ able \s+ to | must \s+ not )
+    | it \s+ (?: would \s+ not | would n '? t | is \s+ not | is n '? t ) \s+ be \s+ (?: appropriate | ethical )
+    """,
+)
+
+# Mesma lógica de janela das outras camadas: a recusa de compliance é
+# front-loaded (o modelo recusa e só depois explica). Casar só na abertura evita
+# pegar uma resposta legítima que mais adiante discuta, como conteúdo, o que um
+# assistente "não pode fazer".
+_JANELA_RECUSA_COMPLIANCE = 240
+
+
+def eh_recusa_de_compliance(texto: str) -> bool:
+    """O modelo se recusou a OBEDECER o pedido (não a responder por falta de
+    contexto)? Ver `_RE_RECUSA_COMPLIANCE` — casa PT e EN, por estrutura.
+
+    Serve à rede de segurança de `responder.answer` (VET-2): uma recusa dessas
+    que passou como resposta vira o mesmo encaminhamento do guardrail, com texto
+    em PT-BR, em vez de sair `origem="base"` em inglês.
+    """
+    return bool(_RE_RECUSA_COMPLIANCE.search(texto.strip()[:_JANELA_RECUSA_COMPLIANCE]))
+
 
 SYSTEM = (
     """Você é um assistente de suporte acadêmico de uma instituição de ensino \

@@ -485,6 +485,21 @@ def test_ordem_padrao_da_cadeia(config):
     assert _nomes(construir_providers()) == ["gemini", "groq", "openrouter"]
 
 
+def test_teto_de_tokens_de_saida_chega_a_todo_provider(config, monkeypatch):
+    """VET-3: `LLM_MAX_TOKENS` tem que ser aplicado em TODA a cadeia, não só no
+    primeiro elo — senão o fallback para Groq/OpenRouter continua sem teto de
+    saída. Os dois SDKs usam nomes diferentes: `max_output_tokens` no
+    langchain-google-genai, `max_tokens` (por chamada) no da OpenAI."""
+    monkeypatch.setattr(config, "hf_token", "chave-hf")
+    monkeypatch.setattr(config, "llm_max_tokens", 1400)
+
+    por_nome = {p.nome: p for p in construir_providers()}
+
+    assert por_nome["gemini"]._llm.max_output_tokens == 1400
+    for nome in ("huggingface", "groq", "openrouter"):
+        assert por_nome[nome].max_tokens == 1400
+
+
 def test_huggingface_entra_como_segundo_elo_quando_tem_token(config, monkeypatch):
     """Com HF_TOKEN preenchido, `huggingface` ocupa o 2º lugar da ordem padrão —
     entre Gemini e Groq, reaproveitando a mesma chave dos embeddings locais."""

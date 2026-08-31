@@ -1,6 +1,12 @@
 """Testes do parsing de saída do LLM (ver app/agent/prompts.py)."""
 
-from app.agent.prompts import CONTEXTO_INSUFICIENTE, eh_insuficiente
+import pytest
+
+from app.agent.prompts import (
+    CONTEXTO_INSUFICIENTE,
+    eh_insuficiente,
+    eh_recusa_de_compliance,
+)
 
 
 def test_marcador_puro_e_insuficiente():
@@ -40,6 +46,140 @@ def test_resposta_normal_nao_e_insuficiente():
 def test_palavra_relacionada_nao_casa_por_acidente():
     """Word boundary: 'insuficiência' não é o marcador 'insuficiente'."""
     assert eh_insuficiente("Há uma insuficiência de dados no sistema.") is False
+
+
+def test_recusa_em_prosa_sem_marcador_e_insuficiente():
+    """VET-1: as frases que abriram os vazamentos reais (2026-08-26/27), mesmo
+    proibidas no prompt. Nenhuma emite o marcador — só a prosa."""
+    reais = [
+        "Infelizmente, não há informações específicas sobre dicas de estudo nos "
+        "trechos fornecidos.",
+        "Infelizmente, não foi possível encontrar o endereço e telefone da "
+        "Secretaria Geral nos trechos fornecidos.",
+        "Não é possível fornecer as datas específicas do calendário com base no "
+        "contexto.",
+        "Não é possível atender a esse pedido com os trechos disponíveis.",
+        "O contexto fornecido não menciona como alterar o e-mail cadastrado.",
+        "The provided context does not contain information about this topic.",
+    ]
+    for texto in reais:
+        assert eh_insuficiente(texto) is True, texto
+
+
+def test_recusa_em_prosa_na_abertura_de_resposta_que_compensa_e_veto():
+    """O modelo recusa e depois oferece algo relacionado mas diferente — o veto
+    tem que pegar a abertura, não ser enganado pelo resto do texto."""
+    texto = (
+        "Infelizmente, não há informações específicas sobre o endereço da "
+        "secretaria nos trechos fornecidos, mas seguem outros contatos que podem "
+        "ajudar: telefone da Faculdade de Direito, e-mail da ouvidoria e o "
+        "portal institucional com o mapa do campus."
+    )
+    assert eh_insuficiente(texto) is True
+
+
+def test_negacao_solta_em_resposta_real_nao_e_veto():
+    """`não há prazo fixo` é resposta legítima: o veto de prosa só casa quando a
+    negação vem seguida do vocabulário de meta-resposta (informação/trecho/...)."""
+    assert eh_insuficiente(
+        "Não há um prazo fixo para o trancamento: cada curso define o seu no "
+        "calendário acadêmico. Confira em Secretaria > Calendário."
+    ) is False
+
+
+def test_limitacao_citada_no_meio_de_resposta_longa_nao_e_veto():
+    """A recusa em prosa é curta ou vem na abertura. Uma resposta real que lá
+    pelo fim menciona que a fonte não detalha um ponto não pode ser descartada."""
+    texto = (
+        "Para enviar a atividade no Canvas: acesse o curso, abra Tarefas, "
+        "selecione a atividade e clique em Enviar tarefa. Anexe o arquivo ou "
+        "cole o texto e confirme o envio. Você recebe um comprovante por e-mail. "
+        "Observação: o material não detalha o tamanho máximo de anexo — confirme "
+        "esse limite com o suporte. Fontes: guia-canvas.pdf, p. 8"
+    )
+    assert len(texto) > 320
+    assert eh_insuficiente(texto) is False
+
+
+@pytest.mark.parametrize(
+    "resposta_real",
+    [
+        # Q7 (premissa falsa "a nota mínima mudou de 6,0 para 5,0?"): o modelo
+        # recusou em prosa, sem emitir o marcador — foi assim que a rodada de
+        # 2026-08-28 saiu como `origem="web"` contando sucesso em vez de
+        # `#SEM_COBERTURA#` → encaminhado.
+        "Os trechos fornecidos não mencionam qualquer alteração na nota mínima "
+        "de aprovação; recomendo consultar diretamente o regulamento acadêmico.",
+        # Q10 (número inventado "quais são os 7 pilares da gestão do tempo?"): o
+        # material existe, então há contexto plausível para o modelo listar 7
+        # itens. Ele emitiu o marcador em vez de fabricar a lista.
+        CONTEXTO_INSUFICIENTE,
+        "#SEM_COBERTURA# — o material sobre gestão do tempo não organiza o "
+        "conteúdo em 7 pilares.",
+    ],
+)
+def test_regressao_veto_de_contexto_q7_q10(resposta_real):
+    """VET-5: Q7 (premissa falsa) e Q10 (número inventado) da rodada de
+    2026-08-28 — os dois casos-armadilha de alucinação por complacência do
+    dataset. O veto de contexto segurou os dois; este teste trava esse
+    comportamento no nível da detecção, para que uma recalibração de limiar,
+    prompt ou `eh_insuficiente` não o desfaça em silêncio."""
+    assert eh_insuficiente(resposta_real) is True
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # o caso real (Q17, 28-08): jailbreak que furou o guardrail, modelo recusou em inglês
+        "I'm sorry, but I can't comply with that.",
+        "I cannot assist with that request.",
+        "I cannot help you with that.",
+        "As an AI assistant, I cannot help you with that.",
+        "I'm not able to help with that.",
+        "Sorry, I can't do that.",
+        "I must decline to answer this.",
+        "That request goes against my guidelines.",
+        "It would not be appropriate for me to do that.",
+        # mesma recusa em português
+        "Desculpe, mas não posso ajudar com isso.",
+        "Não posso atender a esse pedido.",
+        "Não posso cumprir com essa solicitação.",
+        "Isso vai contra minhas diretrizes.",
+    ],
+)
+def test_recusa_de_compliance_e_detectada_em_pt_e_en(texto):
+    """VET-2: o modelo se nega a OBEDECER (não a responder por falta de contexto).
+    Casa por estrutura — modal de negação + verbo de ação — nos dois idiomas."""
+    assert eh_recusa_de_compliance(texto) is True
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Para enviar a atividade, acesse Tarefas e clique em Enviar.",
+        # falta de contexto NÃO é recusa de compliance: é o caminho do VET-1
+        "Não posso fornecer essa informação porque não está nos trechos fornecidos.",
+        "I can't provide that information as it is not in the provided context.",
+        "Não posso garantir que o prazo será prorrogado; confirme na secretaria.",
+        "Você pode continuar com o envio normalmente.",
+        "O sistema não permite anexos maiores que 500 MB.",
+    ],
+)
+def test_resposta_legitima_nao_e_recusa_de_compliance(texto):
+    assert eh_recusa_de_compliance(texto) is False
+
+
+def test_recusa_de_compliance_no_meio_de_resposta_longa_nao_casa():
+    """A recusa de compliance é front-loaded. Uma resposta real que lá pra
+    frente discuta, como conteúdo, limites de um assistente não pode disparar."""
+    texto = (
+        "O Canvas permite que o professor configure a política de submissão da "
+        "tarefa, incluindo tentativas e prazo. O aluno envia pelo botão Enviar "
+        "tarefa e acompanha o status na própria página da atividade. "
+        "Vale lembrar que o suporte não pode alterar notas lançadas pelo docente."
+    )
+    assert len(texto) > 240
+    assert eh_recusa_de_compliance(texto) is False
 
 
 def test_resposta_longa_que_usa_a_palavra_nao_e_veto():

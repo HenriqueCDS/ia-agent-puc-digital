@@ -3,6 +3,8 @@
 import hashlib
 import logging
 
+from dataclasses import replace
+
 from langchain_core.language_models import BaseChatModel
 
 from app.agent.preprocess import normalize
@@ -12,12 +14,13 @@ from app.agent.prompts import (
     ANSWER_PROMPT_WEB,
     SEM_CONTEXTO,
     eh_insuficiente,
+    eh_recusa_de_compliance,
     separar_topico,
 )
 from app.agent import guardrail
 from app.agent.triagem import classificar
 from app.agent.web_fallback import buscar_na_web, fonte_permitida, termo_bloqueado
-from app.core import telemetry
+from app.core import pii, telemetry
 from app.core.config import CONTATO_PADRAO, settings
 from app.core.models import Answer, Query, RetrievedChunk
 from app.db.response_cache import get_cached_answer, set_cached_answer
@@ -67,6 +70,32 @@ def _resolver_llm(query: Query, llm: BaseChatModel | None) -> BaseChatModel:
     if query.modelo:
         return cadeia_para_modelo(query.modelo)
     return get_chat_model()
+
+
+def _sem_pii(query: Query) -> Query:
+    """Mascara identificador pessoal / credencial do TEXTO da pergunta antes de
+    ele sair da máquina — o prompt do provedor de LLM (EUA) e a query da busca
+    web (PII-1 / PII-2).
+
+    `pii.mascarar` já rodava, mas só nos campos DERIVADOS e persistidos
+    (`topico`, `erro`, `resposta`, em `telemetry.registrar`). A pergunta CRUA
+    seguia para `llm.invoke` e `buscar_na_web` com CPF, RA, e-mail, telefone e a
+    senha que o aluno cola no texto ("minha senha é Aluno@2026, não entra").
+
+    A DETECÇÃO continua sobre o texto original: `telemetry.registrar` roda
+    `pii.detectar` antes daqui, então `registro.pii` e o WARNING de auditoria
+    não se perdem. Aqui é só contenção de saída.
+
+    Mascarar, não recusar (decisão do backlog): "não consigo acessar, meu RA é
+    [ra]" é perfeitamente respondível, e barrar toda pergunta com RA deixaria o
+    agente inútil — é a metade das perguntas de acesso. `dataclasses.replace`
+    em vez de mutar: o objeto original ainda é o que a telemetria referencia.
+    """
+    limpo = pii.mascarar(query.text)
+    if limpo == query.text:
+        return query
+    logger.info("PII na pergunta mascarada antes de sair para provedor/web")
+    return replace(query, text=limpo)
 
 
 # Diferenças que não mudam a resposta: caixa, espaço repetido e a pontuação
@@ -230,6 +259,29 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
     ) as registro:
         resultado = _responder(query, llm, registro)
 
+        # VET-2 — rede de segurança para a recusa de COMPLIANCE: o modelo se
+        # negou a obedecer o pedido (quase sempre em inglês) e esse texto passou
+        # como resposta. É um jailbreak/abuso que furou o guardrail léxico (que
+        # não pega paráfrase nem outro idioma). Ao contrário do veto de contexto
+        # abaixo, a web não ajudaria — então o desfecho é o mesmo do guardrail:
+        # `origem="encaminhado"`, texto PT-BR de contato, e o assunto "fora de
+        # escopo" com `assunto_origem="guardrail"` (que `scripts.lacunas` já
+        # filtra). Checado aqui, no funil único, porque a recusa pode vir tanto
+        # do ramo da base quanto do da web.
+        if resultado.origem not in ("nenhuma", "encaminhado") and eh_recusa_de_compliance(
+            resultado.text
+        ):
+            logger.warning(
+                "modelo recusou o pedido em texto livre (origem=%s) — provável jailbreak "
+                "que passou pelo guardrail; encaminhando",
+                resultado.origem,
+            )
+            registro.recusa_modelo = True
+            _registrar_assunto(registro, guardrail.ASSUNTO, "guardrail")
+            resultado = Answer(
+                text=CONTATO_PADRAO, sources=[], grounded=False, origem="encaminhado"
+            )
+
         # Rede de segurança, e o único ponto por onde TODA resposta passa: se um
         # marcador de recusa escapou, ele vira o encaminhamento para a
         # secretaria em vez de ir cru para o aluno.
@@ -288,6 +340,14 @@ def _responder(
     concatenada aqui. Com três ou mais fontes assim, o roteamento passa a valer
     como tool calling, tendo `retrieve` e `buscar_na_web` como tools.
     """
+    # ANTES DE TUDO: mascara CPF/RA/e-mail/telefone/senha do texto da pergunta.
+    # Feito aqui, no funil único, e não em cada `format_messages`/`buscar_na_web`
+    # — todo caminho abaixo (guardrail, triagem, retrieval, base, web) já opera
+    # sobre a versão limpa, e cada fonte de contexto nova (ver o PONTO DE
+    # EXTENSÃO acima) herda a contenção de graça. A detecção para a telemetria
+    # já rodou sobre o texto original em `telemetry.registrar`.
+    query = _sem_pii(query)
+
     # ANTES DA TRIAGEM: pedido de ataque/abuso (injeção de prompt, exfiltração de
     # segredo, execução não autorizada, código de exploit) é encaminhado para o
     # suporte sem tocar em RAG, web nem LLM. Mesmo desfecho da triagem

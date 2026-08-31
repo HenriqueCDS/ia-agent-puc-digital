@@ -228,6 +228,7 @@ def _gemini(modelo: str | None = None) -> LLMProvider | None:
         modelo=modelo or settings.chat_model,
         timeout=settings.llm_timeout,
         tentativas=settings.llm_tentativas_por_provider,
+        max_tokens=settings.llm_max_tokens,
     )
 
 
@@ -240,6 +241,7 @@ def _huggingface(modelo: str | None = None) -> LLMProvider | None:
         modelo=modelo or settings.hf_model,
         timeout=settings.llm_timeout,
         tentativas=settings.llm_tentativas_por_provider,
+        max_tokens=settings.llm_max_tokens,
         base_url=settings.hf_base_url or HUGGINGFACE_BASE_URL,
     )
 
@@ -253,6 +255,7 @@ def _groq(modelo: str | None = None) -> LLMProvider | None:
         modelo=modelo or settings.groq_model,
         timeout=settings.llm_timeout,
         tentativas=settings.llm_tentativas_por_provider,
+        max_tokens=settings.llm_max_tokens,
         base_url=settings.groq_base_url or GROQ_BASE_URL,
     )
 
@@ -266,6 +269,7 @@ def _openrouter(modelo: str | None = None) -> LLMProvider | None:
         modelo=modelo or settings.openrouter_model,
         timeout=settings.llm_timeout,
         tentativas=settings.llm_tentativas_por_provider,
+        max_tokens=settings.llm_max_tokens,
         base_url=settings.openrouter_base_url or OPENROUTER_BASE_URL,
     )
 

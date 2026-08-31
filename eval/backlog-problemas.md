@@ -41,18 +41,18 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Feito | ID | Prio | Problema | Onde | Ação | Herdado | Resolvido em |
 |---|---|---|---|---|---|---|---|
-| [ ] | VET-1 | 🔴 | Recusa em prosa vaza como `origem=web` — `web_insuficiente`/`veto_escapou` `null`, telemetria conta sucesso e `lacunas` rotula "coberto (amarelo)" (Q7; 26: 8/11/15; 27: Q15/Q24/Q9r2) | `prompts.eh_insuficiente`, `SYSTEM_WEB` | Proibição de frase no prompt **ainda fura**; precisa de detecção não-léxica: classificar "recusa" pós-resposta → `origem` de recusa | 🔧 | |
-| [ ] | VET-2 | 🟠 | Modelo recusa **em inglês** e é classificado `base`/`grounded` em vez de recusa (Q17) | `responder`, `prompts.SYSTEM` | Detectar recusa em qualquer idioma → `origem` de recusa + texto PT-BR | ⏳ | |
-| [ ] | VET-3 | 🟠 | Sem `max_tokens` em nenhum provider — Q10 gerou 1450 tokens, Q25 1729, antes do veto | `app/providers/` | `max_tokens` ~800–1000 por provider | ⏳ | |
+| [x] | VET-1 | 🔴 | Recusa em prosa vaza como `origem=web` — `web_insuficiente`/`veto_escapou` `null`, telemetria conta sucesso e `lacunas` rotula "coberto (amarelo)" (Q7; 26: 8/11/15; 27: Q15/Q24/Q9r2) | `prompts.eh_insuficiente`, `SYSTEM_WEB` | Feito: 3ª camada em `eh_insuficiente` — `_RE_RECUSA_PROSA` casa a recusa em prosa (PT+EN) **presa ao vocabulário de meta-resposta** (informação/trecho/contexto/base), nunca a negação solta ("não há prazo fixo" não casa), e só na janela inicial (`_JANELA_RECUSA_PROSA=160` — a recusa real é front-loaded). Reusa os 3 pontos de veto que já compartilham a função: base→web, web→secretaria, rede de `answer()`; `web_insuficiente`/`veto_escapou` deixam de vir `null`. **Léxico primeiro** (decisão): o classificador não-léxico fica como escalada se a telemetria mostrar forma nova furando | ✅ | 2026-08-31 |
+| [x] | VET-2 | 🟠 | Modelo recusa **em inglês** e é classificado `base`/`grounded` em vez de recusa (Q17) | `responder`, `prompts.SYSTEM` | Feito: `prompts.eh_recusa_de_compliance` (`_RE_RECUSA_COMPLIANCE`) casa a recusa de **compliance** (o modelo se nega a OBEDECER, ≠ falta de contexto do VET-1) **por estrutura, PT+EN** — modal de negação + verbo de ação recusada ("não posso cumprir/atender esse pedido", "I can't comply/assist with that"), + apelo a diretriz. Preso a verbo de AÇÃO → não colide com "não posso fornecer essa informação". Rede de segurança de `answer()` converte no **mesmo desfecho do guardrail** (`origem="encaminhado"`, `CONTATO_PADRAO` PT-BR, assunto "fora de escopo"/`guardrail`), sem tentar web. Nova coluna `telemetry.recusa_modelo`. Fix real do Q17 é o guardrail pegar a paráfrase (**TRI-4**) — isto é a defesa em profundidade | ✅ | 2026-08-31 |
+| [x] | VET-3 | 🟠 | Sem `max_tokens` em nenhum provider — Q10 gerou 1450 tokens, Q25 1729, antes do veto | `app/providers/` | Feito: `settings.llm_max_tokens` (**1400** — folga sobre os ~800–1000 da análise p/ não cortar procedimento longo) traduzido em cada família de SDK: `max_output_tokens` no Gemini, `max_tokens` por chamada no OpenAI-compat. Aplicado nas 4 fábricas de `chain.py`. Teste garante que o teto chega em TODA a cadeia, não só no 1º elo | ✅ | 2026-08-31 |
 | [ ] | VET-4 | 🟠 | Sem suíte de fidelidade automatizada — só 3 citações conferidas à mão | `tests/` | 15–20 perguntas com resposta-referência do PDF, LLM-judge ou similaridade | ⏳ | |
-| [ ] | VET-5 | 🟡 | Fixar como regressão: alucinação por complacência **não** ocorreu (Q7 premissa falsa, Q10 número inventado) | `tests/` | Teste de não-regressão do veto de contexto com Q7/Q10 | ⏳ | |
+| [x] | VET-5 | 🟡 | Fixar como regressão: alucinação por complacência **não** ocorreu (Q7 premissa falsa, Q10 número inventado) | `tests/` | Feito (= T-6): regressão em 2 níveis — `test_prompts.py` trava a detecção (`eh_insuficiente` pega as respostas reais de Q7/Q10 de 28-08); `test_responder.py` cobre o caminho completo (base com chunks plausíveis + modelo recusa → não vaza como `grounded`, cai p/ secretaria) | ✅ | 2026-08-31 |
 
 ## 4. LGPD / PII na entrada (Bloco C)
 
 | Feito | ID | Prio | Problema | Onde | Ação | Herdado | Resolvido em |
 |---|---|---|---|---|---|---|---|
-| [ ] | PII-1 | 🔴 | CPF/RA/e-mail vão crus ao provider LLM (EUA) — `pii.mascarar` só age nos campos persistidos, `query.text` vai cru p/ `_format_context`/`invoke`/`buscar_na_web` (Q11, Q13; 27: Q5) | `responder._responder`, `app/core/pii.py` | `pii.detectar(query.text)` não-vazio → mascarar `query.text` antes de `_format_context`/`buscar_na_web`. Preferir mascarar a recusar | ⏳ | |
-| [ ] | PII-2 | 🔴 | "senha"/"password" não é categoria de `pii.py` — credencial `'Aluno@2026'` seguiu p/ o Gemini (Q12; 27: Q5) | `app/core/pii.py` | Padrão `(?i)\b(senha\|password)\b[:\s'"]+\S+`; combinar com PII-1 | 🔧 | |
+| [x] | PII-1 | 🔴 | CPF/RA/e-mail vão crus ao provider LLM (EUA) — `pii.mascarar` só age nos campos persistidos, `query.text` vai cru p/ `_format_context`/`invoke`/`buscar_na_web` (Q11, Q13; 27: Q5) | `responder._responder`, `app/core/pii.py` | Feito: `responder._sem_pii` mascara `query.text` no topo de `_responder` (antes de guardrail/triagem/retrieval, funil único; `dataclasses.replace`, objeto original preservado p/ a telemetria). Detecção (`registro.pii` + WARNING) segue sobre o texto original em `telemetry.registrar`. Mascarar, não recusar | ✅ | 2026-08-31 |
+| [x] | PII-2 | 🔴 | "senha"/"password" não é categoria de `pii.py` — credencial `'Aluno@2026'` seguiu p/ o Gemini (Q12; 27: Q5) | `app/core/pii.py` | Feito: categoria `senha` — `_SENHA` (palavra + conector `:`/`=`/`é` ou aspas + valor); só conta com valor de cara de credencial (dígito/símbolo/aspas), nunca "esqueci minha senha". Mascarada 1º na ordem (antes do e-mail). Entra no mesmo caminho do PII-1 | ✅ | 2026-08-31 |
 
 ## 5. Triagem / guardrail (Blocos E e F)
 
@@ -93,8 +93,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | T-2 | `test_ingestao` — todo arquivo em `data/raw/` tem loader (não reprova fonte; ver KB-1/KB-4) | KB-1, KB-4 | 2026-08-28 |
 | [ ] | T-3 | Teste ponta a ponta com pgvector + E5 reais no caminho feliz | RET-* | |
 | [x] | T-4 | `test_web_fallback` — allowlist rejeita paths fora dos curados do portal (vestibular, avaliação institucional, LP) | KB-2 | 2026-08-28 |
-| [ ] | T-5 | `test_responder` — recusa do modelo (qualquer idioma) → `origem` de recusa + texto PT | VET-1, VET-2 | |
-| [ ] | T-6 | Regressão do veto de contexto — Q7 (premissa falsa) e Q10 (número inventado) continuam recusando | VET-5 | |
+| [x] | T-5 | `test_responder` — recusa do modelo (qualquer idioma) → `origem` de recusa + texto PT | VET-1, VET-2 | 2026-08-31 |
+| [x] | T-6 | Regressão do veto de contexto — Q7 (premissa falsa) e Q10 (número inventado) continuam recusando | VET-5 | 2026-08-31 |
 | [ ] | T-7 | Re-rodar Q14/Q16 (falharam por infra em 28) | INF-6 | |
 | [ ] | T-8 | Parte-2 OWASP (injeção indireta, DoS por repetição, footprinting, PII por ID) | TRI-3, TRI-4, VET-3 | |
 
@@ -106,16 +106,21 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 |---|---|
 | 1. Infra e método | 8 / 8 |
 | 2. Retrieval / limiar | 5 / 6 |
-| 3. Veto / fidelidade | 0 / 5 |
-| 4. LGPD / PII | 0 / 2 |
+| 3. Veto / fidelidade | 4 / 5 |
+| 4. LGPD / PII | 2 / 2 |
 | 5. Triagem / guardrail | 1 / 6 |
 | 6. Base de conhecimento / web | 3 / 4 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
-| 8. Testes | 2 / 8 |
-| **Total** | **22 / 45** |
+| 8. Testes | 4 / 8 |
+| **Total** | **30 / 45** |
 
 ## Changelog
 
+- **2026-08-31** — PII-1 / PII-2: `responder._sem_pii` mascara `query.text` (CPF/RA/e-mail/telefone/senha) no topo de `_responder`, antes de qualquer saída p/ o provedor de LLM (EUA) ou a busca web. Nova categoria `senha` em `pii.py` (`_SENHA` — palavra + conector/aspas + valor de cara de credencial). Detecção segue sobre o texto original. Testes em `test_pii.py` e `test_responder.py`. README §Privacidade e LGPD atualizado.
+- **2026-08-31** — VET-3 / T-6 (via VET-5): `settings.llm_max_tokens=1400` — teto de saída aplicado em toda a cadeia (`max_output_tokens` no Gemini, `max_tokens` por chamada no OpenAI-compat; 4 fábricas de `chain.py`). `LLM_MAX_TOKENS` no `.env.example`. Regressão do veto de contexto Q7/Q10 em `test_prompts.py` (detecção) e `test_responder.py` (caminho completo). Teste de cadeia em `test_providers.py`.
+- **2026-08-31** — T-5: `test_responder.py`/`test_telemetry.py`/`test_prompts.py` cobrem recusa do modelo em qualquer idioma → encaminhamento + texto PT (via VET-1 e VET-2).
+- **2026-08-31** — VET-2: `prompts.eh_recusa_de_compliance` (`_RE_RECUSA_COMPLIANCE`) — recusa de compliance PT+EN por estrutura; rede de `answer()` converte em `origem="encaminhado"` (desfecho do guardrail), sem web. Nova coluna `telemetry.recusa_modelo`. Testes em `test_prompts.py`, `test_responder.py`, `test_telemetry.py`.
+- **2026-08-31** — VET-1: `eh_insuficiente` ganha 3ª camada — `_RE_RECUSA_PROSA` (recusa em prosa PT+EN, presa ao vocabulário de meta-resposta, casada só na janela inicial `_JANELA_RECUSA_PROSA=160`). Fecha o vazamento de recusa em prosa como `origem="base"/"web"`; roteamento base→web→secretaria inalterado. Testes em `test_prompts.py` (frases reais de 26/27-08 + guardas de falso-positivo), `test_responder.py` e `test_telemetry.py`.
 - **2026-08-30** — RET-4: `EXACT_MATCH_THRESHOLD` 0.90 → 0.87.
 - **2026-08-30** — RET-5: `scripts/chunk_stats.py` (mede a distribuição real de chunk/página); `CHUNK_SIZE` 1000 → 700 (≈ p75 das páginas). Exige reingestão.
 - **2026-08-30** — RET-6: `chunker.deduplicar_similares` — dedup de chunks quase idênticos na ingestão (Jaccard de shingles ≥ `INGEST_DEDUP_SIMILARIDADE`).

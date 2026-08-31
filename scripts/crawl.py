@@ -71,6 +71,22 @@ _HOSTS_PADRAO = tuple(
 )
 
 
+def _habilitar_trust_store_do_so() -> None:
+    """Faz o `requests` confiar nas CAs do SO (Windows/macOS).
+
+    Redes com proxy TLS corporativo apresentam um certificado assinado por uma
+    CA que só está no trust store do sistema, não no bundle do `certifi` que o
+    `requests` usa por padrão — o resultado é `CERTIFICATE_VERIFY_FAILED` e
+    nenhum sitemap "responde". `truststore` redireciona a verificação para o SO.
+    """
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except ImportError:
+        logger.debug("truststore ausente; usando o bundle do certifi")
+
+
 def _sessao() -> requests.Session:
     s = requests.Session()
     s.headers["User-Agent"] = _UA
@@ -260,6 +276,7 @@ def main(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Log página a página."),
 ) -> None:
     logging.basicConfig(level=logging.INFO if verbose else logging.WARNING, format="%(message)s")
+    _habilitar_trust_store_do_so()
 
     alvos = set(host) if host else set(_HOSTS_PADRAO)
     fontes = [f for f in WEB_ALLOWLIST if f.host in alvos]

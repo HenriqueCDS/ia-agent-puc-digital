@@ -247,6 +247,14 @@ class Registro:
     # a resposta virou encaminhamento à secretaria sem tentar a busca externa.
     veto_escapou: bool | None = None
 
+    # VET-2 — o modelo se RECUSOU a obedecer o pedido (não a responder por falta
+    # de contexto) e essa recusa passou como resposta; a rede de segurança de
+    # `responder.answer` a converteu no encaminhamento do guardrail. Nulo em
+    # operação normal. Se aparecer, é um jailbreak / pedido abusivo que furou o
+    # guardrail léxico (paráfrase ou outro idioma) — pauta de calibração do
+    # `guardrail._PADROES`, não de indexação.
+    recusa_modelo: bool | None = None
+
     erro: str | None = None
 
     # Texto da resposta do agente. `None` em operação normal — preencher isto

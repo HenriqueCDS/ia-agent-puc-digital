@@ -16,8 +16,11 @@ Então este módulo tem dois usos distintos, e é importante não confundi-los:
   virar linha no banco.
 
 Sem dependência nova: `re` e mais nada. Não é um detector completo de PII e não
-tenta ser — é um filtro de alto sinal para os quatro identificadores que de fato
-aparecem no suporte acadêmico.
+tenta ser — é um filtro de alto sinal para os identificadores que de fato
+aparecem no suporte acadêmico: CPF, RA/matrícula, e-mail, celular e a SENHA que
+o aluno cola no texto ("minha senha é Aluno@2026, não entra"). A senha não é
+LGPD no sentido estrito, mas é credencial — e o pior lugar para ela parar é o
+prompt que segue para o provedor de LLM (ver `responder._sem_pii`, PII-1/PII-2).
 
 FALSO NEGATIVO É ACEITÁVEL, FALSO POSITIVO NÃO. Um alerta que dispara em número
 de protocolo ou em ano ("2024 2025") vira ruído e é ignorado em duas semanas —
@@ -28,9 +31,10 @@ exige o 9 do celular. Ver os comentários de cada padrão.
 import re
 
 # Ordem de aplicação — cada categoria é mascarada antes da seguinte, e isso não
-# é estilo: e-mail primeiro porque `ra12345678900@puc-campinas.edu.br` casaria
-# CPF dentro do próprio endereço; CPF antes de telefone porque 11 dígitos
-# seguidos casam os dois padrões.
+# é estilo: senha primeiro porque "minha senha é joao@x.com" deve virar
+# "senha é [senha]", não "[email]"; e-mail antes de CPF porque
+# `ra12345678900@puc-campinas.edu.br` casaria CPF dentro do próprio endereço;
+# CPF antes de telefone porque 11 dígitos seguidos casam os dois padrões.
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]*\w\b")
 
 # 000.000.000-00 ou 00000000000. Os separadores são opcionais porque o aluno
@@ -63,6 +67,48 @@ _TELEFONE = re.compile(
     r"(?<!\d)(?:\(\d{2}\)\s*|\b\d{2}[\s.-]\s*)9\d{4}[\s.-]?\d{4}(?!\d)"  # com DDD
     r"|(?<!\d)9\d{4}[\s.-]\d{4}(?!\d)"                                    # sem DDD, com separador
 )
+
+
+# Senha colada no texto: a PALAVRA que a nomeia + um conector (`:`/`=`/`é`) ou
+# aspas + o valor. O conector é o que separa a credencial de "esqueci minha
+# senha" ou "a senha não funciona" — sem valor atribuído não há o que mascarar,
+# e disparar nesses casos é o falso positivo que o cabeçalho proíbe.
+#
+# `valor` é o grupo mascarado; o grupo 1 (aspas) é a rede para "senha 'X'" sem
+# conector. `\1` fecha as aspas quando abriram.
+_SENHA = re.compile(
+    r"""(?ix)
+      \b (?: senha | password | pwd ) \b
+      \s* (?: (?: é | eh | = | : ) \s* | (?=['"]) )
+      (['"]?) (?P<valor> [^\s'"]{3,} ) \1
+    """,
+)
+
+
+def _senha_e_credencial(match: re.Match) -> bool:
+    """O valor após "senha:" parece uma credencial, e não uma palavra comum.
+
+    "minha senha é fraca" / "senha nova" casam o padrão mas não revelam nada —
+    só marca como credencial se o valor tiver dígito ou símbolo (`Aluno@2026`,
+    `123456`) ou tiver vindo entre aspas. Senha só-letras e sem aspas é
+    indistinguível de uma palavra da frase: falso negativo aceitável, falso
+    positivo não (ver o cabeçalho).
+    """
+    if match.group(1):  # veio entre aspas
+        return True
+    return bool(re.search(r"[\d\W_]", _senha_nucleo(match)))
+
+
+def _senha_nucleo(match: re.Match) -> str:
+    """O valor da senha sem a pontuação final da frase.
+
+    "senha é fraca," traz `,` no grupo (o `[^\\s'"]{3,}` é guloso), e `,` é `\\W`
+    — sem esta limpeza toda palavra seguida de vírgula viraria "credencial", e o
+    mascaramento comeria a vírgula junto. Entre aspas não se aplica: ali o
+    delimitador é a própria aspa e o conteúdo inteiro é a senha.
+    """
+    valor = match.group("valor")
+    return valor if match.group(1) else valor.rstrip(".,;:!?")
 
 
 def _cpf_valido(digitos: str) -> bool:
@@ -102,6 +148,8 @@ def detectar(texto: str) -> list[str]:
         return []
 
     encontrados = []
+    if any(_senha_e_credencial(m) for m in _SENHA.finditer(texto)):
+        encontrados.append("senha")
     if _EMAIL.search(texto):
         encontrados.append("email")
     if any(_cpf_e_identificador(m) for m in _CPF.finditer(texto)):
@@ -127,6 +175,13 @@ def mascarar(texto: str | None) -> str | None:
     if not texto:
         return texto
 
+    # Só o núcleo da senha vira `[senha]` — a palavra que nomeia ("senha é
+    # [senha]") é contexto útil, e a pontuação da frase fica de fora.
+    texto = _SENHA.sub(
+        lambda m: m.group(0).replace(_senha_nucleo(m), "[senha]", 1)
+        if _senha_e_credencial(m) else m.group(0),
+        texto,
+    )
     texto = _EMAIL.sub("[email]", texto)
     texto = _CPF.sub(lambda m: "[cpf]" if _cpf_e_identificador(m) else m.group(0), texto)
     # Preserva a palavra que nomeia o número (`RA [ra]`), que é contexto útil e

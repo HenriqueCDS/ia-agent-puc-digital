@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: agente_ead
     ports:
-      # 5433 no host: a 5432 já está ocupada por um PostgreSQL nativo instalado
+      # 5434 no host: a 5432 já está ocupada por um PostgreSQL nativo instalado
       # no Windows (serviço postgresql-x64-18). Dentro da rede Docker continua 5432.
       - "5434:5432"
     volumes:

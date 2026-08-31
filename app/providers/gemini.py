@@ -31,7 +31,14 @@ class GeminiProvider(LLMProvider):
 
     nome = "gemini"
 
-    def __init__(self, api_key: str, modelo: str, timeout: float, tentativas: int):
+    def __init__(
+        self,
+        api_key: str,
+        modelo: str,
+        timeout: float,
+        tentativas: int,
+        max_tokens: int,
+    ):
         self.modelo = modelo
         # Guardada só para `listar_modelos` (a CLI de catálogo): o
         # `langchain-google-genai` não expõe o `ListModels` da API, então essa
@@ -51,6 +58,10 @@ class GeminiProvider(LLMProvider):
             temperature=0.1,  # suporte acadêmico: previsibilidade > criatividade
             timeout=timeout,
             max_retries=max(tentativas, 1),
+            # `max_output_tokens` é o nome do parâmetro no langchain-google-genai
+            # para o teto de saída (`max_tokens` no SDK da OpenAI — ver
+            # `openai_compat.py`). Ver `settings.llm_max_tokens` (VET-3).
+            max_output_tokens=max_tokens,
         )
 
     def generate(self, mensagens: list[BaseMessage]) -> AIMessage:

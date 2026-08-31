@@ -81,9 +81,11 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
     FonteWeb(
         host="puc-campinas.edu.br",
         path_prefixes=(
-            "/pos/",       # calendário acadêmico (datas de prova, férias, recesso)
-            "/secretaria-geral/",  # competência da secretaria, procedimentos oficiais
-            "/biblioteca/",        # serviços e regulamentos da biblioteca
+            "/pos/",                  # pós-graduação: calendário acadêmico, datas de prova/recesso
+            "/secretaria-geral/",     # competência da secretaria, procedimentos oficiais
+            "/biblioteca/",           # serviços e regulamentos da biblioteca
+            "/mestrado-e-doutorado/",  # stricto sensu (/relacionamento/mestrado-e-doutorado/ redireciona pra cá)
+            "/atualizacao/",          # cursos de atualização/extensão
         ),
         termos="PUC Digital estudante",
         assunto="puc-digital",
@@ -92,11 +94,12 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
     # dos apps mobile — todos sob /en/kb/).
     FonteWeb(
         host="community.instructure.com",
-         path_prefixes=(
-                    "/en/kb/canvas-lms-instructor-guide",       # calendário acadêmico (datas de prova, férias, recesso)
-                    "/en/kb/canvas-lms-basics-guide",  # competência da secretaria, procedimentos oficiais
-                    "/en/kb/canvas-lms-student-guide",        # serviços e regulamentos da biblioteca
-                ),
+        # `/en/kb/` (não o slug do guia): os guias .../canvas-lms-*-guide são
+        # índices sem conteúdo; os artigos ficam em /en/kb/articles/<id>-<slug> e
+        # um prefixo no slug do guia rejeitaria justamente esses na revalidação
+        # (`fonte_permitida`). `/en/kb/` cobre a KB oficial e já exclui o fórum
+        # de usuários (/t5/, /en/community/). Ver regra 2 no comentário acima.
+        path_prefixes=("/en/kb/",),
         assunto="canvas",
     ),
     # As aulas ao vivo da PUC Digital acontecem em salas do Teams (ver
@@ -555,6 +558,24 @@ class Settings(BaseSettings):
     # langchain-google-genai, repetições depois da primeira no da OpenAI). A
     # tradução é feita em cada provider; ver os comentários lá.
     llm_tentativas_por_provider: int = 1
+
+    # Teto de tokens de SAÍDA por resposta, aplicado em todo provider da cadeia
+    # (VET-3). Sem isto, nada trava a geração: rodadas reais de 2026-08-28
+    # produziram 1450 (Q10) e 1729 (Q25) tokens de saída antes de o veto de
+    # contexto pegar — e é a única defesa concreta contra "liste todos os
+    # procedimentos / repita N vezes" (OWASP consumo ilimitado, ver
+    # eval/perguntas/perguntas-owasp-2026-parte-2.json).
+    #
+    # 1400: uma resposta de suporte acadêmico bem formada cabe com folga em
+    # ~800–1000 tokens; a margem extra evita cortar no meio da frase a resposta
+    # legítima longa (procedimento com muitos passos). `finish_reason="length"`
+    # recorrente na telemetria é o sinal de que ficou apertado — subir aqui, não
+    # deixar o aluno com texto truncado.
+    #
+    # As duas famílias de SDK usam nomes diferentes (`max_output_tokens` no
+    # langchain-google-genai, `max_tokens` no da OpenAI); a tradução é feita em
+    # cada provider, como já acontece com `llm_tentativas_por_provider`.
+    llm_max_tokens: int = 1400
 
     # Permite que o corpo de `/ask` traga `modelo` e escolha com que modelo
     # responder (ver `app/core/models.Query.modelo`). DESLIGADO por padrão, e o

@@ -481,19 +481,34 @@ repetir o RA que o aluno digitou ("acesso ao Canvas do RA 12345678"). Esse campo
 rede de segurança em `responder.answer`: cada ponto de extensão futuro é mais um
 lugar onde dá para esquecer.
 
+**A pergunta também é mascarada ANTES de sair da máquina** (PII-1/PII-2): o
+provedor de LLM roda nos EUA e a busca de fallback vai para o DuckDuckGo, e até
+a correção o `query.text` seguia cru para os dois — CPF, RA, e-mail, telefone e
+a **senha** que o aluno cola no texto ("minha senha é `Aluno@2026`, não entra").
+`responder._sem_pii` roda `pii.mascarar` no topo de `_responder`, antes de
+guardrail/triagem/retrieval, então todo caminho abaixo (base, web e cada fonte
+de contexto nova) opera sobre a versão limpa. **A decisão é mascarar, não
+recusar:** "não consigo acessar, meu RA é `[ra]`" continua respondível, e barrar
+toda pergunta com RA deixaria o agente inútil. A **detecção** (`registro.pii`, o
+WARNING de auditoria) continua sobre o texto original — roda em
+`telemetry.registrar`, antes do mascaramento.
+
 | Mecanismo | O que faz | Onde |
 |---|---|---|
 | Hash da pergunta | Agrupa repetição sem guardar o texto | `telemetry.hash_pergunta` |
-| Alerta de PII | `pii: ["cpf","ra"]` — a **categoria**, nunca o valor | `app/core/pii.py` |
-| Mascaramento | `topico` e `erro` viram `... do RA [ra]` antes de persistir | `telemetry.registrar` |
+| Alerta de PII | `pii: ["cpf","ra","senha"]` — a **categoria**, nunca o valor | `app/core/pii.py` |
+| Mascaramento de saída | `query.text` → `... meu RA é [ra]` antes do LLM e da busca web | `responder._sem_pii` |
+| Mascaramento de persistência | `topico` e `erro` viram `... do RA [ra]` antes de gravar | `telemetry.registrar` |
 | Retenção | 7 dias, apagados na própria escrita | `app/db/telemetry_store.py` |
 
-O detector cobre CPF, RA/matrícula, e-mail e celular. Ele é calibrado para
-**precisão, não recall**: um alerta que dispara em número de protocolo ou em ano
-("2024 2025") vira ruído e é ignorado em duas semanas — aí o vazamento de
-verdade passa junto. Por isso CPF sem pontuação é validado pelos dígitos
-verificadores, RA exige a palavra que o nomeia por perto, e telefone fixo ficou
-de fora de propósito.
+O detector cobre CPF, RA/matrícula, e-mail, celular e senha colada no texto. Ele
+é calibrado para **precisão, não recall**: um alerta que dispara em número de
+protocolo, em ano ("2024 2025") ou em "esqueci minha **senha**" vira ruído e é
+ignorado em duas semanas — aí o vazamento de verdade passa junto. Por isso CPF
+sem pontuação é validado pelos dígitos verificadores, RA exige a palavra que o
+nomeia por perto, telefone fixo ficou de fora, e a senha só conta quando vem
+seguida de um valor com cara de credencial (`senha: X`, `senha é Aluno@2026`),
+nunca só a palavra.
 
 **Limite conhecido:** a tabela `resposta_cache` guarda o texto gerado pelo LLM,
 que em tese poderia ecoar um identificador vindo da pergunta. Não é mascarado
@@ -586,7 +601,7 @@ o sinal que vira pauta de ingestão.
 | `app/db/vector_store.py` | conexão com pgvector |
 | `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |
 | `app/db/telemetry_store.py` | tabela `telemetria` (JSONB), retenção de 7 dias e a consulta de lacunas |
-| `app/core/pii.py` | detecção e mascaramento de RA/CPF/e-mail/telefone (LGPD) |
+| `app/core/pii.py` | detecção e mascaramento de RA/CPF/e-mail/telefone/senha (LGPD) — persistência e saída p/ LLM |
 | `app/api/routers/demo.py` | rota `/demo` — injeta a chave da demo no HTML |
 | `app/static/index.html` | o frontend de demonstração (1 arquivo, sem build) |
 | `scripts/` | CLIs de ingestão, de pergunta, relatório de lacunas e avaliação |

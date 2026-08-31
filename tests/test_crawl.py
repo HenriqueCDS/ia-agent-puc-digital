@@ -31,25 +31,28 @@ class FakeSessao:
         return self.rotas[url]
 
 
+# path_prefixes precisam ser um subconjunto do que a WEB_ALLOWLIST real permite:
+# `descobrir_urls` revalida cada URL do sitemap com `fonte_permitida`, que casa
+# contra a allowlist de produção, não contra esta `_FONTE`.
 _FONTE = FonteWeb(
     host="puc-campinas.edu.br",
-    path_prefixes=("/calendario/", "/biblioteca/"),
+    path_prefixes=("/mestrado-e-doutorado/", "/biblioteca/"),
     assunto="puc-digital",
 )
 
 _SITEMAP = b"""<?xml version="1.0"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://www.puc-campinas.edu.br/calendario/</loc></url>
+  <url><loc>https://www.puc-campinas.edu.br/mestrado-e-doutorado/</loc></url>
   <url><loc>https://www.puc-campinas.edu.br/biblioteca/servicos/</loc></url>
   <url><loc>https://www.puc-campinas.edu.br/vestibular/inscricao/</loc></url>
-  <url><loc>https://www.puc-campinas.edu.br/calendario/2026#rodape</loc></url>
+  <url><loc>https://www.puc-campinas.edu.br/mestrado-e-doutorado/2026#rodape</loc></url>
 </urlset>"""
 
 
 def test_locs_urlset():
     locs, eh_indice = crawl._locs(_SITEMAP)
     assert not eh_indice
-    assert "https://www.puc-campinas.edu.br/calendario/" in locs
+    assert "https://www.puc-campinas.edu.br/mestrado-e-doutorado/" in locs
 
 
 def test_locs_sitemapindex_e_detectado():
@@ -70,8 +73,8 @@ def test_descobrir_urls_filtra_pelos_path_prefixes():
 
     assert urls == [
         "https://www.puc-campinas.edu.br/biblioteca/servicos/",
-        "https://www.puc-campinas.edu.br/calendario/",
-        "https://www.puc-campinas.edu.br/calendario/2026",  # fragmento removido
+        "https://www.puc-campinas.edu.br/mestrado-e-doutorado/",
+        "https://www.puc-campinas.edu.br/mestrado-e-doutorado/2026",  # fragmento removido
     ]
     assert not any("vestibular" in u for u in urls)  # fora dos path_prefixes
 
@@ -89,7 +92,7 @@ def test_descobrir_urls_segue_o_sitemap_index():
     )
 
     urls = crawl.descobrir_urls(sessao, _FONTE)
-    assert "https://www.puc-campinas.edu.br/calendario/" in urls
+    assert "https://www.puc-campinas.edu.br/mestrado-e-doutorado/" in urls
 
 
 def test_extrair_tira_menu_e_rodape():
@@ -110,18 +113,18 @@ def test_extrair_tira_menu_e_rodape():
 
 def test_documento_marca_origem_web_mas_mantem_assunto():
     doc = crawl._documento(
-        "https://www.puc-campinas.edu.br/calendario/", "Calendário", "corpo da página", _FONTE
+        "https://www.puc-campinas.edu.br/mestrado-e-doutorado/", "Calendário", "corpo da página", _FONTE
     )
     assert doc.metadata["assunto"] == "puc-digital"  # NÃO "web" — filtro do retrieval
     assert doc.metadata["categoria"] == "web"
     assert doc.metadata["source_type"] == "web"
-    assert doc.metadata["source_path"] == "https://www.puc-campinas.edu.br/calendario/"
-    assert doc.metadata["source_name"] == "https://www.puc-campinas.edu.br/calendario/"
+    assert doc.metadata["source_path"] == "https://www.puc-campinas.edu.br/mestrado-e-doutorado/"
+    assert doc.metadata["source_name"] == "https://www.puc-campinas.edu.br/mestrado-e-doutorado/"
 
 
 def test_crawl_fonte_dry_run_nao_indexa(monkeypatch):
     monkeypatch.setattr(
-        crawl, "descobrir_urls", lambda s, f: ["https://www.puc-campinas.edu.br/calendario/"]
+        crawl, "descobrir_urls", lambda s, f: ["https://www.puc-campinas.edu.br/mestrado-e-doutorado/"]
     )
 
     def nao_chamar(*a, **k):

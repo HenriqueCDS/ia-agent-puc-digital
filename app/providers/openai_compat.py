@@ -74,12 +74,18 @@ class OpenAICompatibleProvider(LLMProvider):
         base_url: str,
         timeout: float,
         tentativas: int,
+        max_tokens: int,
         headers: dict[str, str] | None = None,
         temperatura: float = 0.1,  # suporte acadêmico: previsibilidade > criatividade
     ):
         self.nome = nome
         self.modelo = modelo
         self.temperatura = temperatura
+        # Teto de saída, aplicado por chamada em `generate` (`max_tokens` é o
+        # nome do parâmetro no SDK da OpenAI; `max_output_tokens` no
+        # langchain-google-genai — ver `gemini.py`). Ver `settings.llm_max_tokens`
+        # (VET-3).
+        self.max_tokens = max_tokens
         # `max_retries` aqui é o do SDK da OpenAI: repetições DEPOIS da primeira
         # chamada. `tentativas=1` (o padrão) vira 0 — uma chamada e ponto. É o
         # oposto da semântica do mesmo nome no Gemini; ver o comentário em
@@ -97,6 +103,7 @@ class OpenAICompatibleProvider(LLMProvider):
             model=self.modelo,
             messages=convert_to_openai_messages(mensagens),
             temperature=self.temperatura,
+            max_tokens=self.max_tokens,
         )
         return _para_ai_message(resposta)
 
@@ -119,6 +126,7 @@ class GroqProvider(OpenAICompatibleProvider):
         modelo: str,
         timeout: float,
         tentativas: int,
+        max_tokens: int,
         base_url: str = GROQ_BASE_URL,
     ):
         super().__init__(
@@ -128,6 +136,7 @@ class GroqProvider(OpenAICompatibleProvider):
             base_url=base_url,
             timeout=timeout,
             tentativas=tentativas,
+            max_tokens=max_tokens,
         )
 
 
@@ -149,6 +158,7 @@ class HuggingFaceProvider(OpenAICompatibleProvider):
         modelo: str,
         timeout: float,
         tentativas: int,
+        max_tokens: int,
         base_url: str = HUGGINGFACE_BASE_URL,
     ):
         super().__init__(
@@ -158,6 +168,7 @@ class HuggingFaceProvider(OpenAICompatibleProvider):
             base_url=base_url,
             timeout=timeout,
             tentativas=tentativas,
+            max_tokens=max_tokens,
         )
 
 
@@ -179,6 +190,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         modelo: str,
         timeout: float,
         tentativas: int,
+        max_tokens: int,
         base_url: str = OPENROUTER_BASE_URL,
         titulo: str = "ia-agent-puc-digital",
     ):
@@ -189,5 +201,6 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             base_url=base_url,
             timeout=timeout,
             tentativas=tentativas,
+            max_tokens=max_tokens,
             headers={"X-Title": titulo},
         )

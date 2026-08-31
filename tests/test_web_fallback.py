@@ -38,9 +38,10 @@ def _resultado(href, body="conteúdo RELEVANTE", title="titulo"):
     "url",
     [
         "https://community.instructure.com/en/kb/articles/661210-how-do-i-submit",
-        "https://www.puc-campinas.edu.br/calendario/",  # path curado do portal
+        "https://www.puc-campinas.edu.br/mestrado-e-doutorado/",  # path curado do portal
         "https://www.puc-campinas.edu.br/biblioteca/servicos/",
         "https://www.puc-campinas.edu.br/secretaria-geral/matriculas/",
+        "https://www.puc-campinas.edu.br/atualizacao/idiomas/",
     ],
 )
 def test_url_oficial_e_permitida(url):
@@ -71,7 +72,7 @@ def test_url_fora_da_allowlist_e_recusada(url):
 
 def test_redirect_do_duckduckgo_e_resolvido_antes_de_validar():
     envolvida = (
-        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.puc-campinas.edu.br%2Fcalendario%2F"
+        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.puc-campinas.edu.br%2Fbiblioteca%2F"
     )
     assert web_fallback.fonte_permitida(envolvida) is not None
 
@@ -95,7 +96,7 @@ def test_snippet_irrelevante_e_cortado_pelo_limiar(monkeypatch):
         web_fallback,
         "_buscar_em",
         lambda fonte, pergunta: [
-            _resultado("https://www.puc-campinas.edu.br/calendario/a", body="texto qualquer")
+            _resultado("https://www.puc-campinas.edu.br/biblioteca/a", body="texto qualquer")
         ],
     )
 
@@ -114,7 +115,7 @@ def test_resultado_relevante_vira_chunk_citando_a_url(monkeypatch):
 
 
 def test_urls_repetidas_entre_fontes_sao_deduplicadas(monkeypatch):
-    url = "https://www.puc-campinas.edu.br/calendario/a"
+    url = "https://www.puc-campinas.edu.br/biblioteca/a"
     monkeypatch.setattr(web_fallback, "_buscar_em", lambda f, p: [_resultado(url)])
 
     chunks = web_fallback.buscar_na_web(Query(text="pergunta"))
@@ -167,7 +168,7 @@ def test_assunto_sem_resultado_amplia_para_allowlist_inteira(monkeypatch):
 
     def buscar(fonte, pergunta):
         if fonte.host == "puc-campinas.edu.br":
-            return [_resultado("https://www.puc-campinas.edu.br/calendario/pagina")]
+            return [_resultado("https://www.puc-campinas.edu.br/biblioteca/pagina")]
         return []
 
     monkeypatch.setattr(web_fallback, "_buscar_em", buscar)
@@ -175,7 +176,7 @@ def test_assunto_sem_resultado_amplia_para_allowlist_inteira(monkeypatch):
     chunks = web_fallback.buscar_na_web(Query(text="como envio atividade?", assunto="canvas"))
 
     assert len(chunks) == 1
-    assert chunks[0].citation == "https://www.puc-campinas.edu.br/calendario/pagina"
+    assert chunks[0].citation == "https://www.puc-campinas.edu.br/biblioteca/pagina"
 
 
 def test_assunto_com_resultado_nao_amplia_a_busca(monkeypatch):
@@ -195,7 +196,7 @@ def test_assunto_com_resultado_nao_amplia_a_busca(monkeypatch):
 
 def test_no_maximo_web_max_chunks_chegam_ao_llm(monkeypatch):
     muitos = [
-        _resultado(f"https://www.puc-campinas.edu.br/calendario/pagina-{i}")
+        _resultado(f"https://www.puc-campinas.edu.br/biblioteca/pagina-{i}")
         for i in range(settings.web_max_chunks + 3)
     ]
     monkeypatch.setattr(web_fallback, "_buscar_em", lambda f, p: muitos)

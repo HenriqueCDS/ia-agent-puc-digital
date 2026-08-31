@@ -28,12 +28,32 @@ CPF_VALIDO = "52998224725"
         ("meu whatsapp é (19) 99123-4567", ["telefone"]),
         ("19 991234567 é meu contato", ["telefone"]),
         ("RA 12345678, cpf 529.982.247-25, email a@b.com", ["cpf", "email", "ra"]),
+        # senha (PII-2): a palavra + conector + um valor com cara de credencial.
+        ("minha senha é Aluno@2026 e não entra", ["senha"]),
+        ("senha: 123456", ["senha"]),
+        ("password=Trocar#1", ["senha"]),
+        ("tentei com a senha 'Puc2026!' sem sucesso", ["senha"]),
+        ("email a@b.com e minha senha é Aluno@2026", ["email", "senha"]),
         ("como envio uma atividade no Canvas?", []),
         ("", []),
     ],
 )
 def test_detectar(texto, esperado):
     assert pii.detectar(texto) == esperado
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # sem valor atribuído: reclamação, não divulgação de credencial.
+        "esqueci minha senha, como recupero?",
+        "a senha não funciona mais",
+        "preciso trocar minha senha nova",
+        "minha senha é fraca, quero uma dica",
+    ],
+)
+def test_senha_sem_valor_atribuido_nao_dispara(texto):
+    assert pii.detectar(texto) == []
 
 
 @pytest.mark.parametrize(
@@ -95,6 +115,25 @@ def test_email_com_digitos_nao_vira_cpf_pela_metade():
     # E-mail é mascarado ANTES do CPF de propósito: sem essa ordem, o padrão de
     # CPF casaria dentro do endereço e o resultado sairia truncado.
     assert pii.mascarar(f"escreva para ra{CPF_VALIDO}@puc.br") == "escreva para [email]"
+
+
+def test_mascarar_senha_preserva_a_palavra_e_troca_so_o_valor():
+    assert pii.mascarar("minha senha é Aluno@2026, não entra") == (
+        "minha senha é [senha], não entra"
+    )
+    assert pii.mascarar("senha: 123456") == "senha: [senha]"
+    assert pii.mascarar("tentei com a senha 'Puc2026!'") == "tentei com a senha '[senha]'"
+
+
+def test_mascarar_senha_com_email_como_valor_nao_vira_email():
+    # senha é mascarada ANTES do e-mail: "senha é joao@x.com" é credencial,
+    # não um endereço para contato.
+    assert pii.mascarar("minha senha é joao@x.com") == "minha senha é [senha]"
+
+
+def test_mascarar_senha_sem_valor_de_credencial_nao_muda_nada():
+    texto = "esqueci minha senha, como recupero?"
+    assert pii.mascarar(texto) == texto
 
 
 def test_mascarar_texto_sem_pii_nao_muda_nada():
