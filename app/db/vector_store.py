@@ -153,6 +153,32 @@ def list_ingested_sources(store: PGVector) -> list[tuple[str, int]]:
         return [(row.source_path, row.chunks) for row in rows]
 
 
+def list_web_sources(store: PGVector) -> list[tuple[str, int]]:
+    """Páginas crawladas (`source_type='web'`) indexadas na coleção ativa, e a
+    contagem de chunks de cada uma.
+
+    Complementa `list_ingested_sources` (que lista TUDO) para os dois comandos
+    que agem só sobre o conteúdo da `WEB_ALLOWLIST`: o prune do re-crawl
+    (`scripts/crawl.py`, KB-5 — apagar a página que saiu do sitemap) e a remoção
+    em massa (`scripts/remove_ingested.py --web`). `delete_by_assunto` de
+    propósito NÃO enxerga essas linhas (ver o `IS DISTINCT FROM 'web'` acima),
+    então sem esta função não havia como nem listá-las para apagar.
+    """
+    stmt = text(
+        f"""
+        SELECT cmetadata->>'source_path' AS source_path, COUNT(*) AS chunks
+        FROM langchain_pg_embedding
+        WHERE collection_id = {_COLLECTION_ID}
+          AND cmetadata->>'source_type' = 'web'
+        GROUP BY 1
+        ORDER BY 1
+        """
+    )
+    with store.session_maker() as session:
+        rows = session.execute(stmt, {"collection_name": store.collection_name})
+        return [(row.source_path, row.chunks) for row in rows]
+
+
 def list_assuntos(store: PGVector) -> list[str]:
     """Assuntos distintos indexados na coleção ativa.
 

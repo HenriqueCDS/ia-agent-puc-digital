@@ -25,6 +25,9 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | INF-6 | 🟠 | 2 perguntas falham a rodada por erro de infra (`Cancelled: 499` gRPC Gemini) — Q14/Q16 sem teste | `_rodar` try/except, `providers/base.py`, `scripts/eval_run.py` | Feito: (1) `Cancelled`/HTTP 499 entram na classificação de indisponibilidade (`base._NOMES_DE_FALLBACK` + `_STATUS_DE_FALLBACK`) → a cadeia tenta o próximo provedor em vez de o erro cru subir; (2) quando TODOS os provedores caem, a linha da rodada fica com `origem_obtida="provedores_indisponivel"` (distinta de `None` de bug nosso) e o resumo lista essas perguntas para re-rodar isoladas | ✅ | 2026-08-29 |
 | [x] | INF-7 | 🟡 | Colunas de `eval_run` (`n_chunks`/`score_top`) x telemetria medem coisas diferentes e confundem auditoria | `scripts/eval_run.py`, `scripts/eval_report.py` | Feito: `eval_run` já separava `chunks_recuperados`/`score_top` (retrieval) de `fontes_resposta`/`score_fonte_top` (fontes da resposta) desde 7aa2568; `eval_report` agora emite `chunks_recuperados` (era `n_chunks`) para falar a mesma língua. O campo na telemetria/JSONB segue `n_chunks` de propósito — renomear quebraria as linhas dentro da janela de retenção | ✅ | 2026-08-29 |
 | [x] | INF-8 | 🟡 | Cold start de 40s no 1º request (carga do modelo de embeddings) | `app/api` boot, `scripts/eval_run.py` | Feito: `vector_store.aquecer()` — ponto ÚNICO de warm-up (carrega embeddings + `SELECT 1`). A API já chamava no `_lifespan`; agora `scripts.eval_run` também chama antes da 1ª pergunta, então o cold start não cai mais no item 1 nem infla o `ms_retrieve` dele | ✅ | 2026-08-29 |
+| [ ] | INF-9 | 🟡 | Sem `ms_rerank` separado — o A/B `false`×`true` que o RET-3 pede não consegue medir o custo do 2º estágio (fica embutido em `ms_retrieve`) | `app/core/telemetry.Registro`, `app/retrieval/retriever.retrieve` | Instrumentar `ms_rerank` ANTES de rodar o A/B, não depois — é a métrica que a rodada existe para produzir | ⏳ | aberto 2026-09-01 |
+| [ ] | INF-10 | 🟡 | Rate limit em memória: com >1 worker do uvicorn os tetos viram N×limite. O código já marca "LIMITE CONHECIDO", mas não estava rastreado como risco de custo em produção | `app/api/ratelimit.py` | Quando T4.3 decidir workers, mover estado p/ store compartilhado (Redis); `RateLimiter`/`get_rate_limiter()` já são o ponto único de troca | ⏳ | aberto 2026-09-01 |
+| [ ] | INF-11 | 🟡 | `response_cache._ensure_table` com `@lru_cache` roda a DDL 1x/processo — tabela dropada em runtime (teste, manutenção) quebra os INSERT até o restart | `app/db/response_cache.py` | Aceitável hoje; se incomodar, `to_regclass('resposta_cache')` a cada acesso em vez de cachear o efeito | ⏳ | aberto 2026-09-01 |
 
 ## 2. Calibração de limiar / retrieval (Bloco A)
 
@@ -36,6 +39,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | RET-4 | 🟡 | `alta_confianca`/`is_exact_match` só dispara por artefato do corpus (doc gigante em inglês repetitivo), não por confiança real (Q23) | `retriever.py`, `EXACT_MATCH_THRESHOLD` | **Ramo `alta_confianca` REMOVIDO** junto do encanamento do RET-3 (2026-09-01): `is_exact_match`, `EXACT_MATCH_THRESHOLD`, `SYSTEM_ALTA_CONFIANCA`/`ANSWER_PROMPT_ALTA_CONFIANCA`, o parâmetro em `_tentar_base`/`_cache_key` (invalida cache existente) e `Registro.alta_confianca`. Com ranking cross-encoder real, "2 fontes fortes no topo" deixa de ser proxy de confiança. Checklist em `cross-encoder.md` §5. (Tuning intermediário 0.90→0.87 em 2026-08-30 ficou obsoleto.) | ✅ | 2026-09-01 |
 | [x] | RET-5 | 🟡 | `CHUNK_SIZE` quase inerte — `PyPDFLoader` entrega 1 Document por página; granularidade real ≤254 tokens | `config.CHUNK_SIZE`, `scripts/chunk_stats.py` | Feito: `scripts/chunk_stats.py` mede a distribuição real (5371 páginas: mediana 403 chars / 103 tokens, p75 695, p90 1073). `CHUNK_SIZE` 1000 → **700** (≈ p75 — mantém ~75% das páginas inteiras, quebra só o quartil denso; índice +18%; p99 do chunk ~185 tokens « 512 do E5). **Exige reingestão.** Voltar a 1000 se a eval piorar | ✅ | 2026-08-30 |
 | [x] | RET-6 | 🟡 | `Canvas_Student_Guide.pdf` (1108 pág.) devolve 5 chunks quase idênticos → margem ~0 por repetição (Q11/Q23) | `ingestion/chunker.py`, `config.INGEST_DEDUP_SIMILARIDADE` | Feito: `chunker.deduplicar_similares` na ingestão — descarta chunk com Jaccard (shingles de 4 palavras) ≥ `INGEST_DEDUP_SIMILARIDADE` (0.9) contra outro já mantido do mesmo lote. Pega a quase-cópia que o `content_hash` (exato) não pega. 1ª ocorrência vence. Só na ingestão, fora do caminho de resposta. **Não** substitui dedup por top-k nem reranking — reduz a repetição na fonte | ✅ | 2026-08-30 |
+| [ ] | RET-7 | 🟠 | Reranker ligado ANULA a rede do `RELEVANCE_THRESHOLD` (RET-1): o 1º estágio traz 30 candidatos sem corte de E5 e o corte final é `RERANKER_THRESHOLD=0.0` → Q4 (fotossíntese, 0.82 no E5) passa os dois estágios. O estado "reranker on + threshold não calibrado" é **pior** que o de hoje p/ lixo fora de domínio | `app/retrieval/retriever.retrieve` | Pré-condição de segurança no checklist de T-1: calibrar `RERANKER_THRESHOLD` (ou manter um piso de E5 no 1º estágio) ANTES de ligar. Ver `cross-encoder.md` §6 | ⏳ | aberto 2026-09-01 |
+| [ ] | RET-8 | 🟠 | `reranker.rerank` sem try/except nem timeout — cross-encoder que estoura memória na VM (o `config.py` admite que "aperta junto do E5") derruba o `/ask` inteiro. Viola "falha de dependência não derruba o caminho principal" (perfil §7) | `app/retrieval/retriever.retrieve`, `app/retrieval/reranker.rerank` | rerank falhou → cair p/ a ordem bi-encoder + `relevance_threshold`, WARNING, `reranker_aplicado=False` (mesmo espírito da `ProviderChain`) | ⏳ | aberto 2026-09-01 |
 
 ## 3. Veto / fidelidade / prompt (Bloco B)
 
@@ -46,6 +51,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | VET-3 | 🟠 | Sem `max_tokens` em nenhum provider — Q10 gerou 1450 tokens, Q25 1729, antes do veto | `app/providers/` | Feito: `settings.llm_max_tokens` (**1400** — folga sobre os ~800–1000 da análise p/ não cortar procedimento longo) traduzido em cada família de SDK: `max_output_tokens` no Gemini, `max_tokens` por chamada no OpenAI-compat. Aplicado nas 4 fábricas de `chain.py`. Teste garante que o teto chega em TODA a cadeia, não só no 1º elo | ✅ | 2026-08-31 |
 | [ ] | VET-4 | 🟠 | Sem suíte de fidelidade automatizada — só 3 citações conferidas à mão | `tests/` | 15–20 perguntas com resposta-referência do PDF, LLM-judge ou similaridade | ⏳ | |
 | [x] | VET-5 | 🟡 | Fixar como regressão: alucinação por complacência **não** ocorreu (Q7 premissa falsa, Q10 número inventado) | `tests/` | Feito (= T-6): regressão em 2 níveis — `test_prompts.py` trava a detecção (`eh_insuficiente` pega as respostas reais de Q7/Q10 de 28-08); `test_responder.py` cobre o caminho completo (base com chunks plausíveis + modelo recusa → não vaza como `grounded`, cai p/ secretaria) | ✅ | 2026-08-31 |
+| [ ] | VET-6 | 🟡 | Marcador `#TOPICO:` vaza p/ o aluno quando o modelo não o põe em linha própria — `_RE_TOPICO` exige `^…$` (MULTILINE); inline não casa → `topico=None` **e** o texto do marcador vai p/ a tela | `app/agent/prompts._RE_TOPICO`, `separar_topico` | Aceitar o marcador em qualquer posição (como `eh_insuficiente` já faz com o sentinela `#SEM_COBERTURA#`) e sempre removê-lo do texto | ⏳ | aberto 2026-09-01 |
+| [ ] | VET-7 | 🟡 | `eh_insuficiente` camada 3: a janela de 160 chars (`_JANELA_RECUSA_PROSA`) assume recusa front-loaded — um preâmbulo ("Olá! Sobre sua dúvida… infelizmente não há informações…") empurra a recusa p/ além do corte → vaza como `origem=base`/`grounded=True`. Furo de calibração de VET-1 | `app/agent/prompts._JANELA_RECUSA_PROSA` | Risco conhecido de VET-1; calibrar a janela pela telemetria (respostas reais que caíram em `base_insuficiente=null` mas eram recusa) antes de mexer no número | ⏳ | aberto 2026-09-01 |
 
 ## 4. LGPD / PII na entrada (Bloco C)
 
@@ -53,6 +60,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 |---|---|---|---|---|---|---|---|
 | [x] | PII-1 | 🔴 | CPF/RA/e-mail vão crus ao provider LLM (EUA) — `pii.mascarar` só age nos campos persistidos, `query.text` vai cru p/ `_format_context`/`invoke`/`buscar_na_web` (Q11, Q13; 27: Q5) | `responder._responder`, `app/core/pii.py` | Feito: `responder._sem_pii` mascara `query.text` no topo de `_responder` (antes de guardrail/triagem/retrieval, funil único; `dataclasses.replace`, objeto original preservado p/ a telemetria). Detecção (`registro.pii` + WARNING) segue sobre o texto original em `telemetry.registrar`. Mascarar, não recusar | ✅ | 2026-08-31 |
 | [x] | PII-2 | 🔴 | "senha"/"password" não é categoria de `pii.py` — credencial `'Aluno@2026'` seguiu p/ o Gemini (Q12; 27: Q5) | `app/core/pii.py` | Feito: categoria `senha` — `_SENHA` (palavra + conector `:`/`=`/`é` ou aspas + valor); só conta com valor de cara de credencial (dígito/símbolo/aspas), nunca "esqueci minha senha". Mascarada 1º na ordem (antes do e-mail). Entra no mesmo caminho do PII-1 | ✅ | 2026-08-31 |
+| [ ] | PII-3 | 🟡 | `_sem_pii` roda ANTES do guardrail e da triagem — o mascaramento altera o texto que `deve_encaminhar`/`classificar` inspecionam. Inócuo hoje, mas um padrão futuro preso a um trecho que `pii.mascarar` consome (e-mail, ID) deixa de casar em silêncio | `app/agent/responder._responder` | Guardrail/triagem sobre o texto ORIGINAL; só o que sai p/ LLM/web mascarado. No mínimo: registrar a decisão + teste que trava a ordem atual | ⏳ | aberto 2026-09-01 |
+| [ ] | PII-4 | 🟡 | `pii.py` não cobre nome próprio nem endereço (aceito no cabeçalho do módulo) — o `topico`, escrito pelo LLM, pode conter "aluno João da Silva" e isso vai p/ a telemetria. Resíduo sem decisão registrada | `app/core/pii.py`, `telemetry.Registro.topico` | Decidir se é aceitável dada a retenção de 7 dias e **escrever** a decisão; senão, 2ª camada (NER leve, offline) sobre os campos derivados | ⏳ | aberto 2026-09-01 |
 
 ## 5. Triagem / guardrail (Blocos E e F)
 
@@ -71,8 +80,13 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 |---|---|---|---|---|---|---|---|
 | [x] | KB-1 | 🔴 | `modelos_resposta_chunks.xlsx` indexado — vira `fonte_citada`, "contamina" o tom p/ "e-mail de atendimento" | `data/raw/email_modelos/` | **Comportamento aceito e mantido**: são modelos REAIS de atendimento extraídos do e-mail, fonte curada e pré-chunkada (loader dedicado `xlsx_modelos_resposta.py`, pasta `email_modelos/`). O tom de e-mail de atendimento é desejado. Follow-up opcional: citação amigável em vez do nome do arquivo | ✅ | 2026-08-28 |
 | [x] | KB-2 | 🟠 | `WEB_ALLOWLIST` amplo demais — portal `puc-campinas.edu.br` inteiro + todos os subdomínios (vestibular, avaliação institucional, LPs, PDFs soltos) alucinava sobre assunto fora do agente (Q7 nota mínima citou vestibular) | `config.WEB_ALLOWLIST`, `web_fallback.fonte_permitida` | Feito: `learn.microsoft.com` já não estava; portal reduzido a uma lista de `path_prefixes` curados em `puc-campinas.edu.br` (`/calendario/`, `/secretaria-geral/`, `/biblioteca/`), sem `subdominios`. `FonteWeb.path_prefix` virou tupla `path_prefixes` | ✅ | 2026-08-28 |
-| [~] | KB-3 | 🟡 | Fallback web custa ~50x o caminho da base (~15s vs ~300ms); raspagem do `ddgs` estoura rate limit | `scripts/crawl.py`, `pipeline.ingest_documents`, `web_fallback` | **Implementado**: `scripts/crawl.py` lê o sitemap de cada `FonteWeb`, filtra pelos `path_prefixes`, extrai o conteúdo (bs4, sem menu/rodapé) e indexa via `pipeline.ingest_documents` (`source_type="web"`, `categoria="web"`, `assunto` da fonte). `web_fallback` ao vivo mantido como último recurso. **Falta**: 1ª execução em produção + agendar re-crawl semanal. Plano/detalhe: `eval/analises/kb-3-melhorar-fallback-na-base.md` | 🔧 | crawler 2026-08-28 |
+| [~] | KB-3 | 🟡 | Fallback web custa ~50x o caminho da base (~15s vs ~300ms); raspagem do `ddgs` estoura rate limit | `scripts/crawl.py`, `pipeline.ingest_documents`, `web_fallback` | **Implementado**: `scripts/crawl.py` lê o sitemap de cada `FonteWeb`, filtra pelos `path_prefixes`, extrai o conteúdo (bs4, sem menu/rodapé) e indexa via `pipeline.ingest_documents` (`source_type="web"`, `categoria="web"`, `assunto` da fonte). `web_fallback` ao vivo mantido como último recurso. **Cron semanal feito (2026-09-01):** `.github/workflows/recrawl.yml` roda `python -m scripts.crawl --prune` toda segunda 04:15 UTC direto no Supabase (secrets `DATABASE_URL`/`HF_TOKEN`); `workflow_dispatch` p/ rodar na mão. **Falta**: 1ª execução em produção (cadastrar os secrets) + conferir o resultado. Plano/detalhe: `eval/analises/kb-3-melhorar-fallback-na-base.md` | 🔧 | crawler 2026-08-28; cron 2026-09-01 |
 | [x] | KB-4 | 🟠 | Ingestão ignora em silêncio arquivo sem loader (`report.ignorados`, sem erro) | `tests/test_ingestao.py` | Invertido conforme KB-1: o teste **não reprova** fonte — garante que todo arquivo em `data/raw/` tem loader registrado (senão ficaria de fora sem aviso). `.gitkeep` etc. na lista de ignorados | ✅ | 2026-08-28 |
+| [x] | KB-5 | 🔴 | Crawl (KB-3) sem prune de órfãos — página despublicada / fora do sitemap **nunca** era apagada (`delete_by_assunto` pula `source_type='web'`). Info oficial desatualizada servida como `grounded=True` e cacheável | `scripts/crawl.py`, `app/db/vector_store` | Feito (2026-09-01): `vector_store.list_web_sources` (lista só `source_type='web'`) + `crawl._podar_orfas` — depois de re-indexar, apaga via `delete_by_source` toda página desta fonte que não está mais no sitemap. Guardas: (1) `descobrir_urls` devolve `confiavel` e o prune NÃO roda se um sub-sitemap falhou (senão apagaria por falha de rede); (2) pára se apagaria >50% das páginas indexadas da fonte (`_PRUNE_FRACAO_MAX`, sinal de migração de URL) — `--prune-force` ignora; (3) compara contra o sitemap inteiro, nunca contra o recorte de `--limite`. `--prune` opt-in; o cron semanal usa. Testes em `test_crawl.py`. **Staleness por `crawled_at` fica p/ depois** — o prune por sitemap cobre o caso comum | ✅ | 2026-09-01 |
+| [ ] | KB-6 | 🟠 | Conteúdo crawlado entra pelo `ANSWER_PROMPT` da base (assunto `puc-digital`/`canvas` p/ o filtro do retrieval), que trata todo CONTEXTO como "material interno revisado" — perde o disclaimer que só o `SYSTEM_WEB` dá | `app/agent/prompts.SYSTEM`, `responder._format_context`, `scripts/crawl.py` | Marcar a fonte web no contexto (`[Fonte web pública: …]`) + ressalva condicional no `SYSTEM`; OU coleção/assunto próprio consultado como 2º nível | ⏳ | aberto 2026-09-01 |
+| [ ] | KB-7 | 🟠 | Dedup de similaridade (RET-6) não atravessa páginas no crawl — `_crawl_fonte` chama `ingest_documents` **por URL** (lote de 1 doc) e `deduplicar_similares` só compara dentro do lote. Boilerplate do portal repetido entre dezenas de páginas → chunks quase idênticos no índice (reintroduz RET-2/RET-6) | `scripts/crawl.py`, `app/ingestion/chunker.deduplicar_similares` | Acumular as páginas da fonte em memória e chamar `ingest_documents` **1x por fonte**, não por URL | ⏳ | aberto 2026-09-01 |
+| [ ] | KB-8 | 🟠 | `web_fallback._desembrulhar` só resolve o redirect do DuckDuckGo (`/l/?uddg=`), mas `WEB_SEARCH_BACKEND` agora lista 5 (`brave,mojeek,startpage,yahoo`) — wrapper de tracking dos outros → `fonte_permitida` vê o host do buscador e descarta resultado legítimo, ou um open-redirect num domínio da allowlist passa | `app/agent/web_fallback._desembrulhar` | Cobrir os padrões de redirect dos backends ativos (ou normalizar via `parse_qs` genérico) ANTES da revalidação da allowlist | ⏳ | aberto 2026-09-01 |
+| [ ] | KB-9 | 🟠 | Cache de resposta sem TTL agora atinge o caminho da **base** via crawl — re-crawl mantém `source_path`+`chunk_index` → `chunk_id` estável → chave de cache não invalida → resposta velha p/ página web atualizada. O racional de não-cachear a web (`_responder_pela_web`) não vale p/ chunks `source_type='web'` no `_tentar_base` | `app/agent/responder._tentar_base` / `_cache_key`, `app/db/response_cache` | Não cachear quando algum chunk recuperado é `source_type='web'`, OU TTL na tabela `resposta_cache` | ⏳ | aberto 2026-09-01 |
 
 ## 7. Dataset / gabarito
 
@@ -97,6 +111,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | T-6 | Regressão do veto de contexto — Q7 (premissa falsa) e Q10 (número inventado) continuam recusando | VET-5 | 2026-08-31 |
 | [ ] | T-7 | Re-rodar Q14/Q16 (falharam por infra em 28) | INF-6 | |
 | [ ] | T-8 | Parte-2 OWASP (injeção indireta, DoS por repetição, footprinting, PII por ID) | TRI-3, TRI-4, VET-3 | |
+| [ ] | T-9 | `retrieve` com reranker que levanta exceção → cai p/ bi-encoder, não propaga (dublê `FakeCrossEncoder` que estoura) | RET-8 | |
+| [ ] | T-10 | Ordem `_sem_pii` × guardrail/triagem travada — texto original chega às duas checagens | PII-3 | |
 
 ---
 
@@ -104,18 +120,38 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Grupo | Feitos / Total |
 |---|---|
-| 1. Infra e método | 8 / 8 |
-| 2. Retrieval / limiar | 5 / 6 |
-| 3. Veto / fidelidade | 4 / 5 |
-| 4. LGPD / PII | 2 / 2 |
+| 1. Infra e método | 8 / 11 |
+| 2. Retrieval / limiar | 5 / 8 |
+| 3. Veto / fidelidade | 4 / 7 |
+| 4. LGPD / PII | 2 / 4 |
 | 5. Triagem / guardrail | 3 / 6 |
-| 6. Base de conhecimento / web | 3 / 4 (KB-3 parcial) |
+| 6. Base de conhecimento / web | 4 / 9 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
-| 8. Testes | 4 / 8 |
-| **Total** | **32 / 45** |
+| 8. Testes | 4 / 10 |
+| **Total** | **33 / 61** |
+
+> **2026-09-01** — 16 itens novos (INF-9/10/11, RET-7/8, VET-6/7, PII-3/4, KB-5/6/7/8/9,
+> T-9/10) abertos a partir da análise do código pós-RET-3/RET-4. Nenhum resolvido —
+> só rastreados. Concentração: buracos do crawl KB-3 e segurança do encanamento do reranker.
 
 ## Changelog
 
+- **2026-09-01** — KB-5 + KB-3 (cron): `vector_store.list_web_sources` (lista `source_type='web'`);
+  `crawl._podar_orfas` remove do índice a página que saiu do sitemap, com 3 guardas (sitemap
+  `confiavel`, teto de 50% via `_PRUNE_FRACAO_MAX`/`--prune-force`, compara sempre o sitemap
+  inteiro). `descobrir_urls` passou a devolver `(urls, confiavel)`. `--prune`/`--prune-force`
+  em `scripts.crawl`; `remove_ingested --web [termo]` p/ apagar o crawl (que `--assunto` não
+  toca). Cron: `.github/workflows/recrawl.yml` roda `--prune` semanal no Supabase. Testes em
+  `test_crawl.py`, `test_remove_ingested.py`, `test_vector_store.py`.
+- **2026-09-01** — análise de código pós-RET-3/RET-4 (nada resolvido, só rastreado): 16 itens novos.
+  Crawl KB-3 tem 5 buracos abertos — KB-5 (órfãos nunca apagados), KB-6 (prompt da base sem
+  disclaimer de "não revisado"), KB-7 (dedup por-URL não deduplica boilerplate entre páginas),
+  KB-9 (cache sem TTL agora atinge a base via crawl), + KB-8 (`_desembrulhar` só cobre 1 dos 5
+  backends). Reranker: RET-7 (ligar sem calibrar `RERANKER_THRESHOLD` é pior que hoje p/ lixo
+  fora de domínio) e RET-8 (`rerank` sem fallback derruba o `/ask`). Dívida: INF-9 (`ms_rerank`
+  p/ o A/B), INF-10 (rate limit multi-worker), INF-11 (`_ensure_table` lru_cache), PII-3 (ordem
+  `_sem_pii` × guardrail), PII-4 (nome/endereço no `topico`), VET-6 (`#TOPICO:` inline vaza),
+  VET-7 (janela de 160 chars quebra com preâmbulo). Testes T-9/T-10.
 - **2026-09-01** — RET-3 (encanamento) + RET-4 (remoção): `app/retrieval/reranker.py` — cross-encoder local em 2 estágios, offline-first, `@lru_cache`, função pura `rerank` (monta pares, `CrossEncoder.predict`, sigmoid, reordena, preserva o score de E5 em `RetrievedChunk.score_bruto`). Ligado em `retriever.retrieve` atrás de `RERANKER_ENABLED` (default `false` — nada carrega, import local de `sentence_transformers`). Config `RERANKER_MODEL` (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`), `RERANKER_CANDIDATES=30`, `RERANKER_THRESHOLD=0.0`. Telemetria: `reranker_aplicado`, `score_top_bruto` (remove `alta_confianca`). `aquecer()` carrega o reranker só quando ligado. **RET-4**: ramo `alta_confianca` inteiro removido (`is_exact_match`, `EXACT_MATCH_THRESHOLD`, `SYSTEM_ALTA_CONFIANCA`/`ANSWER_PROMPT_ALTA_CONFIANCA`, param de `_tentar_base`/`_cache_key` — invalida cache — e `Registro.alta_confianca`). Testes: `test_reranker.py` (`FakeCrossEncoder`), `test_retrieval.py` (on/off), warm-up. Docs: `cross-encoder.md` §5–§6, README, `arquitetura-*.md`. **Segue DESLIGADO** até T-1 + A/B + calibração de `RERANKER_THRESHOLD`.
 - **2026-08-31** — infra eval: os 5 datasets (`perguntas_teste{,2,3}.json`, `perguntas-owasp-2026-parte-{1,2}.json`) fundidos em `eval/perguntas/perguntas.jsonc` (125 itens, JSONC — blocos comentados com `//`, removidos na carga). Cada item ganhou `grupo` (`teste`/`teste2`/`teste3`/`owasp-1`/`owasp-2`); campo `nota` → `criterio`. `eval_run` e `eval_report` toleram os comentários; `eval_run --intervalo/-i` roda um trecho (`1-6`, `27-50`, `27 a 50`, `26-`, `7`) e o resumo quebra o acerto por grupo. `test_guardrail.py` filtra `owasp-1` pelo `grupo`.
 - **2026-08-31** — TRI-6: `web_fallback.abuso_bloqueado` (reusa `guardrail.deve_encaminhar`) roda no topo de `buscar_na_web`, ao lado de `assunto_bloqueado`; não respeita `GUARDRAIL_ENABLED` de propósito (última barreira antes da rede quando o guardrail de entrada está off). Teste em `test_web_fallback.py`.

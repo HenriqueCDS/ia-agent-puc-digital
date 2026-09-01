@@ -6,6 +6,7 @@ com `get_vector_store`/`list_ingested_sources`/`delete_by_*` dublados — mesmo
 padrão do resto do projeto (nenhum teste toca o Postgres real).
 """
 
+import pytest
 from typer.testing import CliRunner
 
 from scripts import remove_ingested
@@ -38,7 +39,7 @@ def test_termo_e_assunto_juntos_da_erro(monkeypatch):
     resultado = runner.invoke(app, ["guia.pdf", "--assunto", "canvas"])
 
     assert resultado.exit_code == 1
-    assert "Use um OU outro" in resultado.output
+    assert "Use --assunto sozinho" in resultado.output
 
 
 def test_termo_sem_casar_nenhum_arquivo_nao_apaga_nada(monkeypatch):
@@ -125,6 +126,73 @@ def test_assunto_remove_a_pasta_inteira_via_delete_by_assunto(monkeypatch):
     assert chamado == ["canvas"]
     assert "puc-digital" not in resultado.output
     assert "7 chunk(s) removido(s)" in resultado.output
+
+
+def test_web_e_assunto_juntos_da_erro(monkeypatch):
+    monkeypatch.setattr(remove_ingested, "get_vector_store", lambda: object())
+
+    resultado = runner.invoke(app, ["--web", "--assunto", "canvas"])
+
+    assert resultado.exit_code == 1
+    assert "Use --assunto sozinho" in resultado.output
+
+
+def test_web_sozinho_remove_todo_o_conteudo_crawlado(monkeypatch):
+    monkeypatch.setattr(remove_ingested, "get_vector_store", lambda: object())
+    monkeypatch.setattr(
+        remove_ingested,
+        "list_web_sources",
+        lambda store: [
+            ("https://www.puc-campinas.edu.br/biblioteca/", 4),
+            ("https://community.instructure.com/en/kb/articles/1", 2),
+        ],
+    )
+    apagadas = []
+    monkeypatch.setattr(
+        remove_ingested, "delete_by_source", lambda store, p: apagadas.append(p) or 3
+    )
+
+    resultado = runner.invoke(app, ["--web", "--yes"])
+
+    assert resultado.exit_code == 0
+    assert apagadas == [
+        "https://www.puc-campinas.edu.br/biblioteca/",
+        "https://community.instructure.com/en/kb/articles/1",
+    ]
+    assert "6 chunk(s) removido(s)" in resultado.output
+
+
+def test_web_com_termo_filtra_por_trecho_da_url(monkeypatch):
+    monkeypatch.setattr(remove_ingested, "get_vector_store", lambda: object())
+    monkeypatch.setattr(
+        remove_ingested,
+        "list_web_sources",
+        lambda store: [
+            ("https://www.puc-campinas.edu.br/biblioteca/", 4),
+            ("https://community.instructure.com/en/kb/articles/1", 2),
+        ],
+    )
+    apagadas = []
+    monkeypatch.setattr(
+        remove_ingested, "delete_by_source", lambda store, p: apagadas.append(p) or 4
+    )
+
+    resultado = runner.invoke(app, ["--web", "instructure.com", "--yes"])
+
+    assert apagadas == ["https://community.instructure.com/en/kb/articles/1"]
+    assert "puc-campinas" not in resultado.output
+
+
+def test_web_sem_conteudo_crawlado_nao_apaga(monkeypatch):
+    monkeypatch.setattr(remove_ingested, "get_vector_store", lambda: object())
+    monkeypatch.setattr(remove_ingested, "list_web_sources", lambda store: [])
+    monkeypatch.setattr(
+        remove_ingested, "delete_by_source", lambda *a: pytest.fail("nada a apagar")
+    )
+
+    resultado = runner.invoke(app, ["--web", "--yes"])
+
+    assert "Nenhuma página crawlada" in resultado.output
 
 
 def test_assunto_sem_arquivos_correspondentes_nao_chama_delete(monkeypatch):

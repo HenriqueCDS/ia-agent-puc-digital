@@ -1,0 +1,53 @@
+name: Re-crawl semanal da allowlist
+
+# KB-3 + KB-5: re-indexa as páginas oficiais da WEB_ALLOWLIST e remove do índice
+# as que saíram do sitemap. Escreve direto no banco (Supabase) — não faz commit
+# nem abre PR. Roda sozinho toda semana; a aba Actions permite disparar na mão.
+#
+# SECRETS necessários (Settings > Secrets and variables > Actions):
+#   DATABASE_URL  — a mesma string do .env, apontando para o Supabase
+#                   (Session pooler, IPv4, porta 5432). Ex.:
+#                   postgresql+psycopg://postgres.<ref>:<senha>@aws-0-...pooler.supabase.com:5432/postgres
+#   HF_TOKEN      — token do HuggingFace (só acelera o download do modelo de
+#                   embeddings; sem ele funciona, mais devagar).
+#
+# ALTERNATIVA sem GitHub (máquina on-prem, Agendador de Tarefas do Windows):
+#   schtasks /create /tn "recrawl-allowlist" /sc weekly /d MON /st 04:15 ^
+#     /tr "cmd /c cd /d C:\caminho\ia-agent-puc-digital && .venv\Scripts\python -m scripts.crawl --prune"
+
+on:
+  schedule:
+    - cron: "15 4 * * 1"   # toda segunda-feira, 04:15 UTC (~01:15 BRT)
+  workflow_dispatch: {}
+
+concurrency:
+  group: recrawl
+  cancel-in-progress: false
+
+jobs:
+  recrawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # O modelo de embeddings (~1 GB) é baixado na 1ª execução; sem cache ele
+      # baixaria de novo toda semana e o job levaria ~10 min a mais.
+      - name: Cache do modelo de embeddings
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-multilingual-e5-base-${{ hashFiles('requirements.txt') }}
+
+      - run: pip install -r requirements.txt
+
+      - name: Re-crawl + prune
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -m scripts.crawl --prune --verbose

@@ -320,8 +320,15 @@ por quantas vezes a pergunta apareceu:
 python -m scripts.lacunas                    # últimos 7 dias
 python -m scripts.lacunas --dias 7 --json    # para pipeline
 python -m scripts.crawl --dry-run            # URLs da allowlist que entrariam no índice
-python -m scripts.crawl                      # crawla e indexa (rodar semanal)
+python -m scripts.crawl                      # crawla e indexa
+python -m scripts.crawl --prune              # + remove do índice a página que saiu do sitemap (KB-5)
+python -m scripts.remove_ingested --web      # apaga TODO o conteúdo crawlado (o que --assunto não toca)
 ```
+
+O re-crawl semanal roda sozinho em `.github/workflows/recrawl.yml` (`--prune`,
+segunda 04:15 UTC, escrevendo direto no Supabase — precisa dos secrets
+`DATABASE_URL` e `HF_TOKEN`). Sem GitHub, agende `python -m scripts.crawl --prune`
+no Agendador de Tarefas do Windows (receita no cabeçalho do YAML).
 
 ```
     n  dist  assunto        situação          tema

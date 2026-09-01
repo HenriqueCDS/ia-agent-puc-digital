@@ -80,6 +80,17 @@ def test_delete_by_assunto_nao_toca_no_conteudo_crawlado():
     assert "source_type" in bloco and "IS DISTINCT FROM 'web'" in bloco
 
 
+def test_list_web_sources_filtra_so_o_conteudo_crawlado():
+    """A contraparte de `delete_by_assunto`: o comando que LISTA o crawl para
+    apagar (prune do re-crawl, `remove_ingested --web`) tem que enxergar só
+    `source_type='web'` — senão levaria PDF junto."""
+    bloco = next(
+        b for b in _BLOCOS_SQL
+        if "GROUP BY" in b and "cmetadata->>'source_type' = 'web'" in b
+    )
+    assert "SELECT" in bloco and "source_path" in bloco
+
+
 def test_o_escopo_vem_do_nome_da_colecao_ativa_e_nao_de_um_id_solto():
     """O outro lado da invariante: a constante que as queries usam tem que
     resolver a coleção pelo NOME configurado, ligado como parâmetro. Se ela
