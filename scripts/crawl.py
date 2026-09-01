@@ -59,6 +59,16 @@ _SITEMAPS = ("/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml")
 # landing sem conteúdo — não vira chunk (mediria ruído de navegação).
 _MIN_CHARS = 300
 
+# Guarda de memória. Uma página com visualizador de PDF embutido ou DOM gigante
+# (ex.: `/manual-do-aluno/` do portal PUC, ~16 MB) sozinha faz o BeautifulSoup +
+# chunking + embedding estourar a RAM — foi o que derrubou o crawl em ambiente
+# de 512 MB. Acima deste teto a página é pulada: procedimento acadêmico real cabe
+# MUITO abaixo de 3 MB de HTML.
+_MAX_HTML_BYTES = 3_000_000
+# Segunda camada: mesmo abaixo do teto de HTML, trunca o texto extraído. Um
+# artigo legítimo longo continua útil; o que isto corta é tabela/lista gigante.
+_MAX_TEXT_CHARS = 200_000
+
 # Prune (KB-5): se apagaria MAIS que esta fração das páginas já indexadas da
 # fonte, ele pára e exige --prune-force. Um sitemap que responde mas com outro
 # esquema de URL (site migrado, domínio novo) transforma todas as páginas
@@ -329,8 +339,18 @@ def _crawl_fonte(
             if not resp.ok or "html" not in resp.headers.get("content-type", ""):
                 stats["pulados"] += 1
                 continue
+            if len(resp.content) > _MAX_HTML_BYTES:
+                logger.warning(
+                    "página grande demais (%.1f MB), pulada: %s", len(resp.content) / 1e6, u
+                )
+                stats["pulados"] += 1
+                time.sleep(delay)
+                continue
 
             titulo, texto = _extrair(resp.text)
+            if len(texto) > _MAX_TEXT_CHARS:
+                logger.info("conteúdo extraído truncado em %d chars: %s", _MAX_TEXT_CHARS, u)
+                texto = texto[:_MAX_TEXT_CHARS].rstrip()
             if len(texto) < _MIN_CHARS:
                 logger.info("pouco conteúdo (%d chars), pulado: %s", len(texto), u)
                 stats["pulados"] += 1

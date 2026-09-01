@@ -229,6 +229,24 @@ def test_podar_orfas_aborta_quando_maioria_sumiu_e_respeita_forcar(monkeypatch):
     assert stats_forcado["chunks_podados"] == 2
 
 
+def test_crawl_fonte_pula_pagina_gigante(monkeypatch):
+    """Página acima de `_MAX_HTML_BYTES` (visualizador de PDF embutido, DOM
+    gigante) é pulada antes do BeautifulSoup/chunk/embed — é o que estourava a
+    RAM em ambiente pequeno."""
+    url = "https://www.puc-campinas.edu.br/biblioteca/manual/"
+    monkeypatch.setattr(crawl, "descobrir_urls", lambda s, f: ([url], True))
+    monkeypatch.setattr(
+        crawl, "ingest_documents", lambda *a, **k: pytest.fail("não deve indexar página gigante")
+    )
+    sessao = FakeSessao(
+        {url: _resp(content=b"x" * (crawl._MAX_HTML_BYTES + 1), text="<html></html>")}
+    )
+
+    stats = crawl._crawl_fonte(_FONTE, sessao=sessao, limite=0, delay=0, dry_run=False)
+
+    assert stats["pulados"] >= 1 and stats["paginas"] == 0
+
+
 def test_crawl_fonte_nao_poda_quando_sitemap_nao_confiavel(monkeypatch):
     monkeypatch.setattr(crawl, "descobrir_urls", lambda s, f: ([f"{_ALLOW}/x/"], False))
     monkeypatch.setattr(crawl, "ingest_documents", lambda *a, **k: (0, 0))

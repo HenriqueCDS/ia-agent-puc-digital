@@ -94,24 +94,42 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
     # dos apps mobile — todos sob /en/kb/).
     FonteWeb(
         host="community.instructure.com",
-        # `/en/kb/` (não o slug do guia): os guias .../canvas-lms-*-guide são
-        # índices sem conteúdo; os artigos ficam em /en/kb/articles/<id>-<slug> e
-        # um prefixo no slug do guia rejeitaria justamente esses na revalidação
-        # (`fonte_permitida`). `/en/kb/` cobre a KB oficial e já exclui o fórum
-        # de usuários (/t5/, /en/community/). Ver regra 2 no comentário acima.
-        path_prefixes=("/en/kb/",),
+        # `/en/kb/` e `/pt/kb/` (a KB oficial, EN e PT-BR) — NÃO o slug do guia.
+        # Os guias .../canvas-lms-*-guide são índices SEM conteúdo; os artigos
+        # ficam em /{en,pt}/kb/articles/<id>-<slug>, e um prefixo no slug do guia
+        # rejeitaria justamente esses na revalidação (`fonte_permitida`). `/kb/`
+        # já exclui o fórum de usuários (/t5/, /en/community/). Ver regra 2 acima.
+        path_prefixes=("/en/kb/", "/pt/kb/"),
         assunto="canvas",
     ),
     # As aulas ao vivo da PUC Digital acontecem em salas do Teams (ver
-    # AulasAoVivo_v2-2.pdf, p.6). A documentação oficial do Teams cobre o que a
-    # base interna não detalha: "não consigo entrar na reunião", áudio/câmera,
-    # entrar como convidado. Restrito a /pt-br/teams/ para não abrir o
-    # support.microsoft.com inteiro. `assunto=None`: um resultado de Teams não é
-    # "canvas" nem "puc-digital" — deixa o rótulo vir da própria pergunta.
+    # AulasAoVivo_v2-2.pdf, p.6). A documentação oficial da Microsoft cobre o que
+    # a base interna não detalha: "não consigo entrar na reunião", áudio/câmera,
+    # entrar como convidado, e a conta corporativa/de estudante (o aluno usa a
+    # conta da PUC para entrar no Teams).
+    #
+    # PATHS (verificados — support.microsoft.com NÃO tem sitemap e NÃO é
+    # WordPress, então isto vale só para a busca ao vivo / seeds, não para o
+    # crawler por sitemap):
+    #  - `/pt-br/teams/<cat>/<slug>` serve o artigo de Teams em PT-BR
+    #    (ex.: /pt-br/teams/meetings/join-a-meeting-in-microsoft-teams).
+    #  - `/en-us/teams/<cat>/<slug>` é o mesmo em inglês — rede para o artigo
+    #    sem versão PT (a URL sem locale, `/teams/...`, só redireciona para cá,
+    #    nunca aparece como resultado).
+    #  - `/pt-br/accounts-billing/work-school/` (plural, "accounts"): verificação
+    #    em duas etapas / app autenticador da conta corporativa ou de estudante.
+    # NÃO usar `/pt-br/office/` (é a árvore de TODO o Office — Word, Excel,
+    # Outlook): `/pt-br/teams/` já traz o conteúdo de Teams em português (KB-2).
+    # `assunto=None`: um resultado desses não é "canvas" nem "puc-digital" —
+    # deixa o rótulo vir da própria pergunta. UMA entrada por host (regra 1).
     FonteWeb(
         host="support.microsoft.com",
-        path_prefixes=("/pt-br/teams/",),
-        termos="Teams reunião aula",
+        path_prefixes=(
+            "/pt-br/teams/",
+            "/en-us/teams/",
+            "/pt-br/accounts-billing/work-school/",
+        ),
+        termos="Teams reunião aula entrar conta",
         assunto=None,
     ),
 )

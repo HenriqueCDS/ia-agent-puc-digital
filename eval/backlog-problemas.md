@@ -87,6 +87,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [ ] | KB-7 | 🟠 | Dedup de similaridade (RET-6) não atravessa páginas no crawl — `_crawl_fonte` chama `ingest_documents` **por URL** (lote de 1 doc) e `deduplicar_similares` só compara dentro do lote. Boilerplate do portal repetido entre dezenas de páginas → chunks quase idênticos no índice (reintroduz RET-2/RET-6) | `scripts/crawl.py`, `app/ingestion/chunker.deduplicar_similares` | Acumular as páginas da fonte em memória e chamar `ingest_documents` **1x por fonte**, não por URL | ⏳ | aberto 2026-09-01 |
 | [ ] | KB-8 | 🟠 | `web_fallback._desembrulhar` só resolve o redirect do DuckDuckGo (`/l/?uddg=`), mas `WEB_SEARCH_BACKEND` agora lista 5 (`brave,mojeek,startpage,yahoo`) — wrapper de tracking dos outros → `fonte_permitida` vê o host do buscador e descarta resultado legítimo, ou um open-redirect num domínio da allowlist passa | `app/agent/web_fallback._desembrulhar` | Cobrir os padrões de redirect dos backends ativos (ou normalizar via `parse_qs` genérico) ANTES da revalidação da allowlist | ⏳ | aberto 2026-09-01 |
 | [ ] | KB-9 | 🟠 | Cache de resposta sem TTL agora atinge o caminho da **base** via crawl — re-crawl mantém `source_path`+`chunk_index` → `chunk_id` estável → chave de cache não invalida → resposta velha p/ página web atualizada. O racional de não-cachear a web (`_responder_pela_web`) não vale p/ chunks `source_type='web'` no `_tentar_base` | `app/agent/responder._tentar_base` / `_cache_key`, `app/db/response_cache` | Não cachear quando algum chunk recuperado é `source_type='web'`, OU TTL na tabela `resposta_cache` | ⏳ | aberto 2026-09-01 |
+| [x] | KB-10 | 🟠 | Crawl sem guarda de tamanho de página — `/manual-do-aluno/` do portal PUC (visualizador de PDF embutido, ~16 MB de HTML) fazia BeautifulSoup + chunk + embed estourar a RAM (OOM em ambiente de 512 MB) | `scripts/crawl.py` | Feito (2026-09-01): `_MAX_HTML_BYTES=3MB` (pula a página antes do parse) + `_MAX_TEXT_CHARS=200k` (trunca o texto extraído). Teste em `test_crawl.py`. **Nota separada:** o crawl/ingest carrega o E5 (~1 GB) — não roda em 512 MB de qualquer forma; usar o `recrawl.yml` (GH Actions) ou local | ✅ | 2026-09-01 |
+| [x] | KB-11 | 🟡 | Conteúdo acadêmico do portal PUC (calendário, manual do aluno, prazos, requerimentos) NÃO está no sitemap como página HTML — `/calendario/` é só link p/ PDF (511 chars), `/manual-do-aluno/` é viewer de 16 MB, `requerimento`/`rematricula`/`vida-academica` = 0 páginas. O crawler (sitemap-only, não segue link) nunca vai pegar isso | `data/raw/puc-digital/`, `scripts/crawl.py` | Investigado 2026-09-01 (sitemap real: 29k URLs, ~20k são notícias). **Decisão:** esse conteúdo entra como **PDF em `data/raw/puc-digital/`** (`Calendário Acadêmico 2026`, `Manual do Aluno`) via `scripts.ingest` — é o design. O crawler fica com as páginas HTML de verdade (`/biblioteca/*`). `path_prefixes` da PUC mantidos como estão | ✅ | 2026-09-01 |
 
 ## 7. Dataset / gabarito
 
@@ -125,10 +127,10 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | 3. Veto / fidelidade | 4 / 7 |
 | 4. LGPD / PII | 2 / 4 |
 | 5. Triagem / guardrail | 3 / 6 |
-| 6. Base de conhecimento / web | 4 / 9 (KB-3 parcial) |
+| 6. Base de conhecimento / web | 6 / 11 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
 | 8. Testes | 4 / 10 |
-| **Total** | **33 / 61** |
+| **Total** | **35 / 63** |
 
 > **2026-09-01** — 16 itens novos (INF-9/10/11, RET-7/8, VET-6/7, PII-3/4, KB-5/6/7/8/9,
 > T-9/10) abertos a partir da análise do código pós-RET-3/RET-4. Nenhum resolvido —
@@ -136,6 +138,11 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 ## Changelog
 
+- **2026-09-01** — KB-10 + KB-11: guarda de tamanho no crawl (`_MAX_HTML_BYTES=3MB`, `_MAX_TEXT_CHARS=200k`)
+  depois de `/manual-do-aluno/` (~16 MB, viewer de PDF) causar OOM. Investigação do sitemap real da PUC
+  (29k URLs, quase tudo notícia): calendário/manual/prazos não existem como página HTML — entram como PDF
+  em `data/raw/puc-digital/`, não pelo crawler. `path_prefixes` mantidos. Allowlist consertada antes
+  (Canvas `/en/kb/`+`/pt/kb/`, MS Teams — sintaxe de tupla e host duplicado).
 - **2026-09-01** — KB-5 + KB-3 (cron): `vector_store.list_web_sources` (lista `source_type='web'`);
   `crawl._podar_orfas` remove do índice a página que saiu do sitemap, com 3 guardas (sitemap
   `confiavel`, teto de 50% via `_PRUNE_FRACAO_MAX`/`--prune-force`, compara sempre o sitemap
