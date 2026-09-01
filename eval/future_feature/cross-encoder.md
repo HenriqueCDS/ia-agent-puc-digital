@@ -1,8 +1,14 @@
 # Future feature — Reranker cross-encoder no retrieval
 
-Status: **não implementado.** Documento de desenho, para decidir *depois* de
-acumular dados (ver §6). Relacionado: `RET-1`, `RET-2`, `RET-3` em
-`eval/backlog-problemas.md`; análise em `eval/analises/analise-telemetria-2026-08-28.md` §2.
+Status: **implementado, DESLIGADO** (`RERANKER_ENABLED=false`, o padrão) desde
+2026-09-01. O encanamento existe (`app/retrieval/reranker.py`, ligado em
+`retriever.retrieve`, config e telemetria); virar `true` por padrão continua
+travado nos pré-requisitos da §6 — falta a suíte de fidelidade (T-1) para saber
+se o rerank melhora ou piora, sobretudo nos documentos em inglês (ver §5). Este
+documento agora descreve o que foi construído e o que falta medir.
+
+Relacionado: `RET-1`, `RET-2`, `RET-3`, `RET-4` em `eval/backlog-problemas.md`;
+análise em `eval/analises/analise-telemetria-2026-08-28.md` §2.
 
 ---
 
@@ -260,29 +266,64 @@ base estiver calibrado.
 
 ## 5. O que muda para o resto do backlog
 
-- `RET-1` — `RELEVANCE_THRESHOLD` deixa de ser paliativo: com score real, um
-  limiar absoluto volta a fazer sentido (via `RERANKER_THRESHOLD`).
-- `RET-2` — `margem_relativa` vira *feature* de entrada do reranker (ou some, se
-  o score do cross-encoder já separar sozinho).
-- `RET-3` — este documento é o plano.
-- `RET-4` — `is_exact_match` pode ser reescrito ou removido: com ranking
-  correto, "alta confiança" deixa de depender de artefato de corpus.
-- `RET-6` — dedup de quase-cópia já é feito na ingestão
-  (`chunker.deduplicar_similares`); o cross-encoder **não** substitui isso e
-  também não resolve redundância que sobreviva à ingestão.
+Análise de sequenciamento (2026-09-01). O reranker não é um item isolado: ele
+**colapsa** parte do bloco de calibração de retrieval. Isto é mapa de
+dependência, **não** move a recomendação da §6 — só diz o que parar de tunar.
+
+| Item | Efeito do reranker (quando ligado) | O que fazer agora |
+|---|---|---|
+| **`RET-4`** — ramo `alta_confianca` | **torna obsoleto.** Com ranking real, "2 fontes fortes no topo" deixa de ser proxy de confiança — vira artefato de corpus repetitivo (era exatamente o caso da Q23, `Canvas_Student_Guide.pdf`). | **removido junto deste PR** (decisão de 2026-09-01): ver o checklist abaixo. |
+| **`RET-2`** — `margem_relativa` | **absorvido.** A dispersão do top-k era o candidato a sinal de cobertura; o score do cross-encoder mede cobertura direto. Vira, no máximo, uma *feature* de entrada — nunca um `if`. | mantém a coluna instrumentada (`eval_run`/`eval_report`, custo zero); **não** construir roteamento sobre ela. |
+| **`RET-1`** — `RELEVANCE_THRESHOLD=0.85` | **superado no caminho ativo.** `RERANKER_THRESHOLD` numa escala real (sigmoid do cross-encoder) faz o corte anti-lixo que o 0.85 fazia por aproximação. | 0.85 continua valendo com `RERANKER_ENABLED=false`; **não subir mais**. |
+| README §Próximos passos #1 (recalibrar limiar p/ faixa 0.84–0.88) | **moot.** A faixa comprimida do E5 é o problema que o reranker existe para resolver. | tirar da lista de ações abertas. |
+| **`RET-6`** — dedup na ingestão | **NÃO subsume.** O cross-encoder pontua 5 quase-cópias igualmente alto; a margem continua ~0 por repetição. Dedup é ingestion-side (`chunker.deduplicar_similares`). | segue como está. |
+| Busca híbrida / BM25 (`TRI-1`, `"trancamento"`×`"trancar"`) | **NÃO subsume.** Eixo de *recall*: reordenar não inventa o chunk que o E5 não trouxe nos primeiros `RERANKER_CANDIDATES`. | investimento de retrieval **independente**, pode andar em paralelo — e o reranker *depende* de o recall estar bom. |
+
+### Checklist `RET-4` — o que sai com o ramo `alta_confianca`
+
+Feito neste PR (o ramo não fica atrás do kill switch — vale já no merge, com o
+reranker ainda desligado):
+
+- [x] `retriever.is_exact_match` — função removida.
+- [x] `settings.exact_match_threshold` / `EXACT_MATCH_THRESHOLD` no `.env.example`.
+- [x] `prompts.SYSTEM_ALTA_CONFIANCA` / `prompts.ANSWER_PROMPT_ALTA_CONFIANCA`.
+- [x] o bloco `alta_confianca = is_exact_match(chunks)` e o parâmetro
+  `alta_confianca` de `_tentar_base` em `responder.py`.
+- [x] o termo `alta_confianca` na `_cache_key` — **invalida as chaves de cache
+  existentes** (a `resposta_cache` não tem TTL; a próxima pergunta re-gera, sem
+  ação manual).
+- [x] `Registro.alta_confianca` na telemetria e a coluna em `scripts.eval_run`.
+
+### Interação com o conteúdo crawlado (KB-3)
+
+As páginas da allowlist pré-indexadas por `scripts/crawl.py` entram na coleção
+com `source_type="web"` mas respondem como `origem="base"` — então, com o
+reranker ligado, elas são rerankeadas junto dos PDFs. É o comportamento
+desejado (uma página oficial e um chunk de PDF competem pelo mesmo topo pela
+relevância real à pergunta), só vale registrar que o 2º estágio não distingue
+as duas origens.
 
 ---
 
-## 6. Pré-requisitos antes de implementar
+## 6. Pré-requisitos antes de LIGAR (`RERANKER_ENABLED=true`)
 
-1. **Suíte de fidelidade automatizada** (`T-1` / `VET-4`, não existe ainda):
-   15–20 perguntas com resposta-referência do PDF + LLM-judge. Sem ela não há
-   como medir se o reranker melhorou ou piorou — estaria calibrando no escuro.
-2. **3–5 rodadas acumuladas da coluna `margem_relativa`** (`RET-2`, já
-   entregue): se a margem sozinha já separar bem as classes, o cross-encoder é
-   over-engineering para a escala atual do projeto.
-3. Confirmar o orçamento de latência com quem opera: +150–300ms no caminho da
-   base é aceitável? (Provavelmente sim — o LLM já domina — mas é decisão de
-   produto, não de engenharia.)
+O encanamento está no código (§4), desligado. Para virar `true` por padrão:
 
-**Recomendação:** não implementar agora. Acumular (1) e (2), reavaliar.
+1. **Suíte de fidelidade** (`T-1` / `VET-4`) — semente mínima focada nos
+   documentos EN em `eval/fidelidade/canvas-en.jsonc` (ver
+   `eval/fidelidade/README.md`): 8–12 perguntas PT contra os guias Canvas, com
+   resposta-referência. Sem ela não há como medir se o rerank melhorou ou
+   piorou justamente onde ele foi pedido — os arquivos em inglês.
+2. **A/B `RERANKER_ENABLED` false × true** sobre a semente + os grupos de
+   `eval/perguntas/perguntas.jsonc`, comparando item a item: `origem`,
+   `score_top_bruto` vs `score_top` pós-rerank, se o chunk que responde subiu
+   para a posição 1, fidelidade da resposta, `ms_retrieve`.
+3. **Calibrar `RERANKER_THRESHOLD`** na escala nova (sigmoid, não comparável ao
+   ~0.82 do E5): o valor que derruba pergunta fora de domínio (Q4) para um score
+   de fato baixo sem cortar resposta PT legítima de margem baixa (Q15/Q25).
+4. Confirmar o orçamento de latência com quem opera: +130–260ms no caminho da
+   base (~2× no retrieval isolado, ~+3–8% no total percebido).
+
+**Portão:** virar `true` só se o A/B mostrar os arquivos EN melhores (chunk
+certo ranqueado acima, fidelidade igual ou melhor) e nenhuma regressão no PT.
+Registrar a rodada em `eval/analises/` na convenção dos `analise-telemetria-*`.

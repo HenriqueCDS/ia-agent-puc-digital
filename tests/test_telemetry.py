@@ -98,7 +98,9 @@ def test_resposta_da_base_registra_custo_qualidade_e_latencia(monkeypatch, regis
     assert reg["assunto"] == "canvas"
     assert (reg["origem"], reg["grounded"]) == ("base", True)
     assert (reg["n_chunks"], reg["score_top"]) == (2, 0.95)
-    assert reg["alta_confianca"] is True
+    # reranker desligado por padrão: campos do 2º estágio ficam nulos
+    assert reg["reranker_aplicado"] is None
+    assert reg["score_top_bruto"] is None
     assert reg["cache_hit"] is False
     assert (reg["input_tokens"], reg["output_tokens"]) == (120, 30)
     assert reg["ms_retrieve"] is not None and reg["ms_llm"] is not None

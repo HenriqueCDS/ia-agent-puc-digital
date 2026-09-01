@@ -10,32 +10,40 @@ from app.db.vector_store import get_vector_store
 def retrieve(query: Query, store: PGVector | None = None) -> list[RetrievedChunk]:
     """Devolve os chunks acima do limiar de relevância, do mais relevante ao menos.
 
-    PONTO DE EXTENSÃO — reranking e busca híbrida (vetorial + texto) entram aqui,
-    entre a busca e o corte por limiar, sem tocar no agente.
+    Dois caminhos, decididos por `settings.reranker_enabled`:
+
+    - **desligado (padrão)**: bi-encoder puro. Busca `TOP_K` candidatos no E5 e
+      corta por `RELEVANCE_THRESHOLD`. É o comportamento histórico.
+    - **ligado**: 2 estágios (RET-3). O E5 traz `RERANKER_CANDIDATES` (recall
+      amplo), o cross-encoder reordena esses candidatos e reescreve `.score` na
+      escala dele, e o corte passa a ser por `RERANKER_THRESHOLD`.
+
+    Em ambos, devolve `list[RetrievedChunk]` ordenada e no máximo `TOP_K` itens —
+    o agente (`responder.py`), o guardrail e a borda HTTP não enxergam a
+    diferença, só os scores mudam de escala quando o reranker está ligado.
     """
     store = store or get_vector_store()
 
     # O filtro por assunto usa a metadata gravada na ingestão.
     filtro = {"assunto": {"$eq": query.assunto}} if query.assunto else None
 
+    k = settings.reranker_candidates if settings.reranker_enabled else settings.top_k
     resultados = store.similarity_search_with_relevance_scores(
         query.text,
-        k=settings.top_k,
+        k=k,
         filter=filtro,
     )
+    chunks = [RetrievedChunk(document=doc, score=score) for doc, score in resultados]
 
-    return [
-        RetrievedChunk(document=doc, score=score)
-        for doc, score in resultados
-        if score >= settings.relevance_threshold
-    ]
+    if settings.reranker_enabled:
+        # Import local: com o reranker desligado (o padrão), este módulo — e o
+        # boot inteiro — não toca em `sentence_transformers` / torch. Mesmo
+        # motivo do import local em `db/vector_store.aquecer`.
+        from app.retrieval.reranker import rerank
 
+        chunks = rerank(query.text, chunks)
+        limiar = settings.reranker_threshold
+    else:
+        limiar = settings.relevance_threshold
 
-def is_exact_match(chunks: list[RetrievedChunk]) -> bool:
-    """As 2 fontes do topo têm score alto o bastante para tratar como alta confiança.
-
-    Não compara o conteúdo das duas entre si: usa só o score de cada uma. Como a
-    base tem bastante informação repetida (mesmo aviso em fontes diferentes), 2
-    fontes fortes no topo já costuma indicar que a resposta é direta.
-    """
-    return len(chunks) >= 2 and all(c.score >= settings.exact_match_threshold for c in chunks[:2])
+    return [c for c in chunks if c.score >= limiar][: settings.top_k]

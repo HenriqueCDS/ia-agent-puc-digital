@@ -380,20 +380,30 @@ class Settings(BaseSettings):
     # Não exige reingestão. Espelha RELEVANCE_THRESHOLD no .env.example.
     relevance_threshold: float = 0.85
 
-    # Acima disso, as 2 fontes do topo são tratadas como alta confiança (ver
-    # retrieval/retriever.is_exact_match): a base tem muita informação repetida,
-    # então 2 fontes fortes concordando já é sinal de resposta certa.
-    #
-    # RET-4 — baixado de 0.90 → 0.87. A 0.90 só disparava por artefato de corpus:
-    # a única vez em 3 rodadas foi a Q23 (0.9046/0.9020), porque o
-    # `Canvas_Student_Guide.pdf` repete o mesmo trecho em dezenas de páginas —
-    # não porque a resposta fosse mais confiável (análise de 28-08 §2.4). Para o
-    # corpus PT (1 página por PDF, sem repetição) os scores ficam presos em
-    # 0.82–0.87 e nunca chegavam lá. 0.87 deixa o ramo `alta_confianca` disparar
-    # também nesse corpus; se ligar demais, o passo seguinte (não este) é trocar
-    # o critério por "2 fontes fortes de DOCUMENTOS DIFERENTES" — hoje
-    # `is_exact_match` não checa a origem, só o score.
-    exact_match_threshold: float = 0.87
+    # --- Reranker cross-encoder (RET-3, ver app/retrieval/reranker.py) ---
+    # Kill switch. `false` = o retrieval segue bi-encoder puro (o caminho de
+    # hoje): busca `TOP_K` candidatos no E5, corta por `RELEVANCE_THRESHOLD`.
+    # `true` = 2 estágios: o E5 traz `RERANKER_CANDIDATES`, o cross-encoder
+    # reordena e o corte passa a ser por `RERANKER_THRESHOLD`. Entra ligado só
+    # depois da calibração contra a suíte de fidelidade (T-1) — ver §6 de
+    # `eval/future_feature/cross-encoder.md`. Mesmo desenho de kill switch de
+    # `triagem_enabled` / `guardrail_enabled`.
+    reranker_enabled: bool = False
+    # Multilíngue (~120MB), treinado em mmarco — lida com pergunta PT × documento
+    # EN (os guias Canvas). ~130–260ms para rerank de 20 pares em CPU. Trocar por
+    # `BAAI/bge-reranker-v2-m3` é mais forte, mas 2.3GB + ~1–2s/rerank e aperta a
+    # VM junto do E5 (~1GB). Modelo local, offline-first, igual `EMBEDDING_MODEL`.
+    reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    # `k` do 1º estágio (bi-encoder) quando o reranker está ligado. Recall amplo
+    # para o cross-encoder ter o que reordenar; o corte final continua em
+    # `TOP_K`. É ~linear no custo do rerank — 30 pares ≈ ~200–400ms em CPU.
+    reranker_candidates: int = 30
+    # Limiar sobre o score do cross-encoder (saída da sigmoid, 0..1). SEPARADO de
+    # `RELEVANCE_THRESHOLD` porque a escala é outra — não comparável com o ~0.82
+    # do E5. Default 0.0 (não corta nada; o `TOP_K` ainda limita) porque o valor
+    # real só sai da calibração da T-1; subir daqui é o entregável dessa rodada.
+    # Só vale com `RERANKER_ENABLED=true`; senão vale `RELEVANCE_THRESHOLD`.
+    reranker_threshold: float = 0.0
 
     # Nome da coleção no pgvector. Trocar isola um índice novo do antigo.
     # Sufixo pelo MODELO de embedding: a dimensão do vetor muda a cada troca

@@ -138,7 +138,8 @@ _CAMPOS_DA_TELEMETRIA = (
     "score_top",
     "score_min",
     "score_mean",
-    "alta_confianca",
+    "reranker_aplicado",   # RET-3 — o 2º estágio (cross-encoder) rodou nesta pergunta?
+    "score_top_bruto",     # score_top do bi-encoder (E5) antes do rerank
     "provider",
     "chat_model",
     "cache_hit",

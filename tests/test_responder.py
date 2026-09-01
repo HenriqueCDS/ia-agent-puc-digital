@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage
 
 from app.agent import responder
 from app.agent.prompts import CONTEXTO_INSUFICIENTE, SEM_CONTEXTO
-from app.core.config import CONTATO_PADRAO, settings
+from app.core.config import CONTATO_PADRAO
 from app.core.models import Answer, Query, RetrievedChunk
 
 
@@ -486,30 +486,6 @@ def test_pergunta_vazia_e_rejeitada():
 def test_anexo_ainda_nao_suportado_falha_explicitamente(tmp_path):
     with pytest.raises(NotImplementedError):
         responder.answer(Query(text="o que é isso?", attachments=[tmp_path / "print.png"]))
-
-
-def test_2_fontes_fortes_usam_prompt_de_alta_confianca(monkeypatch):
-    alto = settings.exact_match_threshold
-    chunks = [_chunk(page=1), _chunk(page=2)]
-    chunks[0].score = alto
-    chunks[1].score = alto
-    monkeypatch.setattr(responder, "retrieve", lambda q: chunks)
-    llm = FakeLLM()
-
-    responder.answer(Query(text="como envio atividade?"), llm=llm)
-
-    prompt = "\n".join(str(m.content) for m in llm.mensagens)
-    assert "sem ressalvas" in prompt
-
-
-def test_fonte_unica_forte_nao_usa_alta_confianca(monkeypatch):
-    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
-    llm = FakeLLM()
-
-    responder.answer(Query(text="como envio atividade?"), llm=llm)
-
-    prompt = "\n".join(str(m.content) for m in llm.mensagens)
-    assert "sem ressalvas" not in prompt
 
 
 def test_mesma_pergunta_com_mesmos_chunks_usa_cache_e_nao_chama_llm(monkeypatch):

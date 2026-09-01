@@ -1,22 +1,24 @@
-"""Testes do retrieval e do guardrail, com um vector store falso (sem banco, sem API)."""
+"""Testes do retrieval, com um vector store falso (sem banco, sem API)."""
 
 import pytest
 from langchain_core.documents import Document
 
 from app.core.config import settings
 from app.core.models import Query, RetrievedChunk
-from app.retrieval.retriever import is_exact_match, retrieve
+from app.retrieval.retriever import retrieve
 
 
 class FakeStore:
-    """Dublê de PGVector: registra o filtro recebido e devolve resultados fixos."""
+    """Dublê de PGVector: registra o filtro e o `k` recebidos e devolve fixos."""
 
     def __init__(self, resultados):
         self.resultados = resultados
         self.filtro_recebido = "não chamado"
+        self.k_recebido = None
 
     def similarity_search_with_relevance_scores(self, query, k, filter=None):
         self.filtro_recebido = filter
+        self.k_recebido = k
         return self.resultados[:k]
 
 
@@ -73,23 +75,64 @@ def test_citacao_formata_arquivo_e_pagina(meta, esperado):
     assert chunk.citation == esperado
 
 
-def _chunk_com_score(score):
-    return RetrievedChunk(document=Document(page_content="x"), score=score)
+# --- Reranker cross-encoder (RET-3) -----------------------------------------
 
 
-def test_is_exact_match_com_as_2_top_fontes_fortes():
-    alto = settings.exact_match_threshold
-    chunks = [_chunk_com_score(alto), _chunk_com_score(alto), _chunk_com_score(0.1)]
+@pytest.fixture
+def reranker_ligado(monkeypatch):
+    """Liga o reranker e substitui `rerank` por um dublê que inverte a ordem.
 
-    assert is_exact_match(chunks) is True
+    Inverter é o suficiente para provar que `retrieve` de fato passou os chunks
+    pelo 2º estágio: o dublê reescreve `.score` para uma escala própria e devolve
+    a lista ao contrário. O modelo real nunca é carregado.
+    """
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "reranker_candidates", 30)
+    monkeypatch.setattr(settings, "reranker_threshold", 0.6)
+
+    def fake_rerank(pergunta, chunks):
+        # inverte a ordem do E5 e dá scores decrescentes por posição — o
+        # bastante para provar que `retrieve` passou pelo 2º estágio.
+        invertidos = list(reversed(chunks))
+        return [
+            RetrievedChunk(document=c.document, score=1.0 - i * 0.25, score_bruto=c.score)
+            for i, c in enumerate(invertidos)
+        ]
+
+    # `retrieve` faz `from app.retrieval.reranker import rerank` em tempo de
+    # chamada — patchar o atributo do módulo basta, o modelo real nunca carrega.
+    monkeypatch.setattr("app.retrieval.reranker.rerank", fake_rerank)
+    return fake_rerank
 
 
-def test_is_exact_match_falso_se_a_segunda_fonte_for_fraca():
-    alto = settings.exact_match_threshold
-    chunks = [_chunk_com_score(alto), _chunk_com_score(alto - 0.2)]
+def test_reranker_desligado_usa_top_k_e_limiar_do_e5(monkeypatch):
+    monkeypatch.setattr(settings, "reranker_enabled", False)
+    store = FakeStore([_resultado(f"c{i}", 0.9) for i in range(10)])
 
-    assert is_exact_match(chunks) is False
+    chunks = retrieve(Query(text="x"), store=store)
+
+    assert store.k_recebido == settings.top_k
+    assert len(chunks) == settings.top_k
+    assert all(c.score_bruto is None for c in chunks)
 
 
-def test_is_exact_match_falso_com_menos_de_2_fontes():
-    assert is_exact_match([_chunk_com_score(settings.exact_match_threshold)]) is False
+def test_reranker_ligado_busca_candidatos_reordena_e_corta(monkeypatch, reranker_ligado):
+    # 6 candidatos com score de E5 crescente; o dublê inverte, então o antigo
+    # último (c5) vira o topo. `reranker_threshold=0.6` corta do 3º em diante
+    # (scores do dublê por posição: 1.0, 0.75, 0.5, ...).
+    store = FakeStore([_resultado(f"c{i}", 0.80 + i * 0.01) for i in range(6)])
+
+    chunks = retrieve(Query(text="x"), store=store)
+
+    assert store.k_recebido == 30
+    assert [c.document.page_content for c in chunks] == ["c5", "c4"]
+    assert chunks[0].score_bruto == pytest.approx(0.85)  # score de E5 preservado
+
+
+def test_reranker_ligado_respeita_top_k(monkeypatch, reranker_ligado):
+    monkeypatch.setattr(settings, "reranker_threshold", -1.0)  # não corta nada
+    store = FakeStore([_resultado(f"c{i}", 0.9) for i in range(20)])
+
+    chunks = retrieve(Query(text="x"), store=store)
+
+    assert len(chunks) == settings.top_k

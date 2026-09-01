@@ -50,6 +50,16 @@ def aquecer() -> None:
     store = get_vector_store()
     with store.session_maker() as session:
         session.execute(text("SELECT 1"))
+
+    # RET-3 — o cross-encoder do 2º estágio também lê pesos do disco na 1ª vez.
+    # Só quando ligado: `RERANKER_ENABLED=false` (o padrão) não paga memória nem
+    # tempo de boot por um modelo que ninguém vai chamar. Import local para o
+    # caminho desligado nem tocar em `sentence_transformers.CrossEncoder`.
+    if settings.reranker_enabled:
+        from app.retrieval.reranker import get_reranker
+
+        get_reranker()
+
     logger.info("warm-up: concluído, conexão com o Postgres confirmada.")
 
 

@@ -162,10 +162,13 @@ chunks) — ver a rodada de avaliação em
 [`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md).
 O que essa rodada deixou em aberto, em ordem de impacto:
 
-1. **`RELEVANCE_THRESHOLD` e `EXACT_MATCH_THRESHOLD` estão fora da faixa útil**
-   do embedding atual (§3 da análise): não descartam nem promovem chunk
-   nenhum hoje, porque o `score_top` de qualquer pergunta cai numa faixa
-   estreita (0.84–0.88) esteja a base cobrindo o tema ou não.
+1. **`RELEVANCE_THRESHOLD` está fora da faixa útil** do embedding atual (§3 da
+   análise): não descarta chunk nenhum hoje, porque o `score_top` de qualquer
+   pergunta cai numa faixa estreita (0.84–0.88) esteja a base cobrindo o tema ou
+   não. A resposta escolhida é o **reranker cross-encoder** (RET-3) —
+   encanamento no código, `RERANKER_ENABLED=false` até calibrar. O antigo
+   `EXACT_MATCH_THRESHOLD` / ramo `alta_confianca` foi **removido** junto: com
+   ranking real ele deixou de fazer sentido (ver `cross-encoder.md` §5).
 2. **Recusa em prosa do LLM escapa dos dois vetos de contexto insuficiente**
    (`prompts.eh_insuficiente`) quando o modelo não emite o marcador esperado —
    infla a acurácia aparente de `origem="web"` (§4 da análise).
@@ -296,7 +299,7 @@ python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl   # e/ou 
  "assunto":"canvas","assunto_origem":"metadata","topico":"envio de atividade",
  "pergunta_hash":"8efa09547286","chat_model":"gemini-3.6-flash","provider":"gemini",
  "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"score_min":0.87,
- "score_mean":0.91,"alta_confianca":true,
+ "score_mean":0.91,"reranker_aplicado":null,"score_top_bruto":null,
  "cache_hit":false,"input_tokens":120,"output_tokens":30,
  "ms_retrieve":41.2,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
  "web_insuficiente":null,"erro":null}
@@ -436,7 +439,7 @@ Responde às quatro perguntas que importam para eficiência:
 | Quanto custa? | `input_tokens`, `output_tokens`, `cache_hit` (hit = zero token de API) |
 | Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_llm` (rede), `ms_web` (rede lenta) |
 | O guardrail dispara quanto? | `origem` = `base` / `web` / `encaminhado` / `nenhuma`, `base_insuficiente`, `web_insuficiente` |
-| A qualidade caiu? | `n_chunks`, `score_top`/`score_min`/`score_mean` (dispersão do top-k), `alta_confianca` ao longo do tempo |
+| A qualidade caiu? | `n_chunks`, `score_top`/`score_min`/`score_mean` (dispersão do top-k), `score_top_bruto` (score de E5 antes do rerank, quando `reranker_aplicado`) ao longo do tempo |
 
 Consultas (a coluna `dados` é `JSONB` — campo novo no registro não exige migração):
 
@@ -624,7 +627,8 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 | **FAQ estruturado** (match exato, sem LLM) | antes do `retrieve` em `responder.py` | responde as perguntas de altíssima frequência com texto aprovado, latência ~0 |
 | **Abertura de chamado** | onde hoje está `_encaminhar_para_secretaria` | transforma o encaminhamento em ação: abre o ticket já com a pergunta |
 | **Interpretação de print/imagem** | `app/agent/preprocess.py` | anexo → descrição textual via Gemini multimodal → mesma `Query` |
-| **Reranking / busca híbrida** | `app/retrieval/retriever.py` | entre a busca e o corte por limiar |
+| **Reranking cross-encoder** (RET-3) | `app/retrieval/reranker.py`, ligado em `retriever.retrieve` | **encanamento pronto, `RERANKER_ENABLED=false`** — supera `RET-1`/`RET-2`/`RET-4` no caminho ativo; virar `true` está travado na suíte de fidelidade (ver [`eval/future_feature/cross-encoder.md`](eval/future_feature/cross-encoder.md) §6) |
+| **Busca híbrida** (BM25 + vetor) | `app/retrieval/retriever.py` | eixo de recall, ortogonal ao reranker — entra entre a busca e o corte |
 | **Canal de atendimento** (portal, WhatsApp) | `app/main.py` | mais rotas; a lógica já está em `responder.py` |
 | **Classificação de intenção / escalonamento** | antes do `retrieve` em `responder.py` | roteia entre responder e encaminhar para humano |
 
@@ -647,6 +651,11 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
   nunca descarta um chunk — quem decide base-vs-web é o veto do LLM, não este
   número (ver
   [`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md) §3).
+  Essa faixa comprimida é o que o **reranker cross-encoder** (RET-3) existe para
+  quebrar: o encanamento já está no código, desligado (`RERANKER_ENABLED=false`),
+  e quando ligar o corte passa a ser `RERANKER_THRESHOLD` numa escala real. Até
+  lá, o `0.85` é rede contra lixo óbvio, não classificador — ver
+  [`eval/future_feature/cross-encoder.md`](eval/future_feature/cross-encoder.md).
 - **Fallback como ramo do guardrail, não como tool do LLM**: o gatilho ("o
   retrieval voltou vazio") é um `if`, não uma decisão ambígua. Deixar o modelo
   escolher custaria uma chamada extra para decidir o que o código já sabe, e
@@ -695,7 +704,7 @@ rodadas de 2026-08-26 e 2026-08-27
 
 | # | Ação | Onde | Status |
 |---|---|---|---|
-| 1 | Recalibrar os limiares para a faixa real do embedding (0.84–0.88), ou trocar por margem relativa do top-k / reranker | `RELEVANCE_THRESHOLD`, `EXACT_MATCH_THRESHOLD` | ⏳ pendente — `score_min`/`score_mean` já instrumentados na telemetria para testar a hipótese |
+| 1 | Reranker cross-encoder (RET-3) é a direção escolhida para o limiar comprimido do E5 — encanamento pronto (`app/retrieval/reranker.py`), `RERANKER_ENABLED=false`; virar `true` travado na suíte de fidelidade (T-1) + A/B | `RERANKER_*`, [`cross-encoder.md`](eval/future_feature/cross-encoder.md) | ⏳ desligado — `RET-4` (`alta_confianca`) já removido; `score_top_bruto` instrumentado |
 | 2 | Fechar o vazamento do veto: recusa em prosa do LLM sem o marcador esperado passa como resposta válida | `prompts.eh_insuficiente` | ⏳ pendente — prompt endurecido em 2026-08-27, mas ainda probabilístico |
 | 3 | Pré-aquecer o modelo de embeddings no boot (evita ~40s no primeiro request do processo) | `app/api/app.py` | ⏳ pendente |
 | 4 | Guardrail de entrada (injeção / segredo / exploit → `encaminhado`) | `app/agent/guardrail.py` | ✅ aplicado 2026-08-27 |

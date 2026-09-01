@@ -1,0 +1,127 @@
+// Semente da suíte de fidelidade — perguntas PT contra os guias Canvas em INGLÊS
+// (data/raw/canvas/Canvas_Student_Guide.pdf e Canvas_Instructor_Guide.pdf).
+//
+// Foco deliberado: pergunta PT × documento EN é o que o reranker cross-encoder
+// (RET-3) foi pedido para melhorar, e o de maior risco de regressão.
+//
+// Mesmo formato de eval/perguntas/perguntas.jsonc (scripts.eval_run):
+//   pergunta, origem_esperada, [assunto], [origem_tambem_ok], [criterio], [grupo]
+// Campos extra desta suíte:
+//   resposta_referencia  — a resposta correta EXTRAÍDA DO GUIA (não de memória).
+//                          `null` = ainda não preenchida; ver eval/fidelidade/README.md.
+//   pagina_referencia    — página(s) do PDF de onde a referência veio.
+//
+// scripts.eval_run ignora os campos que não conhece — `resposta_referencia` e
+// `pagina_referencia` ficam só para a conferência (manual por ora, LLM-judge é
+// o que falta de T-1/VET-4). O `criterio` é o que o resumo do eval_run destaca.
+[
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como eu envio uma atividade (assignment) no Canvas?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Passos do guia do estudante: Cursos > Atividades > a atividade > 'Enviar tarefa' (Submit Assignment); tipos de envio (arquivo, texto, URL). Não pode inventar nome de menu.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Onde vejo as notas das minhas atividades no Canvas?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: menu do curso > Notas (Grades). Confere se cita o local certo e não confunde com a área do aluno da instituição.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Consigo reenviar uma atividade depois de já ter entregado?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: reenvio permitido enquanto a atividade aceita envios; o professor vê todas as tentativas. Confere se a resposta não afirma prazo/limite que o guia não dá.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como participo de uma discussão (fórum) no Canvas?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: Cursos > Discussões > responder/criar tópico. Distingue discussão focada de threaded se o guia distinguir.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como envio uma mensagem para o meu professor pelo Canvas?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: Caixa de entrada (Inbox) > Compor > selecionar curso e destinatário. Não confundir com e-mail externo.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como vejo o feedback que o professor deixou numa atividade corrigida?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: Notas > a atividade > ícone de comentário / SpeedGrader do lado do aluno / detalhes do envio. Confere o caminho.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "O que é o painel (Dashboard) do Canvas e o que aparece nele?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: cartões de curso, lista de tarefas/'Coming Up', atividade recente. Confere se não inventa widgets.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como ajusto as notificações do Canvas para receber aviso de nota nova?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: Conta > Notificações > frequência por tipo de evento. Confere se descreve os níveis (imediato/diário/semanal/nunca).",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como faço um quiz/prova no Canvas e o que acontece se eu fechar a página no meio?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do estudante: fazer o quiz, respostas salvas automaticamente, retomar se houver tempo/tentativa. Confere se não promete retomada quando o guia não garante.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Qual o tamanho máximo de arquivo que posso enviar numa atividade do Canvas?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "origem_tambem_ok": ["nenhuma"],
+    "criterio": "Se o guia do estudante NÃO traz um número de limite de upload, o certo é recusar (#SEM_COBERTURA#), não chutar '500 MB'. Item-armadilha para pegar alucinação de número.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como um professor adiciona um aluno manualmente a um curso no Canvas?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do professor: Pessoas (People) > + Pessoas > e-mail/login > papel Aluno > Adicionar. Estrutura de tutorial 'menu > pessoa > adicionar pessoa'.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  },
+  {
+    "grupo": "fidelidade-en",
+    "pergunta": "Como o professor publica (torna visível) um curso para os alunos no Canvas?",
+    "assunto": "canvas",
+    "origem_esperada": "base",
+    "criterio": "Guia do professor: Página inicial do curso > botão Publicar (Publish); curso não publicado não aparece para o aluno. Confere o efeito.",
+    "resposta_referencia": null,
+    "pagina_referencia": null
+  }
+]

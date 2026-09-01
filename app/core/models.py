@@ -53,6 +53,12 @@ class RetrievedChunk:
     document: Document
     score: float  # relevância 0..1 (quanto maior, mais relevante)
 
+    # Score do 1º estágio (bi-encoder E5) quando o reranker cross-encoder rodou
+    # sobre este chunk — `score` acima passa a ser o do cross-encoder, noutra
+    # escala. `None` quando não houve rerank (`RERANKER_ENABLED=false`), que é
+    # informação, não falta de dado. Ver `app/retrieval/reranker.py`.
+    score_bruto: float | None = None
+
     @property
     def citation(self) -> str:
         meta = self.document.metadata

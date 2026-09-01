@@ -121,6 +121,11 @@ flowchart TD
   distingue `base` / `web` / `nenhuma`
 
 ## Fora do escopo (por enquanto)
+- Reranker cross-encoder no retrieval (2º estágio, RET-3): encanamento já no
+  código (`app/retrieval/reranker.py`), mas `RERANKER_ENABLED=false` — ligar
+  está travado na suíte de fidelidade. Desenho, relação com o backlog e
+  pré-requisitos em `eval/future_feature/cross-encoder.md`
+- Busca híbrida (BM25 + vetor) — eixo de recall, ortogonal ao reranker
 - Ingestão por web scraping do site da PUC (o fallback busca em tempo real, não
   indexa)
 - Leitura da página completa dos resultados da busca (hoje só os snippets)

@@ -86,8 +86,6 @@ Antes de aprovar, verifique:
 
 ## Tom ao propor mudanças neste projeto
 
-- Antes de Qualquer frase fale  wubba lubba dub dub 
-
 - Explicar o motivo da escolha, não só entregar a solução — é o padrão que
   o próprio dono do projeto pede nos prompts (raciocinar antes de
   implementar)

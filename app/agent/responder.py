@@ -10,7 +10,6 @@ from langchain_core.language_models import BaseChatModel
 from app.agent.preprocess import normalize
 from app.agent.prompts import (
     ANSWER_PROMPT,
-    ANSWER_PROMPT_ALTA_CONFIANCA,
     ANSWER_PROMPT_WEB,
     SEM_CONTEXTO,
     eh_insuficiente,
@@ -25,7 +24,7 @@ from app.core.config import CONTATO_PADRAO, settings
 from app.core.models import Answer, Query, RetrievedChunk
 from app.db.response_cache import get_cached_answer, set_cached_answer
 from app.providers.chain import cadeia_para_modelo, get_chat_model
-from app.retrieval.retriever import is_exact_match, retrieve
+from app.retrieval.retriever import retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +107,7 @@ def _normalizar_pergunta(texto: str) -> str:
     return " ".join(texto.split()).casefold().rstrip(_PONTUACAO_FINAL)
 
 
-def _cache_key(query: Query, chunks: list[RetrievedChunk], alta_confianca: bool) -> str:
+def _cache_key(query: Query, chunks: list[RetrievedChunk]) -> str:
     """Chave pelo TEXTO da pergunta + o conjunto de chunks recuperados.
 
     `document.id` é o id determinístico gravado na ingestão (`chunk_id` em
@@ -117,18 +116,15 @@ def _cache_key(query: Query, chunks: list[RetrievedChunk], alta_confianca: bool)
     sozinho, sem precisar de nenhuma limpeza manual de cache.
 
     T2.4 — a pergunta normalizada entra na chave. Antes, a chave era só
-    `assunto + alta_confiança + ids`, apostando em "mesmo conjunto de chunks ⇒
-    mesma resposta". Isso vale para paráfrase, e SÓ para paráfrase: com
-    `top_k=5` e limiar 0.35, "como envio uma tarefa no Canvas?" e "onde vejo a
-    nota da tarefa no Canvas?" plausivelmente recuperam os mesmos 5 chunks — e
-    a segunda recebia a resposta da primeira. Servir a resposta de outra
-    pergunta é o pior modo de falha possível num agente de suporte: parece
-    certo e não deixa rastro.
+    `assunto + ids`, apostando em "mesmo conjunto de chunks ⇒ mesma resposta".
+    Isso vale para paráfrase, e SÓ para paráfrase: com `top_k=5` e limiar 0.35,
+    "como envio uma tarefa no Canvas?" e "onde vejo a nota da tarefa no Canvas?"
+    plausivelmente recuperam os mesmos 5 chunks — e a segunda recebia a resposta
+    da primeira. Servir a resposta de outra pergunta é o pior modo de falha
+    possível num agente de suporte: parece certo e não deixa rastro.
 
     O custo é hit rate: paráfrase que não sobrevive à normalização acima passa
-    a pagar uma chamada ao LLM. Trade escolhido de propósito — a alternativa
-    considerada (cachear só no ramo `alta_confianca`) preservaria mais hits mas
-    deixaria o mesmo erro de pé no ramo comum, que é onde ele acontece.
+    a pagar uma chamada ao LLM. Trade escolhido de propósito.
 
     `query.modelo` também entra na chave (sempre, mesmo quando vazio) — é o que
     torna `settings.modelo_override_cache_enabled` seguro de ligar: um override
@@ -139,7 +135,7 @@ def _cache_key(query: Query, chunks: list[RetrievedChunk], alta_confianca: bool)
     """
     ids = sorted(c.document.id or "" for c in chunks)
     base = (
-        f"{_normalizar_pergunta(query.text)}|{query.assunto or ''}|{alta_confianca}|"
+        f"{_normalizar_pergunta(query.text)}|{query.assunto or ''}|"
         f"{','.join(ids)}|{query.modelo or ''}"
     )
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
@@ -386,6 +382,12 @@ def _responder(
     if chunks:
         registro.score_min = round(chunks[-1].score, 4)
         registro.score_mean = round(sum(c.score for c in chunks) / len(chunks), 4)
+        # RET-3 — quando o reranker rodou, `chunks[*].score` é do cross-encoder
+        # (outra escala); `score_bruto` traz o score de E5 do 1º estágio, e é o
+        # que mantém a série `score_top` histórica comparável.
+        if chunks[0].score_bruto is not None:
+            registro.reranker_aplicado = True
+            registro.score_top_bruto = round(chunks[0].score_bruto, 4)
     _registrar_assunto(registro, _assunto_dos_chunks(chunks), "metadata")
 
     # Guardrail: em suporte acadêmico, não responder é melhor que alucinar um
@@ -404,12 +406,7 @@ def _responder(
             return _responder_pela_web(query, llm, registro)
         return _encaminhar_para_secretaria()
 
-    alta_confianca = is_exact_match(chunks)
-    registro.alta_confianca = alta_confianca
-    if alta_confianca:
-        logger.info("alta confiança: %.2f e %.2f nas 2 fontes do topo", chunks[0].score, chunks[1].score)
-
-    resultado = _tentar_base(query, llm, chunks, alta_confianca, registro)
+    resultado = _tentar_base(query, llm, chunks, registro)
     if resultado is not None:
         return resultado
 
@@ -429,7 +426,6 @@ def _tentar_base(
     query: Query,
     llm: BaseChatModel | None,
     chunks: list[RetrievedChunk],
-    alta_confianca: bool,
     registro: telemetry.Registro,
 ) -> Answer | None:
     """Responde com o contexto da base, ou None se o LLM considerar insuficiente.
@@ -438,7 +434,7 @@ def _tentar_base(
     — mesmo veto que `_responder_pela_web` já aplicava do lado da web
     (`CONTEXTO_INSUFICIENTE`, ver prompts.py), agora também do lado da base.
     """
-    prompt = ANSWER_PROMPT_ALTA_CONFIANCA if alta_confianca else ANSWER_PROMPT
+    prompt = ANSWER_PROMPT
 
     # Cache pelo conjunto de chunks (ver _cache_key), checado só agora — depois
     # do guardrail em _responder — para não mascarar uma pergunta sem contexto e
@@ -454,7 +450,7 @@ def _tentar_base(
     usar_cache = settings.cache_enabled and (
         not query.modelo or settings.modelo_override_cache_enabled
     )
-    cache_key = _cache_key(query, chunks, alta_confianca) if usar_cache else None
+    cache_key = _cache_key(query, chunks) if usar_cache else None
     bruto = None
     if cache_key:
         bruto = get_cached_answer(cache_key)

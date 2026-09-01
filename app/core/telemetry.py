@@ -199,7 +199,15 @@ class Registro:
     # Qualidade do retrieval (M5): queda sustentada = drift de base ou de query.
     n_chunks: int | None = None
     score_top: float | None = None
-    alta_confianca: bool | None = None
+
+    # RET-3 — o 2º estágio (cross-encoder) rodou nesta pergunta? `None` quando
+    # `RERANKER_ENABLED=false` (o caminho bi-encoder de sempre).
+    reranker_aplicado: bool | None = None
+    # `score_top` do BI-ENCODER (E5), antes do rerank. Mantém a série histórica
+    # comparável (o `score_top` abaixo passa a ser o do cross-encoder quando ele
+    # roda, noutra escala) e permite medir depois "o rerank mudou a ordem?".
+    # `None` quando não houve rerank. Ver `app/retrieval/reranker.py`.
+    score_top_bruto: float | None = None
 
     # DISPERSÃO do top-k, e não mais só o topo. Existe para responder a uma
     # pergunta que `score_top` sozinho não responde: a base COBRE este tema?
