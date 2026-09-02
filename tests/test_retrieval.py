@@ -89,10 +89,14 @@ def reranker_ligado(monkeypatch):
     Inverter é o suficiente para provar que `retrieve` de fato passou os chunks
     pelo 2º estágio: o dublê reescreve `.score` para uma escala própria e devolve
     a lista ao contrário. O modelo real nunca é carregado.
+
+    `relevance_threshold=0.0` aqui de propósito: o piso de E5 no 1º estágio
+    (RET-7) tem teste próprio; estes testes são só sobre o 2º estágio.
     """
     monkeypatch.setattr(settings, "reranker_enabled", True)
     monkeypatch.setattr(settings, "reranker_candidates", 30)
     monkeypatch.setattr(settings, "reranker_threshold", 0.6)
+    monkeypatch.setattr(settings, "relevance_threshold", 0.0)
 
     def fake_rerank(pergunta, chunks):
         # inverte a ordem do E5 e dá scores decrescentes por posição — o
@@ -178,3 +182,76 @@ def test_retrieve_com_reranker_nao_quebra_fora_de_answer(reranker_ligado):
     chunks = retrieve(Query(text="x"), store=store)
 
     assert chunks  # rodou normal, sem exceção
+
+
+# --- RET-7: o piso de E5 vale no 1º estágio, mesmo com o reranker ligado ----
+
+
+def test_reranker_ligado_ainda_corta_pelo_piso_de_e5_antes_do_rerank(monkeypatch):
+    """RET-7: com `RERANKER_THRESHOLD=0.0` (não calibrado), um chunk que o E5
+    pontua abaixo de `RELEVANCE_THRESHOLD` não pode passar só por ter sido
+    reordenado — senão 'reranker ligado' seria PIOR que o bi-encoder para lixo
+    fora de domínio (Q4 fotossíntese)."""
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "reranker_candidates", 30)
+    monkeypatch.setattr(settings, "reranker_threshold", 0.0)  # não corta nada
+    monkeypatch.setattr(settings, "relevance_threshold", 0.85)
+
+    recebidos_pelo_rerank = {}
+
+    def fake_rerank(pergunta, chunks):
+        recebidos_pelo_rerank["textos"] = [c.document.page_content for c in chunks]
+        return [
+            RetrievedChunk(document=c.document, score=0.99, score_bruto=c.score)
+            for c in chunks
+        ]
+
+    monkeypatch.setattr("app.retrieval.reranker.rerank", fake_rerank)
+    store = FakeStore(
+        [_resultado("no_dominio", 0.87), _resultado("fora_do_dominio", 0.82)]
+    )
+
+    chunks = retrieve(Query(text="fotossíntese em plantas C4"), store=store)
+
+    # o chunk abaixo de 0.85 nem chegou ao cross-encoder
+    assert recebidos_pelo_rerank["textos"] == ["no_dominio"]
+    assert [c.document.page_content for c in chunks] == ["no_dominio"]
+
+
+def test_reranker_ligado_sem_candidato_acima_do_piso_devolve_vazio(monkeypatch):
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "relevance_threshold", 0.85)
+
+    def rerank_proibido(*_a, **_k):
+        raise AssertionError("rerank não deve ser chamado sem candidato acima do piso")
+
+    monkeypatch.setattr("app.retrieval.reranker.rerank", rerank_proibido)
+    store = FakeStore([_resultado("lixo", 0.80), _resultado("mais lixo", 0.79)])
+
+    assert retrieve(Query(text="x"), store=store) == []
+
+
+# --- RET-8: rerank que levanta exceção não derruba o /ask ------------------
+
+
+def test_reranker_que_levanta_excecao_cai_para_a_ordem_bi_encoder(monkeypatch, caplog):
+    """RET-8: o cross-encoder pode estourar memória na VM. `retrieve` degrada
+    para a ordem bi-encoder (já filtrada pelo piso de E5), sem propagar e sem
+    marcar `reranker_aplicado` — mesmo espírito da `ProviderChain`."""
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "reranker_candidates", 30)
+    monkeypatch.setattr(settings, "relevance_threshold", 0.0)
+
+    def rerank_que_estoura(pergunta, chunks):
+        raise MemoryError("cross-encoder OOM na VM")
+
+    monkeypatch.setattr("app.retrieval.reranker.rerank", rerank_que_estoura)
+    # E5 devolve em ordem decrescente; a fallback preserva essa ordem e corta em top_k
+    store = FakeStore([_resultado(f"c{i}", 0.9 - i * 0.01) for i in range(10)])
+
+    with caplog.at_level("WARNING"):
+        chunks = retrieve(Query(text="x"), store=store)
+
+    assert [c.document.page_content for c in chunks] == [f"c{i}" for i in range(settings.top_k)]
+    assert all(c.score_bruto is None for c in chunks)  # não rerankeou
+    assert "reranker falhou" in caplog.text

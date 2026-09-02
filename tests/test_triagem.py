@@ -89,12 +89,14 @@ def test_trancamento_de_disciplina_e_encaminhado():
         "Como faço para trancar o curso?",
         "Quero trancar minha matrícula neste semestre",
         "É possível trancar uma disciplina depois do prazo?",
+        # TRI-4 / owasp-2: a 3ª forma, "trancagem"
+        "Qual a data limite para a trancagem de matrícula do semestre atual?",
     ],
 )
 def test_verbo_trancar_tambem_e_encaminhado(pergunta):
     """TRI-1: o léxico era preso à forma nominal ("trancamento"), então "quero
-    trancar o curso" seguia para o RAG (Q13; telemetria 27-08 Q14). "trancar"
-    entrou como termo da categoria academico."""
+    trancar o curso" seguia para o RAG (Q13; telemetria 27-08 Q14). "trancar" e
+    "trancagem" entraram como termos da categoria academico."""
     categoria = classificar(pergunta)
 
     assert categoria is not None and categoria.assunto == "academico"

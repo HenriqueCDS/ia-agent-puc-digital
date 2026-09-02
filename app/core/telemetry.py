@@ -269,13 +269,21 @@ class Registro:
     # a resposta virou encaminhamento à secretaria sem tentar a busca externa.
     veto_escapou: bool | None = None
 
-    # VET-2 — o modelo se RECUSOU a obedecer o pedido (não a responder por falta
-    # de contexto) e essa recusa passou como resposta; a rede de segurança de
-    # `responder.answer` a converteu no encaminhamento do guardrail. Nulo em
-    # operação normal. Se aparecer, é um jailbreak / pedido abusivo que furou o
-    # guardrail léxico (paráfrase ou outro idioma) — pauta de calibração do
-    # `guardrail._PADROES`, não de indexação.
+    # VET-2 / TRI-4 — o modelo se RECUSOU a obedecer o pedido (não a responder
+    # por falta de contexto) e essa recusa passou como resposta; a rede de
+    # segurança de `responder.answer` a converteu no encaminhamento do guardrail.
+    # Nulo em operação normal. Se aparecer, é um jailbreak / pedido abusivo que
+    # furou o guardrail léxico (paráfrase, outro idioma, ou o marcador
+    # `#FORA_DE_ESCOPO#` do prompt) — pauta de calibração do `guardrail._PADROES`,
+    # não de indexação.
     recusa_modelo: bool | None = None
+
+    # TRI-3 — um chunk recuperado casou o léxico do guardrail: possível injeção
+    # indireta (payload dentro de um documento que o RAG trouxe). É só SINAL — a
+    # resposta segue normal, porque o corpus é curado e o hit é quase sempre
+    # falso positivo. Nulo em operação normal; quando aparece, vale abrir o
+    # `source_path` do chunk à mão.
+    contexto_suspeito: bool | None = None
 
     erro: str | None = None
 

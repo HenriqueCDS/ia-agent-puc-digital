@@ -266,13 +266,13 @@ ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
     CategoriaEncaminhada(
         assunto="academico",
         resposta=_CONTATO.format(email="puc.digital@puc-campinas.edu.br"),
-        # "trancamento" (forma nominal) e "trancar" (verbo): o léxico é preso à
-        # forma, então "quero trancar o curso" não casava "trancamento". As duas
-        # formas listadas em vez de normalizar por radical `tranc` — mais
-        # explícito e sem risco de casar palavra não relacionada. "trancar" não
-        # é substring de "trancamento" nem vice-versa, a ordem entre eles não
+        # "trancamento" (nominal), "trancar" (verbo) e "trancagem" (a 3ª forma,
+        # usada em "trancagem de matrícula" — owasp-2/TRI-4): o léxico é preso à
+        # forma, então cada uma é listada explicitamente em vez de normalizar por
+        # radical `tranc` — mais explícito e sem risco de casar palavra não
+        # relacionada. Nenhuma é substring da outra, a ordem entre elas não
         # importa (ver regra de substring no topo de ENCAMINHAMENTOS).
-        termos=("rematricula", "historico escolar", "trancamento", "trancar"),
+        termos=("rematricula", "historico escolar", "trancamento", "trancar", "trancagem"),
     ),
     # Ambígua, por isso em entrada PRÓPRIA (mesmo assunto e mesmo e-mail da
     # anterior, e não termo dela): "minha nota" tanto pede o valor da nota, que
@@ -461,7 +461,11 @@ class Settings(BaseSettings):
     # `RELEVANCE_THRESHOLD` porque a escala é outra — não comparável com o ~0.82
     # do E5. Default 0.0 (não corta nada; o `TOP_K` ainda limita) porque o valor
     # real só sai da calibração da T-1; subir daqui é o entregável dessa rodada.
-    # Só vale com `RERANKER_ENABLED=true`; senão vale `RELEVANCE_THRESHOLD`.
+    #
+    # RET-7 — mesmo com este em 0.0, `RELEVANCE_THRESHOLD` continua sendo o PISO
+    # do 1º estágio (E5): um candidato abaixo dele nunca chega ao cross-encoder
+    # (ver `retriever.retrieve`). Então "reranker ligado + threshold não
+    # calibrado" não é pior que o bi-encoder para lixo fora de domínio.
     reranker_threshold: float = 0.0
 
     # Nome da coleção no pgvector. Trocar isola um índice novo do antigo.

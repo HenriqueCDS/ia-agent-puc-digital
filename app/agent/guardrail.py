@@ -25,12 +25,21 @@ contraditório — é exatamente o egress que o guardrail existe para evitar
 
 O QUE ESTA ABORDAGEM NÃO PEGA: paráfrase sem os termos, ataque em outro idioma,
 injeção indireta (payload dentro de um documento que o RAG recupera). Essas
-seguem para o pipeline, onde as defesas existentes (RAG fechado no CONTEXTO,
-`SYSTEM_WEB` tratando contexto como dado, allowlist de domínio) ainda valem — o
-guardrail só melhora, nunca piora. O caminho para fechar a lacuna é o mesmo da
-triagem: medir na telemetria (`assunto="fora de escopo"`, `assunto_origem=
-"guardrail"`) o que dispara e o que deveria ter disparado, e calibrar em cima de
-caso real.
+seguem para o pipeline, onde as defesas existentes ainda valem — o guardrail só
+melhora, nunca piora:
+
+- `SYSTEM`/`SYSTEM_WEB` tratam o CONTEXTO como dado, nunca instrução, e mandam o
+  modelo responder `#FORA_DE_ESCOPO#` a pedido de abuso que chegou até ele
+  (TRI-4) — `responder.answer` roteia esse marcador para o MESMO desfecho daqui;
+- `responder._responder` roda ESTE léxico também sobre o CONTEXTO recuperado
+  (`registro.contexto_suspeito`, TRI-3) — medição, não bloqueio;
+- `eh_recusa_de_compliance` converte a recusa do próprio modelo no encaminhamento;
+- RAG fechado no CONTEXTO, allowlist de domínio na busca web.
+
+O caminho para fechar a lacuna no léxico é o mesmo da triagem: medir na
+telemetria (`assunto="fora de escopo"`, `assunto_origem="guardrail"`,
+`recusa_modelo`) o que dispara e o que deveria ter disparado, e calibrar em cima
+de caso real.
 
 FALSO POSITIVO custa pouco: a pergunta legítima que casar um termo por engano é
 encaminhada para o suporte — o mesmo destino, e o mesmo custo, de um falso
@@ -145,6 +154,11 @@ _PADROES: tuple[str, ...] = (
     # --- Divulgação de PII de terceiro (OWASP LLM02) ---
     "aluno registrado com",
     "do aluno com id",
+    # Pedido para o agente TRANSCREVER/EXTRAIR dados sensíveis de um documento
+    # colado — não é função do suporte, e "dados sigilosos" não aparece em
+    # dúvida acadêmica de boa-fé (owasp-2 / TRI-4). O frasado parafraseado é
+    # coberto pela regra do prompt (#FORA_DE_ESCOPO#).
+    "dados sigilosos",
     # --- Engenharia social com credencial de autoridade forjada ---
     "token adm",
     "token de admin",

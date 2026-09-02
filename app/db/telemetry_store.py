@@ -128,6 +128,15 @@ class Lacuna:
 # diploma) nunca vai ser indexado aqui, então contá-lo como lacuna encheria o
 # topo do relatório com trabalho que não existe.
 #
+# TRI-5 — `assunto_origem='guardrail'` e `recusa_modelo` também saem: pedido de
+# abuso ("DROP TABLE", "chave de API", jailbreak) não é documento faltando. O
+# filtro de `origem<>'encaminhado'` acima já cobre o guardrail de ENTRADA (ele
+# retorna `encaminhado`); estes dois pegam o resto — guardrail desligado
+# (`GUARDRAIL_ENABLED=false`, a pergunta segue e pode virar `origem='nenhuma'`) e
+# o abuso que só a rede de `answer()` pegou (`#FORA_DE_ESCOPO#`, recusa do
+# modelo). O abuso NOVO que ninguém reconheceu ainda escapa como `hash:...` —
+# residual aceitável, e é sinal fraco de que um ataque está sendo repetido.
+#
 # Linhas com `erro` também saem: são falha de infraestrutura, não ausência de
 # conteúdo — misturar as duas faria uma queda do Postgres virar "documento
 # faltando".
@@ -157,6 +166,8 @@ WHERE criado_em >= now() - make_interval(days => :dias)
   AND dados->>'erro' IS NULL
   AND (dados->>'grounded') = 'false'
   AND COALESCE(dados->>'origem', '') <> 'encaminhado'
+  AND COALESCE(dados->>'assunto_origem', '') <> 'guardrail'
+  AND dados->>'recusa_modelo' IS NULL
 GROUP BY 1
 ORDER BY sem_resposta DESC, ocorrencias DESC, ultima_vez DESC
 LIMIT :limite
@@ -167,7 +178,9 @@ SELECT
     COUNT(*) FILTER (WHERE dados->>'erro' IS NULL)                          AS total,
     COUNT(*) FILTER (WHERE dados->>'erro' IS NULL
                        AND (dados->>'grounded') = 'false'
-                       AND COALESCE(dados->>'origem', '') <> 'encaminhado')  AS lacunas
+                       AND COALESCE(dados->>'origem', '') <> 'encaminhado'
+                       AND COALESCE(dados->>'assunto_origem', '') <> 'guardrail'
+                       AND dados->>'recusa_modelo' IS NULL)                  AS lacunas
 FROM telemetria
 WHERE criado_em >= now() - make_interval(days => :dias)
 """
