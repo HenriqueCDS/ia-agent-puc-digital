@@ -82,7 +82,9 @@ Há dois caminhos até essas páginas:
   filtra pelos `path_prefixes` (reusando a mesma revalidação da busca ao vivo),
   extrai o conteúdo e indexa no pgvector com `source_type="web"` /
   `categoria="web"` e o `assunto` da fonte. Roda semanalmente. A pergunta cujo
-  conteúdo já foi crawlado é respondida pelo RAG normal (~300ms, `grounded=true`).
+  conteúdo já foi crawlado é respondida pelo RAG normal (~300ms, `grounded=true`);
+  o trecho entra no prompt marcado como `[Fonte web pública indexada: <url>]` e o
+  `SYSTEM` manda tratá-lo como página pública, não material interno revisado (KB-6).
 - **Busca ao vivo (rede)** — quando nem a base nem o conteúdo crawlado cobrem, o
   `web_fallback` raspa o DuckDuckGo (uma query `site:<host>` por fonte, cada URL
   revalidada contra a allowlist), corta por similaridade com o embedding local e
@@ -111,6 +113,15 @@ substitui as defesas do pipeline (RAG fechado no CONTEXTO, `SYSTEM_WEB`,
 allowlist), é a 1ª linha que evita mandar a entrada hostil para um LLM ou para a
 busca externa. Liga/desliga com `GUARDRAIL_ENABLED`; ver `app/agent/guardrail.py`
 e `eval/analise-telemetria-2026-08-27.md`.
+
+O léxico não pega paráfrase, outro idioma nem injeção **indireta** (payload
+dentro de um chunk). Camadas atrás dele: (a) `SYSTEM`/`SYSTEM_WEB` tratam o
+CONTEXTO como dado e mandam o modelo responder `#FORA_DE_ESCOPO#` a pedido de
+abuso — `responder.answer` roteia esse marcador para o mesmo desfecho do
+guardrail (TRI-4); (b) `_responder` roda o léxico também sobre os chunks
+recuperados e marca `Registro.contexto_suspeito` — medição, não bloqueio, porque
+o corpus é curado (TRI-3); (c) `eh_recusa_de_compliance` converte a recusa do
+próprio modelo no encaminhamento.
 
 **Cache de resposta** — perguntas que recuperam o mesmo conjunto de chunks no
 retrieval (mesmo sendo uma paráfrase uma da outra) reaproveitam a resposta já
@@ -482,13 +493,16 @@ lugar onde dá para esquecer.
 provedor de LLM roda nos EUA e a busca de fallback vai para o DuckDuckGo, e até
 a correção o `query.text` seguia cru para os dois — CPF, RA, e-mail, telefone e
 a **senha** que o aluno cola no texto ("minha senha é `Aluno@2026`, não entra").
-`responder._sem_pii` roda `pii.mascarar` no topo de `_responder`, antes de
-guardrail/triagem/retrieval, então todo caminho abaixo (base, web e cada fonte
-de contexto nova) opera sobre a versão limpa. **A decisão é mascarar, não
-recusar:** "não consigo acessar, meu RA é `[ra]`" continua respondível, e barrar
-toda pergunta com RA deixaria o agente inútil. A **detecção** (`registro.pii`, o
-WARNING de auditoria) continua sobre o texto original — roda em
-`telemetry.registrar`, antes do mascaramento.
+`responder._sem_pii` roda `pii.mascarar` sobre `query.text` logo antes do
+`retrieve`, então todo caminho de egress (base, web e cada fonte de contexto
+nova) opera sobre a versão limpa. **Guardrail e triagem ficam ANTES dele**
+(PII-3): são `if` léxico, não fazem egress, e precisam do texto original — um
+padrão futuro preso a um trecho que `pii.mascarar` consome (e-mail, ID) deixaria
+de casar em silêncio. **A decisão é mascarar, não recusar:** "não consigo
+acessar, meu RA é `[ra]`" continua respondível, e barrar toda pergunta com RA
+deixaria o agente inútil. A **detecção** (`registro.pii`, o WARNING de
+auditoria) continua sobre o texto original — roda em `telemetry.registrar`,
+antes do mascaramento.
 
 | Mecanismo | O que faz | Onde |
 |---|---|---|
@@ -620,7 +634,7 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 | **FAQ estruturado** (match exato, sem LLM) | antes do `retrieve` em `responder.py` | responde as perguntas de altíssima frequência com texto aprovado, latência ~0 |
 | **Abertura de chamado** | onde hoje está `_encaminhar_para_secretaria` | transforma o encaminhamento em ação: abre o ticket já com a pergunta |
 | **Interpretação de print/imagem** | `app/agent/preprocess.py` | anexo → descrição textual via Gemini multimodal → mesma `Query` |
-| **Reranking cross-encoder** (RET-3) | `app/retrieval/reranker.py`, ligado em `retriever.retrieve` | **encanamento pronto, `RERANKER_ENABLED=false`** — supera `RET-1`/`RET-2`/`RET-4` no caminho ativo; virar `true` está travado na suíte de fidelidade (ver [`eval/future_feature/cross-encoder.md`](eval/future_feature/cross-encoder.md) §6) |
+| **Reranking cross-encoder** (RET-3) | `app/retrieval/reranker.py`, ligado em `retriever.retrieve` | **encanamento pronto, `RERANKER_ENABLED=false`** — supera `RET-1`/`RET-2`/`RET-4` no caminho ativo; o piso de E5 no 1º estágio (RET-7) e o fallback se o `rerank` falha (RET-8) já valem, então ligar não regride o fora-de-domínio; virar `true` por padrão ainda depende da suíte de fidelidade (ver [`eval/future_feature/cross-encoder.md`](eval/future_feature/cross-encoder.md) §6) |
 | **Busca híbrida** (BM25 + vetor) | `app/retrieval/retriever.py` | eixo de recall, ortogonal ao reranker — entra entre a busca e o corte |
 | **Canal de atendimento** (portal, WhatsApp) | `app/main.py` | mais rotas; a lógica já está em `responder.py` |
 | **Classificação de intenção / escalonamento** | antes do `retrieve` em `responder.py` | roteia entre responder e encaminhar para humano |

@@ -66,6 +66,18 @@ class RetrievedChunk:
         pagina = meta.get("page")
         return f"{origem}, p. {pagina + 1}" if pagina is not None else origem
 
+    @property
+    def is_web(self) -> bool:
+        """Chunk indexado a partir de uma página crawlada da allowlist (KB-3),
+        não de um PDF interno.
+
+        O `ANSWER_PROMPT` da base trata todo CONTEXTO como material interno
+        revisado; este flag é o que devolve a ressalva de "página pública, não
+        revisada" que antes só o `SYSTEM_WEB` dava (KB-6). Ver `source_type` em
+        `ingestion/pipeline._enrich` e `scripts/crawl._documento`.
+        """
+        return self.document.metadata.get("source_type") == "web"
+
 
 @dataclass
 class Answer:

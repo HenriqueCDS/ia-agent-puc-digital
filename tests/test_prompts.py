@@ -4,8 +4,14 @@ import pytest
 
 from app.agent.prompts import (
     CONTEXTO_INSUFICIENTE,
+    FORA_DE_ESCOPO,
+    MARCADOR_TOPICO,
+    _JANELA_RECUSA_PROSA,
+    eh_fora_de_escopo,
     eh_insuficiente,
     eh_recusa_de_compliance,
+    sem_marcador_topico,
+    separar_topico,
 )
 
 
@@ -194,3 +200,118 @@ def test_resposta_longa_que_usa_a_palavra_nao_e_veto():
     )
     assert len(texto) > 200  # a guarda que separa recusa curta de resposta real
     assert eh_insuficiente(texto) is False
+
+
+# --- VET-7: recusa em prosa depois de um preâmbulo verboso ------------------
+
+
+def test_recusa_com_preambulo_verboso_ainda_e_veto():
+    """VET-7: um preâmbulo longo ('Olá! Obrigado... Sobre a sua dúvida...')
+    empurra a recusa para além da janela de 160 chars, e ela vazava como
+    `origem="base"/"web"` com `grounded=True`. As frases que o prompt proíbe
+    verbatim ('não há informações', 'os trechos não mencionam') passam a ser
+    vetadas numa janela maior."""
+    preambulo = (
+        "Olá! Obrigado por entrar em contato com o suporte acadêmico da "
+        "instituição de ensino. Fico feliz em poder te ajudar com essa dúvida. "
+        "Vou verificar agora o que consta no material que temos disponível a "
+        "respeito exatamente do que você perguntou, um momento por favor. "
+    )
+    assert len(preambulo) > _JANELA_RECUSA_PROSA  # a recusa começa só depois da janela curta
+    reais = [
+        preambulo + "Infelizmente não há informações específicas sobre isso.",
+        preambulo + "Os trechos fornecidos não mencionam essa data.",
+    ]
+    for texto in reais:
+        assert eh_insuficiente(texto[:_JANELA_RECUSA_PROSA]) is False
+        assert eh_insuficiente(texto) is True, texto
+
+
+def test_preambulo_seguido_de_resposta_real_nao_e_veto():
+    """A janela mais larga do VET-7 é estreita no PADRÃO: uma resposta real que
+    abre com saudação e depois responde de fato (com uma negação qualquer no
+    meio) não pode disparar."""
+    texto = (
+        "Olá! Obrigado por entrar em contato. Sobre a sua dúvida a respeito do "
+        "trancamento de disciplinas: o pedido é feito pela secretaria, dentro "
+        "do prazo do calendário acadêmico, e não há cobrança de multa se for "
+        "feito no período regular. Consulte o calendário para as datas exatas."
+    )
+    assert eh_insuficiente(texto) is False
+
+
+# --- VET-6: o marcador de tópico não pode vazar para o aluno ----------------
+
+
+@pytest.mark.parametrize(
+    ("bruto", "texto_esperado", "topico_esperado"),
+    [
+        # caso normal: linha própria no fim
+        (f"Acesse Tarefas e clique em Enviar.\n{MARCADOR_TOPICO} envio de atividade",
+         "Acesse Tarefas e clique em Enviar.", "envio de atividade"),
+        # VET-6: marcador inline, na mesma linha do texto — o `^...$` original
+        # não casava e o marcador ia para a tela
+        ("Acesse Tarefas e clique em Enviar. #TOPICO: envio de atividade",
+         "Acesse Tarefas e clique em Enviar.", "envio de atividade"),
+        # embrulhado em markdown (negrito)
+        (f"Resposta aqui.\n**{MARCADOR_TOPICO} acesso ao canvas**",
+         "Resposta aqui.", "acesso ao canvas"),
+        # acento em TÓPICO
+        ("Resposta.\n#TÓPICO: prazo de matrícula",
+         "Resposta.", "prazo de matrícula"),
+        # sem marcador: texto intacto, tópico None
+        ("Resposta normal, sem marcador nenhum.",
+         "Resposta normal, sem marcador nenhum.", None),
+    ],
+)
+def test_separar_topico_extrai_e_nunca_deixa_o_marcador_no_texto(
+    bruto, texto_esperado, topico_esperado
+):
+    texto, topico = separar_topico(bruto)
+    assert texto == texto_esperado
+    assert MARCADOR_TOPICO not in texto and "TÓPICO" not in texto
+    assert topico == topico_esperado
+
+
+def test_sem_marcador_topico_devolve_texto_intacto_quando_nao_ha_marcador():
+    """A rede de `answer()` (VET-6) usa o `!=` para distinguir 'removi um
+    marcador que escapou' de 'não havia nada' — então sem marcador o texto
+    volta idêntico, sem nem `.strip()`."""
+    assert sem_marcador_topico("Resposta com espaço no fim.  ") == "Resposta com espaço no fim.  "
+    assert sem_marcador_topico("x\n#TOPICO: y") == "x"
+
+
+def test_sentinela_de_cobertura_sobrevive_ao_marcador_de_topico_na_linha_seguinte():
+    """Regressão do 1º draft do VET-6: o prefixo do `_RE_TOPICO` casava o `#`
+    final de `#SEM_COBERTURA#` na linha anterior e o comia — o sentinela ficava
+    `#SEM_COBERTURA` e `eh_insuficiente` deixava de reconhecê-lo."""
+    texto, _ = separar_topico(f"{CONTEXTO_INSUFICIENTE}\n{MARCADOR_TOPICO} receita de bolo")
+    assert texto == CONTEXTO_INSUFICIENTE
+    assert eh_insuficiente(texto) is True
+
+
+# --- TRI-4: o marcador de pedido fora de escopo -----------------------------
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        FORA_DE_ESCOPO,
+        f"Desculpe, não posso ajudar com isso. {FORA_DE_ESCOPO}",
+        f"{FORA_DE_ESCOPO}\n#TOPICO: pedido fora de escopo",
+    ],
+)
+def test_eh_fora_de_escopo_reconhece_o_marcador_em_qualquer_posicao(texto):
+    assert eh_fora_de_escopo(texto) is True
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Para enviar a atividade, acesse Tarefas e clique em Enviar.",
+        "O escopo do suporte é o Canvas e procedimentos acadêmicos.",
+        CONTEXTO_INSUFICIENTE,
+    ],
+)
+def test_resposta_legitima_nao_e_fora_de_escopo(texto):
+    assert eh_fora_de_escopo(texto) is False

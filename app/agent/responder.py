@@ -12,8 +12,10 @@ from app.agent.prompts import (
     ANSWER_PROMPT,
     ANSWER_PROMPT_WEB,
     SEM_CONTEXTO,
+    eh_fora_de_escopo,
     eh_insuficiente,
     eh_recusa_de_compliance,
+    sem_marcador_topico,
     separar_topico,
 )
 from app.agent import guardrail
@@ -46,8 +48,11 @@ def _conteudo_limitado(texto: str) -> str:
 
 
 def _format_context(chunks: list[RetrievedChunk]) -> str:
+    # KB-6 — a marca distingue conteúdo crawlado da allowlist (página pública,
+    # não revisada) de PDF interno. O `SYSTEM` tem a regra que lê essa marca.
     return "\n\n---\n\n".join(
-        f"[Fonte: {c.citation}]\n{_conteudo_limitado(c.document.page_content)}"
+        f"[{'Fonte web pública indexada' if c.is_web else 'Fonte'}: {c.citation}]\n"
+        f"{_conteudo_limitado(c.document.page_content)}"
         for c in chunks
     )
 
@@ -84,6 +89,13 @@ def _sem_pii(query: Query) -> Query:
     A DETECÇÃO continua sobre o texto original: `telemetry.registrar` roda
     `pii.detectar` antes daqui, então `registro.pii` e o WARNING de auditoria
     não se perdem. Aqui é só contenção de saída.
+
+    PII-3 — roda DEPOIS do guardrail e da triagem, não antes: os dois são `if`
+    léxico sobre a pergunta e nenhum faz egress, então devem ver o texto ORIGINAL
+    (um padrão futuro preso a um trecho que `pii.mascarar` consome — e-mail, ID —
+    deixaria de casar em silêncio). Todo egress (`llm.invoke`, `buscar_na_web`)
+    vem depois do retrieval, e daqui pra frente tudo já opera sobre a versão
+    limpa. Ver a ordem em `_responder` e o teste que a trava.
 
     Mascarar, não recusar (decisão do backlog): "não consigo acessar, meu RA é
     [ra]" é perfeitamente respondível, e barrar toda pergunta com RA deixaria o
@@ -192,6 +204,22 @@ def _encaminhar_para_secretaria() -> Answer:
     return Answer(text=SEM_CONTEXTO, sources=[], grounded=False, origem="nenhuma")
 
 
+def _encaminhar_por_guardrail(registro: telemetry.Registro) -> Answer:
+    """Desfecho do guardrail para um abuso reconhecido TARDE — o modelo emitiu
+    `#FORA_DE_ESCOPO#` (regra do `SYSTEM`, TRI-4) porque o léxico de entrada não
+    pegou a paráfrase / a injeção indireta.
+
+    Mesmo texto e rótulo do guardrail de entrada; `recusa_modelo=True` porque a
+    causa é a mesma do VET-2 e a pauta é calibrar `guardrail._PADROES`, não
+    indexar. Chamado dos dois vetos (`_tentar_base`, `_responder_pela_web`) —
+    antes do veto de contexto, para o abuso não ser confundido com "a base não
+    cobre" — e da rede final de `answer()`.
+    """
+    registro.recusa_modelo = True
+    _registrar_assunto(registro, guardrail.ASSUNTO, "guardrail")
+    return Answer(text=CONTATO_PADRAO, sources=[], grounded=False, origem="encaminhado")
+
+
 def _responder_pela_web(
     query: Query, llm: BaseChatModel | None, registro: telemetry.Registro
 ) -> Answer:
@@ -224,6 +252,14 @@ def _responder_pela_web(
     # início da string).
     texto, topico = separar_topico(str(resposta.content))
     registro.topico = topico
+
+    # TRI-4 — antes do veto de contexto: o pedido é abuso que o guardrail léxico
+    # não pegou e o modelo o marcou. Encaminha como o guardrail, não como "a web
+    # não cobriu".
+    if eh_fora_de_escopo(texto):
+        logger.warning("busca externa: modelo marcou o pedido como fora de escopo")
+        return _encaminhar_por_guardrail(registro)
+
     _registrar_assunto(registro, _assunto_da_web(resultados), "allowlist")
 
     # Último filtro, e o único que enxerga a pergunta e os trechos juntos: o
@@ -255,6 +291,20 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
     ) as registro:
         resultado = _responder(query, llm, registro)
 
+        # TRI-4 — rede FINAL para o marcador `#FORA_DE_ESCOPO#`: os dois vetos
+        # (`_tentar_base`, `_responder_pela_web`) já o checam antes do veto de
+        # contexto; esta é a garantia de funil único para uma fonte de contexto
+        # futura que esqueça de checar (mesmo papel do `eh_insuficiente` abaixo).
+        if resultado.origem not in ("nenhuma", "encaminhado") and eh_fora_de_escopo(
+            resultado.text
+        ):
+            logger.warning(
+                "modelo marcou o pedido como fora de escopo (origem=%s) e o marcador "
+                "escapou dos vetos; encaminhando",
+                resultado.origem,
+            )
+            resultado = _encaminhar_por_guardrail(registro)
+
         # VET-2 — rede de segurança para a recusa de COMPLIANCE: o modelo se
         # negou a obedecer o pedido (quase sempre em inglês) e esse texto passou
         # como resposta. É um jailbreak/abuso que furou o guardrail léxico (que
@@ -272,11 +322,7 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
                 "que passou pelo guardrail; encaminhando",
                 resultado.origem,
             )
-            registro.recusa_modelo = True
-            _registrar_assunto(registro, guardrail.ASSUNTO, "guardrail")
-            resultado = Answer(
-                text=CONTATO_PADRAO, sources=[], grounded=False, origem="encaminhado"
-            )
+            resultado = _encaminhar_por_guardrail(registro)
 
         # Rede de segurança, e o único ponto por onde TODA resposta passa: se um
         # marcador de recusa escapou, ele vira o encaminhamento para a
@@ -300,6 +346,17 @@ def answer(query: Query, llm: BaseChatModel | None = None) -> Answer:
             )
             registro.veto_escapou = True
             resultado = _encaminhar_para_secretaria()
+
+        # VET-6 — rede final para o marcador de tópico: `separar_topico` já o
+        # extrai nos dois ramos, mas se o modelo o pôs numa forma que a extração
+        # não reconheceu (inline, com markdown), ele não pode chegar ao aluno.
+        # Reusa o mesmo padrão; sem marcador, o texto volta idêntico.
+        texto_sem_marcador = sem_marcador_topico(resultado.text)
+        if texto_sem_marcador != resultado.text:
+            logger.warning(
+                "marcador de tópico escapou de separar_topico (origem=%s)", resultado.origem
+            )
+            resultado = replace(resultado, text=texto_sem_marcador)
 
         registro.origem = resultado.origem
         registro.grounded = resultado.grounded
@@ -336,14 +393,6 @@ def _responder(
     concatenada aqui. Com três ou mais fontes assim, o roteamento passa a valer
     como tool calling, tendo `retrieve` e `buscar_na_web` como tools.
     """
-    # ANTES DE TUDO: mascara CPF/RA/e-mail/telefone/senha do texto da pergunta.
-    # Feito aqui, no funil único, e não em cada `format_messages`/`buscar_na_web`
-    # — todo caminho abaixo (guardrail, triagem, retrieval, base, web) já opera
-    # sobre a versão limpa, e cada fonte de contexto nova (ver o PONTO DE
-    # EXTENSÃO acima) herda a contenção de graça. A detecção para a telemetria
-    # já rodou sobre o texto original em `telemetry.registrar`.
-    query = _sem_pii(query)
-
     # ANTES DA TRIAGEM: pedido de ataque/abuso (injeção de prompt, exfiltração de
     # segredo, execução não autorizada, código de exploit) é encaminhado para o
     # suporte sem tocar em RAG, web nem LLM. Mesmo desfecho da triagem
@@ -371,6 +420,14 @@ def _responder(
             return Answer(
                 text=categoria.resposta, sources=[], grounded=False, origem="encaminhado"
             )
+
+    # PII-3 — só AGORA mascara CPF/RA/e-mail/telefone/senha do texto: guardrail
+    # e triagem acima inspecionaram o texto original (são `if` léxico e não
+    # fazem egress); daqui pra frente — retrieval, base, web — tudo opera sobre a
+    # versão limpa, e cada fonte de contexto nova (ver o PONTO DE EXTENSÃO acima)
+    # herda a contenção de graça. A detecção para a telemetria já rodou sobre o
+    # original em `telemetry.registrar`.
+    query = _sem_pii(query)
 
     with telemetry.cronometro(registro, "ms_retrieve"):
         chunks = retrieve(query)
@@ -405,6 +462,26 @@ def _responder(
         if settings.web_fallback_enabled:
             return _responder_pela_web(query, llm, registro)
         return _encaminhar_para_secretaria()
+
+    # TRI-3 — o guardrail de entrada só vê a pergunta. Um payload de injeção pode
+    # vir DENTRO de um chunk recuperado (injeção indireta, OWASP LLM01). O corpus
+    # é curado (PDFs + crawl da allowlist), então aqui é MEDIÇÃO, não bloqueio:
+    # um hit é quase sempre falso positivo, e derrubar a resposta inteira seria
+    # martelo demais. O `SYSTEM` já instrui o modelo a tratar CONTEXTO como dado;
+    # este flag é para achar, na telemetria, o chunk que vale abrir à mão.
+    if settings.guardrail_enabled:
+        suspeito = next(
+            (t for c in chunks
+             if (t := guardrail.deve_encaminhar(c.document.page_content))),
+            None,
+        )
+        if suspeito is not None:
+            logger.warning(
+                "contexto recuperado casou padrão de abuso (%r) — possível injeção "
+                "indireta num chunk; a resposta segue, isto é só sinal",
+                suspeito,
+            )
+            registro.contexto_suspeito = True
 
     resultado = _tentar_base(query, llm, chunks, registro)
     if resultado is not None:
@@ -480,6 +557,13 @@ def _tentar_base(
             set_cached_answer(cache_key, registro.assunto, bruto, _rotulo_do_modelo(registro))
 
     texto, registro.topico = separar_topico(bruto)
+
+    # TRI-4 — antes do veto de contexto: o modelo marcou o pedido como abuso /
+    # fora de escopo (regra do `SYSTEM`) porque o guardrail léxico não pegou.
+    # Encaminha como o guardrail, não deixa virar "a base não cobre" → web.
+    if eh_fora_de_escopo(texto):
+        logger.warning("base: modelo marcou o pedido como fora de escopo (#FORA_DE_ESCOPO#)")
+        return _encaminhar_por_guardrail(registro)
 
     if eh_insuficiente(texto):
         logger.info("base: LLM considerou os %d chunks recuperados insuficientes", len(chunks))
