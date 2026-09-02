@@ -10,9 +10,11 @@
   Qualquer argumento é repassado direto ao psql.
 
 .NOTES
-  Usa o cliente psql de dentro do container `agente-ead-db` (não precisa de
-  psql instalado no Windows). Se o container não estiver de pé, sobe com
-  `docker compose up -d`.
+  Usa o psql de dentro do container `agente-ead-db` — nada precisa ser
+  instalado no Windows. Por isso SUPABASE_DB_URL tem que ser a Session pooler
+  (aws-0-*.pooler.supabase.com): a conexão direta db.<ref>.supabase.co é
+  IPv6-only e não roteia de dentro de um container.
+  Container fora do ar: `docker compose up -d`.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -25,4 +27,4 @@ if (-not $line) { throw "SUPABASE_DB_URL não está no .env" }
 $url = ($line.Line -replace '^\s*SUPABASE_DB_URL\s*=\s*', '').Trim().Trim('"')
 
 $flags = if ($args) { @() } else { @("-it") }   # -it só na sessão interativa
-& docker exec @flags agente-ead-db psql $url @args
+& docker exec @flags agente-ead-db psql @args $url
