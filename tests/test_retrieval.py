@@ -26,7 +26,10 @@ def _resultado(texto, score, **meta):
     return Document(page_content=texto, metadata=meta), score
 
 
-def test_corta_resultados_abaixo_do_limiar():
+def test_corta_resultados_abaixo_do_limiar(monkeypatch):
+    # Este teste é do caminho bi-encoder (corte por `RELEVANCE_THRESHOLD`);
+    # fixa o setting para não depender do `.env` de quem roda a suíte.
+    monkeypatch.setattr(settings, "reranker_enabled", False)
     store = FakeStore(
         [
             _resultado("relevante", settings.relevance_threshold + 0.2),
@@ -39,7 +42,8 @@ def test_corta_resultados_abaixo_do_limiar():
     assert [c.document.page_content for c in chunks] == ["relevante"]
 
 
-def test_sem_resultado_relevante_retorna_lista_vazia():
+def test_sem_resultado_relevante_retorna_lista_vazia(monkeypatch):
+    monkeypatch.setattr(settings, "reranker_enabled", False)
     store = FakeStore([_resultado("ruído", 0.01)])
 
     assert retrieve(Query(text="pergunta fora da base"), store=store) == []
@@ -136,3 +140,41 @@ def test_reranker_ligado_respeita_top_k(monkeypatch, reranker_ligado):
     chunks = retrieve(Query(text="x"), store=store)
 
     assert len(chunks) == settings.top_k
+
+
+# --- INF-9: latência do 2º estágio isolada em `telemetry.ms_rerank` ---------
+
+
+def test_ms_rerank_e_medido_quando_o_reranker_roda_dentro_de_answer(reranker_ligado):
+    """Dentro de `answer()` (registro aberto por `telemetry.registrar`), o custo
+    do cross-encoder some para `ms_rerank` — a métrica que o A/B do RET-3 pede."""
+    from app.core import telemetry
+
+    store = FakeStore([_resultado(f"c{i}", 0.9) for i in range(6)])
+
+    with telemetry.registrar(assunto=None, pergunta="x", chat_model="m") as registro:
+        retrieve(Query(text="x"), store=store)
+
+    assert registro.ms_rerank is not None and registro.ms_rerank >= 0
+
+
+def test_ms_rerank_fica_nulo_com_o_reranker_desligado(monkeypatch):
+    from app.core import telemetry
+
+    monkeypatch.setattr(settings, "reranker_enabled", False)
+    store = FakeStore([_resultado("c", 0.9)])
+
+    with telemetry.registrar(assunto=None, pergunta="x", chat_model="m") as registro:
+        retrieve(Query(text="x"), store=store)
+
+    assert registro.ms_rerank is None
+
+
+def test_retrieve_com_reranker_nao_quebra_fora_de_answer(reranker_ligado):
+    """Sem registro aberto (ingestão, teste de unidade), `telemetry.etapa` é
+    no-op — o rerank roda igual, só não é cronometrado."""
+    store = FakeStore([_resultado(f"c{i}", 0.9) for i in range(6)])
+
+    chunks = retrieve(Query(text="x"), store=store)
+
+    assert chunks  # rodou normal, sem exceção

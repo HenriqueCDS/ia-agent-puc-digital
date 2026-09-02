@@ -153,9 +153,11 @@ def create_app() -> FastAPI:
         app.mount("/static", StaticFiles(directory=demo_imagens), name="static")
         _conferir_chave_da_demo()
 
-    # Contadores de rate limit são por processo (ver ratelimit.py). Dois apps
-    # criados no mesmo processo — o que só acontece em teste — não podem herdar
-    # o balde um do outro, senão a ordem dos testes muda o resultado.
+    # O rate limiter é único por processo (ver ratelimit.py). Dois apps criados
+    # no mesmo processo — o que só acontece em teste — não podem herdar a
+    # instância um do outro, senão a ordem dos testes muda o resultado (e o
+    # backend em memória compartilharia o balde). Também força reler os limites
+    # que um teste tenha trocado por monkeypatch.
     reset_rate_limiter()
 
     if settings.api_auth_enabled and not settings.api_keys_por_chave:

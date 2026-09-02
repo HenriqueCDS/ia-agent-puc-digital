@@ -148,6 +148,8 @@ _CAMPOS_DA_TELEMETRIA = (
     "web_insuficiente",
     "veto_escapou",
     "assunto_origem",
+    "ms_retrieve",
+    "ms_rerank",          # INF-9 — 2º estágio isolado; A/B RERANKER_ENABLED false×true
     "ms_total",
     "input_tokens",
     "output_tokens",

@@ -2,6 +2,7 @@
 
 from langchain_postgres import PGVector
 
+from app.core import telemetry
 from app.core.config import settings
 from app.core.models import Query, RetrievedChunk
 from app.db.vector_store import get_vector_store
@@ -21,6 +22,10 @@ def retrieve(query: Query, store: PGVector | None = None) -> list[RetrievedChunk
     Em ambos, devolve `list[RetrievedChunk]` ordenada e no máximo `TOP_K` itens —
     o agente (`responder.py`), o guardrail e a borda HTTP não enxergam a
     diferença, só os scores mudam de escala quando o reranker está ligado.
+
+    Quando o 2º estágio roda, sua latência vai para `telemetry.ms_rerank`
+    (subconjunto de `ms_retrieve`) — é a métrica que o A/B do RET-3 precisa
+    (INF-9). Fora de `answer()` a medição é um no-op.
     """
     store = store or get_vector_store()
 
@@ -41,7 +46,11 @@ def retrieve(query: Query, store: PGVector | None = None) -> list[RetrievedChunk
         # motivo do import local em `db/vector_store.aquecer`.
         from app.retrieval.reranker import rerank
 
-        chunks = rerank(query.text, chunks)
+        # INF-9 — cronometra só o 2º estágio, para o A/B do RET-3 medir o custo
+        # do cross-encoder isolado. Fora de `answer()` (teste de unidade daqui)
+        # `telemetry.etapa` é no-op.
+        with telemetry.etapa("ms_rerank"):
+            chunks = rerank(query.text, chunks)
         limiar = settings.reranker_threshold
     else:
         limiar = settings.relevance_threshold

@@ -47,9 +47,12 @@ _tabela_pronta = False
 def _garantir_tabela(session) -> None:
     """Idempotente e barata depois da primeira vez (flag de processo).
 
-    Não usa `lru_cache` como `response_cache._ensure_table` porque aqui o DDL
-    roda dentro da sessão de quem chama — evita abrir uma segunda transação só
-    para conferir algo que já é `IF NOT EXISTS`.
+    Aqui o DDL roda dentro da sessão de quem chama, então a flag de processo
+    evita abrir I/O extra para reconferir algo que já é `IF NOT EXISTS`. Ao
+    contrário de `response_cache._ensure_table` (que abre a própria sessão e
+    checa o catálogo a cada acesso, ver INF-11), o custo de uma tabela de
+    telemetria dropada em runtime é perder registros, não derrubar resposta —
+    o restart do processo reconstrói a flag.
     """
     global _tabela_pronta
     if _tabela_pronta:

@@ -49,7 +49,11 @@ typer>=0.12
 # --- API (entrypoint opcional, ver app/main.py) ---
 fastapi>=0.110
 uvicorn>=0.29
+redis>=5,<7   # contadores de rate limit compartilhados (INF-10, app/api/ratelimit.py)
+              # — só usados quando REDIS_URL está setado; o cliente é puro Python
 
 # --- Testes ---
 pytest>=8.0
 httpx>=0.27   # TestClient (tests/test_api.py) — hoje vem transitivo, deixado explícito
+fakeredis>=2.21   # dublê do Redis para tests/test_ratelimit.py (sem `lua` — o
+                  # RedisRateLimiter não usa EVAL, só INCR/ZADD/pipeline)

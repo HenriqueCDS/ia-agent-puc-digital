@@ -136,7 +136,10 @@ mais um punhado de buscas web), então o endpoint aberto seria um proxy grátis
 para a cota da instituição. Sobre isso vêm rate
 limit por consumidor (janela deslizante de 60s) e um teto diário do processo,
 CORS restrito às origens do `.env`, e timeout na chamada ao LLM. Ver
-`app/api/deps.py`, `app/api/ratelimit.py` e `app/api/app.py`.
+`app/api/deps.py`, `app/api/ratelimit.py` e `app/api/app.py`. Os contadores do
+rate limit são em memória por padrão (correto com 1 worker); `REDIS_URL` os move
+para um Redis compartilhado quando houver mais de um worker — Redis fora do ar
+libera a requisição com WARNING, não derruba o agente.
 
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
@@ -154,32 +157,15 @@ CORS, a janela deslizante do rate limit, liveness vs. readiness e o seletor de
 modelo da demo. Rodam sem banco, sem chave de API e **sem rede**, usando dublês
 de vector store, de LLM, de cache, de busca e de relógio.
 
-### Validado ponta a ponta; calibração em aberto
+### Validado ponta a ponta
 
 O caminho completo `ingest → embeddings locais (e5-base) → pgvector →
 retrieve → LLM` já rodou contra um banco real e um corpus de 3 PDFs (1289
 chunks) — ver a rodada de avaliação em
 [`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md).
-O que essa rodada deixou em aberto, em ordem de impacto:
 
-1. **`RELEVANCE_THRESHOLD` está fora da faixa útil** do embedding atual (§3 da
-   análise): não descarta chunk nenhum hoje, porque o `score_top` de qualquer
-   pergunta cai numa faixa estreita (0.84–0.88) esteja a base cobrindo o tema ou
-   não. A resposta escolhida é o **reranker cross-encoder** (RET-3) —
-   encanamento no código, `RERANKER_ENABLED=false` até calibrar. O antigo
-   `EXACT_MATCH_THRESHOLD` / ramo `alta_confianca` foi **removido** junto: com
-   ranking real ele deixou de fazer sentido (ver `cross-encoder.md` §5).
-2. **Recusa em prosa do LLM escapa dos dois vetos de contexto insuficiente**
-   (`prompts.eh_insuficiente`) quando o modelo não emite o marcador esperado —
-   infla a acurácia aparente de `origem="web"` (§4 da análise).
-3. **Pré-aquecer o modelo de embeddings no boot**: o primeiro request do
-   processo paga ~40s de carregamento de peso que as demais requisições não
-   pagam (§7 da análise).
-
-As correções já aplicadas nessa rodada (termo ambíguo "bolsa" isolado na
-triagem, gabarito do dataset corrigido, prefixo duplicado de `GROQ_MODEL`)
-já estão em `app/core/config.py` e `eval/perguntas/perguntas.jsonc`; os itens 1–3
-acima continuam pendentes.
+O backlog priorizado de calibração e correções — com histórico e o que já foi
+aplicado — está em [`eval/backlog-problemas.md`](eval/backlog-problemas.md).
 
 ### Fora do escopo desta fase
 
@@ -301,7 +287,7 @@ python -m scripts.ask "Como envio uma atividade?" 2>> telemetria.jsonl   # e/ou 
  "origem":"base","grounded":true,"n_chunks":2,"score_top":0.95,"score_min":0.87,
  "score_mean":0.91,"reranker_aplicado":null,"score_top_bruto":null,
  "cache_hit":false,"input_tokens":120,"output_tokens":30,
- "ms_retrieve":41.2,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
+ "ms_retrieve":41.2,"ms_rerank":null,"ms_llm":880.5,"ms_web":null,"ms_total":925.0,
  "web_insuficiente":null,"erro":null}
 ```
 
@@ -444,7 +430,7 @@ Responde às quatro perguntas que importam para eficiência:
 | Pergunta | Campos |
 |---|---|
 | Quanto custa? | `input_tokens`, `output_tokens`, `cache_hit` (hit = zero token de API) |
-| Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_llm` (rede), `ms_web` (rede lenta) |
+| Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_rerank` (2º estágio do retrieval, subconjunto de `ms_retrieve`), `ms_llm` (rede), `ms_web` (rede lenta) |
 | O guardrail dispara quanto? | `origem` = `base` / `web` / `encaminhado` / `nenhuma`, `base_insuficiente`, `web_insuficiente` |
 | A qualidade caiu? | `n_chunks`, `score_top`/`score_min`/`score_mean` (dispersão do top-k), `score_top_bruto` (score de E5 antes do rerank, quando `reranker_aplicado`) ao longo do tempo |
 
@@ -629,7 +615,7 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 
 | Feature | Onde entra | O que muda |
 |---|---|---|
-| ~~**Web scraping** da allowlist~~ | `scripts/crawl.py` | **feito** (KB-3): sitemap → `path_prefixes` → `pipeline.ingest_documents`. Falta agendar o re-crawl semanal |
+| ~~**Web scraping** da allowlist~~ | `scripts/crawl.py` | **feito** (KB-3): sitemap → `path_prefixes` → `pipeline.ingest_documents`; re-crawl semanal em `.github/workflows/recrawl.yml` |
 | **APIs públicas** (calendário acadêmico, API do Canvas) | mesmo registry, ou fonte de contexto extra em `responder.py` | novo loader; com 3+ fontes assim, o roteamento vira tool calling tendo `retrieve` e `buscar_na_web` como tools |
 | **FAQ estruturado** (match exato, sem LLM) | antes do `retrieve` em `responder.py` | responde as perguntas de altíssima frequência com texto aprovado, latência ~0 |
 | **Abertura de chamado** | onde hoje está `_encaminhar_para_secretaria` | transforma o encaminhamento em ação: abre o ticket já com a pergunta |
@@ -652,16 +638,10 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
   não alucina um procedimento acadêmico — tenta as páginas públicas oficiais e,
   não achando, encaminha para a secretaria. Também serve de termômetro de quais
   documentos faltam na base (`Answer.grounded` continua `False` mesmo quando a
-  web responde; quem precisa distinguir lê `Answer.origem`). **Ressalva medida
-  em produção**: com o embedding atual, `score_top` cai numa faixa estreita
-  (0.84–0.88) esteja a base cobrindo o tema ou não, então o limiar de 0.35 hoje
-  nunca descarta um chunk — quem decide base-vs-web é o veto do LLM, não este
-  número (ver
-  [`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md) §3).
-  Essa faixa comprimida é o que o **reranker cross-encoder** (RET-3) existe para
-  quebrar: o encanamento já está no código, desligado (`RERANKER_ENABLED=false`),
-  e quando ligar o corte passa a ser `RERANKER_THRESHOLD` numa escala real. Até
-  lá, o `0.85` é rede contra lixo óbvio, não classificador — ver
+  web responde; quem precisa distinguir lê `Answer.origem`). O limiar é rede
+  contra lixo óbvio, não classificador; o **reranker cross-encoder**
+  (`app/retrieval/reranker.py`) traz o encanamento para um corte em escala real
+  (`RERANKER_THRESHOLD`) e está no código com `RERANKER_ENABLED=false` — ver
   [`eval/future_feature/cross-encoder.md`](eval/future_feature/cross-encoder.md).
 - **Fallback como ramo do guardrail, não como tool do LLM**: o gatilho ("o
   retrieval voltou vazio") é um `if`, não uma decisão ambígua. Deixar o modelo
@@ -702,30 +682,11 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 
 ## Próximos passos sugeridos
 
-Com o pipeline já validado ponta a ponta (ver acima) e datasets de eval
-rodando de verdade contra o agente, o gargalo deixou de ser "falta corpus" e
-passou a ser **calibração, vazamento de guardrail e cota de API** — é o que as
-rodadas de 2026-08-26 e 2026-08-27
-([`-26`](eval/analise-telemetria-2026-08-26.md),
-[`-27`](eval/analise-telemetria-2026-08-27.md)) mapearam, em ordem de impacto:
-
-| # | Ação | Onde | Status |
-|---|---|---|---|
-| 1 | Reranker cross-encoder (RET-3) é a direção escolhida para o limiar comprimido do E5 — encanamento pronto (`app/retrieval/reranker.py`), `RERANKER_ENABLED=false`; virar `true` travado na suíte de fidelidade (T-1) + A/B | `RERANKER_*`, [`cross-encoder.md`](eval/future_feature/cross-encoder.md) | ⏳ desligado — `RET-4` (`alta_confianca`) já removido; `score_top_bruto` instrumentado |
-| 2 | Fechar o vazamento do veto: recusa em prosa do LLM sem o marcador esperado passa como resposta válida | `prompts.eh_insuficiente` | ⏳ pendente — prompt endurecido em 2026-08-27, mas ainda probabilístico |
-| 3 | Pré-aquecer o modelo de embeddings no boot (evita ~40s no primeiro request do processo) | `app/api/app.py` | ⏳ pendente |
-| 4 | Guardrail de entrada (injeção / segredo / exploit → `encaminhado`) | `app/agent/guardrail.py` | ✅ aplicado 2026-08-27 |
-| 5 | Corte do 413: cada fonte de contexto limitada a `PROMPT_CONTEXT_ITEM_MAX_CHARS`; 413 do provider cai para o próximo | `responder._format_context`, `providers/base.py` | ✅ aplicado 2026-08-27 |
-| 6 | Rodada de calibração com `-c` (cache limpo), `-m` (modelo fixo) e `--timeout`, comparando item a item em N=3 | `scripts/eval_run.py` | ✅ flags aplicadas — ver [Avaliação de qualidade (eval)](#avaliação-de-qualidade-eval) |
-| 7 | Corrigir termo ambíguo "bolsa" na triagem | `ENCAMINHAMENTOS` | ✅ aplicado |
-| 8 | Enxugar a `WEB_ALLOWLIST` para caminhos curados; `FonteWeb.path_prefix` → tupla `path_prefixes` | `app/core/config.py` | ✅ aplicado 2026-08-28 (KB-2) |
-| 9 | Crawler da allowlist para o pgvector (`scripts/crawl.py`) — busca ao vivo vira rede | `scripts/crawl.py`, `pipeline.ingest_documents` | 🔧 crawler pronto; falta 1ª execução em prod + cron semanal (KB-3) |
-
-O backlog completo, priorizado e com histórico, está em
+O backlog completo, priorizado e com histórico do que já foi aplicado, está em
 [`eval/backlog-problemas.md`](eval/backlog-problemas.md).
 
-Depois dos pendentes acima, os próximos são os de sempre: rodar
-`python -m scripts.lacunas` e `python -m scripts.crawl` semanalmente (lacuna
-amarela recorrente → conferir e adicionar o `path_prefix`), ampliar o dataset de
-eval (hoje 25 perguntas) com perguntas reais de aluno, e fixar a dimensão do
-embedding + criar índice HNSW quando o corpus crescer além de ~50k chunks.
+Rotina de operação: rodar `python -m scripts.lacunas` e
+`python -m scripts.crawl` semanalmente (lacuna amarela recorrente → conferir e
+adicionar o `path_prefix`), ampliar o dataset de eval com perguntas reais de
+aluno, e fixar a dimensão do embedding + criar índice HNSW quando o corpus
+crescer além de ~50k chunks.

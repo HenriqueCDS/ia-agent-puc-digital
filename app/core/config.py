@@ -574,6 +574,13 @@ class Settings(BaseSettings):
     # caso da demo é a demo parar.
     rate_limit_diario_por_consumidor: str = ""
 
+    # Redis para os contadores de rate limit (INF-10). VAZIO (padrão) = contador
+    # em memória, correto só com 1 worker do uvicorn. Setado (ex.:
+    # `redis://localhost:6379/0`, `rediss://...` com TLS) = contadores
+    # compartilhados entre todos os workers/réplicas. Redis fora do ar → o rate
+    # limit LIBERA a requisição com WARNING (ver app/api/ratelimit.py).
+    redis_url: str = ""
+
     # --- Demo web (T3.1) ---
     # Serve `app/static/index.html` em `/demo`. Desligar tira a rota do ar sem
     # mexer em nada da v1.

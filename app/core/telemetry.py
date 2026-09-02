@@ -63,6 +63,14 @@ _canal: ContextVar[str] = ContextVar("canal", default="desconhecido")
 # Default `None` significa "não veio de HTTP", que é informação, não falta dela.
 _request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
 
+# Registro da pergunta em curso. ContextVar pelo mesmo motivo de `_canal`:
+# é uma sub-etapa que roda DENTRO de `answer()` mas fora do orquestrador
+# (hoje só o rerank em `app/retrieval/retriever.py`, quando o 2º estágio está
+# ligado) que precisa somar sua latência a um campo do `Registro` — sem
+# recebê-lo por parâmetro e sem que `retriever`/`reranker` passem a montar e
+# emitir telemetria. `None` fora de `answer()`; aí `etapa()` é um no-op.
+_registro_atual: ContextVar["Registro | None"] = ContextVar("registro_atual", default=None)
+
 # Destino adicional do registro (hoje: Postgres). `None` = só o log em stderr.
 _persistir: Callable[[dict], None] | None = None
 
@@ -236,6 +244,12 @@ class Registro:
 
     # Latência por etapa (M3): perfis diferentes — CPU local, rede, rede lenta.
     ms_retrieve: float | None = None
+    # INF-9 — só o 2º estágio do retrieval (cross-encoder), medido à parte para
+    # o A/B `RERANKER_ENABLED` false×true conseguir isolar o custo do rerank.
+    # É um SUBCONJUNTO de `ms_retrieve` (o cross-encoder roda dentro da janela
+    # cronometrada em `responder._responder`) — o custo do 1º estágio é
+    # `ms_retrieve - ms_rerank`. `None` quando o reranker não rodou (o padrão).
+    ms_rerank: float | None = None
     ms_llm: float | None = None
     ms_web: float | None = None
     ms_total: float | None = None
@@ -321,6 +335,27 @@ def cronometro(registro: Registro, campo: str) -> Iterator[None]:
 
 
 @contextmanager
+def etapa(campo: str) -> Iterator[None]:
+    """Cronometra uma sub-etapa no registro da pergunta em curso, se houver.
+
+    Para código que roda dentro de `answer()` mas não no orquestrador — hoje só
+    o 2º estágio do retrieval (`app/retrieval/retriever.py`, quando
+    `RERANKER_ENABLED=true`) — somar sua latência a um campo do `Registro` sem
+    recebê-lo por parâmetro. Mesma ideia dos ContextVars `_canal`/`_request_id`:
+    informação que a lógica não deveria ter que carregar.
+
+    Fora de `answer()` (ingestão, teste de unidade do retriever/reranker) não há
+    registro aberto e isto é um no-op — a etapa roda igual, só não é medida.
+    """
+    registro = _registro_atual.get()
+    if registro is None:
+        yield
+    else:
+        with cronometro(registro, campo):
+            yield
+
+
+@contextmanager
 def registrar(assunto: str | None, pergunta: str, chat_model: str) -> Iterator[Registro]:
     """Abre o registro da pergunta e o emite ao final, com ou sem exceção.
 
@@ -347,12 +382,14 @@ def registrar(assunto: str | None, pergunta: str, chat_model: str) -> Iterator[R
         pii=encontrado or None,
     )
     inicio = time.perf_counter()
+    token = _registro_atual.set(registro)
     try:
         yield registro
     except Exception as exc:
         registro.erro = f"{type(exc).__name__}: {exc}"
         raise
     finally:
+        _registro_atual.reset(token)
         registro.ms_total = round((time.perf_counter() - inicio) * 1000, 1)
         # Último ponto antes de o registro sair para qualquer destino, e por
         # isso o único lugar onde o mascaramento precisa existir (T3.4).

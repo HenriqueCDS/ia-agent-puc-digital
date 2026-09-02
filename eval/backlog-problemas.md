@@ -25,9 +25,9 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | INF-6 | 🟠 | 2 perguntas falham a rodada por erro de infra (`Cancelled: 499` gRPC Gemini) — Q14/Q16 sem teste | `_rodar` try/except, `providers/base.py`, `scripts/eval_run.py` | Feito: (1) `Cancelled`/HTTP 499 entram na classificação de indisponibilidade (`base._NOMES_DE_FALLBACK` + `_STATUS_DE_FALLBACK`) → a cadeia tenta o próximo provedor em vez de o erro cru subir; (2) quando TODOS os provedores caem, a linha da rodada fica com `origem_obtida="provedores_indisponivel"` (distinta de `None` de bug nosso) e o resumo lista essas perguntas para re-rodar isoladas | ✅ | 2026-08-29 |
 | [x] | INF-7 | 🟡 | Colunas de `eval_run` (`n_chunks`/`score_top`) x telemetria medem coisas diferentes e confundem auditoria | `scripts/eval_run.py`, `scripts/eval_report.py` | Feito: `eval_run` já separava `chunks_recuperados`/`score_top` (retrieval) de `fontes_resposta`/`score_fonte_top` (fontes da resposta) desde 7aa2568; `eval_report` agora emite `chunks_recuperados` (era `n_chunks`) para falar a mesma língua. O campo na telemetria/JSONB segue `n_chunks` de propósito — renomear quebraria as linhas dentro da janela de retenção | ✅ | 2026-08-29 |
 | [x] | INF-8 | 🟡 | Cold start de 40s no 1º request (carga do modelo de embeddings) | `app/api` boot, `scripts/eval_run.py` | Feito: `vector_store.aquecer()` — ponto ÚNICO de warm-up (carrega embeddings + `SELECT 1`). A API já chamava no `_lifespan`; agora `scripts.eval_run` também chama antes da 1ª pergunta, então o cold start não cai mais no item 1 nem infla o `ms_retrieve` dele | ✅ | 2026-08-29 |
-| [ ] | INF-9 | 🟡 | Sem `ms_rerank` separado — o A/B `false`×`true` que o RET-3 pede não consegue medir o custo do 2º estágio (fica embutido em `ms_retrieve`) | `app/core/telemetry.Registro`, `app/retrieval/retriever.retrieve` | Instrumentar `ms_rerank` ANTES de rodar o A/B, não depois — é a métrica que a rodada existe para produzir | ⏳ | aberto 2026-09-01 |
-| [ ] | INF-10 | 🟡 | Rate limit em memória: com >1 worker do uvicorn os tetos viram N×limite. O código já marca "LIMITE CONHECIDO", mas não estava rastreado como risco de custo em produção | `app/api/ratelimit.py` | Quando T4.3 decidir workers, mover estado p/ store compartilhado (Redis); `RateLimiter`/`get_rate_limiter()` já são o ponto único de troca | ⏳ | aberto 2026-09-01 |
-| [ ] | INF-11 | 🟡 | `response_cache._ensure_table` com `@lru_cache` roda a DDL 1x/processo — tabela dropada em runtime (teste, manutenção) quebra os INSERT até o restart | `app/db/response_cache.py` | Aceitável hoje; se incomodar, `to_regclass('resposta_cache')` a cada acesso em vez de cachear o efeito | ⏳ | aberto 2026-09-01 |
+| [x] | INF-9 | 🟡 | Sem `ms_rerank` separado — o A/B `false`×`true` que o RET-3 pede não consegue medir o custo do 2º estágio (fica embutido em `ms_retrieve`) | `app/core/telemetry.Registro`, `app/retrieval/retriever.retrieve` | Feito: campo `telemetry.Registro.ms_rerank` (subconjunto de `ms_retrieve`) + `telemetry.etapa(campo)` — um cronômetro para sub-etapa que roda dentro de `answer()` mas fora do orquestrador, via ContextVar `_registro_atual` (mesma ideia de `_canal`/`_request_id`); `retriever.retrieve` embrulha só a chamada de `rerank` nele. Fora de `answer()` é no-op. `eval_run` copia `ms_retrieve`/`ms_rerank` para a linha da rodada. Testes em `test_retrieval.py` | ✅ | 2026-09-02 |
+| [x] | INF-10 | 🟡 | Rate limit em memória: com >1 worker do uvicorn os tetos viram N×limite. O código já marca "LIMITE CONHECIDO", mas não estava rastreado como risco de custo em produção | `app/api/ratelimit.py` | Feito: `RedisRateLimiter` (contadores compartilhados — `INCR` p/ os diários, sorted set + pipeline `MULTI/EXEC` p/ a janela deslizante); `get_rate_limiter()` escolhe pelo `REDIS_URL` (vazio = memória, o padrão). Redis fora do ar → `verificar` LIBERA a requisição com WARNING (perfil §7); `RateLimitExcedido`/bug nosso continuam propagando (§8). Na fronteira exata do limite sob concorrência pode recusar 1 a mais (INCR/desfazer) — sentido seguro. `redis>=5` (cliente puro Python, só carregado com `REDIS_URL`), `fakeredis` em teste. Testes em `test_ratelimit.py` | ✅ | 2026-09-02 |
+| [x] | INF-11 | 🟡 | `response_cache._ensure_table` com `@lru_cache` roda a DDL 1x/processo — tabela dropada em runtime (teste, manutenção) quebra os INSERT até o restart | `app/db/response_cache.py` | Feito: `@lru_cache` removido; `_ensure_table` checa `information_schema.columns` (coluna `modelo` + `current_schema()`) a cada acesso e só roda a DDL quando falta — µs por acesso, e uma tabela dropada em runtime volta a ser recriada em vez de o processo ficar quebrado até o restart. Em produção a tabela é permanente e o ramo da DDL nem é alcançado. Testes em `test_response_cache.py` | ✅ | 2026-09-02 |
 
 ## 2. Calibração de limiar / retrieval (Bloco A)
 
@@ -123,7 +123,7 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Grupo | Feitos / Total |
 |---|---|
-| 1. Infra e método | 8 / 11 |
+| 1. Infra e método | 11 / 11 |
 | 2. Retrieval / limiar | 5 / 8 |
 | 3. Veto / fidelidade | 4 / 7 |
 | 4. LGPD / PII | 2 / 4 |
@@ -131,14 +131,36 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | 6. Base de conhecimento / web | 7 / 12 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
 | 8. Testes | 4 / 10 |
-| **Total** | **36 / 64** |
+| **Total** | **39 / 64** |
 
 > **2026-09-01** — 16 itens novos (INF-9/10/11, RET-7/8, VET-6/7, PII-3/4, KB-5/6/7/8/9,
-> T-9/10) abertos a partir da análise do código pós-RET-3/RET-4. Nenhum resolvido —
-> só rastreados. Concentração: buracos do crawl KB-3 e segurança do encanamento do reranker.
+> T-9/10) abertos a partir da análise do código pós-RET-3/RET-4. Concentração: buracos
+> do crawl KB-3 e segurança do encanamento do reranker.
+> **2026-09-02** — INF-9, INF-10 e INF-11 resolvidos (instrumentação do rerank, rate
+> limit em Redis, DDL cacheada). Grupo 1 (infra) fechado: 11/11.
 
 ## Changelog
 
+- **2026-09-02** — INF-10: `RedisRateLimiter` em `app/api/ratelimit.py` — contadores
+  compartilhados entre workers (`INCR` p/ tetos diários, sorted set + pipeline
+  `MULTI/EXEC` p/ a janela deslizante). `get_rate_limiter()` escolhe o backend por
+  `REDIS_URL` (vazio = `RateLimiter` em memória, o padrão — nada muda p/ 1 worker).
+  Redis inacessível → `verificar` libera a requisição + WARNING (perfil §7); só
+  `RedisError` faz fail-open, bug nosso propaga (§8). Deps: `redis>=5` (só carrega
+  com `REDIS_URL`), `fakeredis` em teste. `REDIS_URL` no `.env.example` e `config.py`.
+  Testes em `test_ratelimit.py` (janela, tetos, 2 workers não somam 2×, fail-open).
+- **2026-09-02** — INF-9 + INF-11. **INF-9**: `telemetry.Registro.ms_rerank`
+  (subconjunto de `ms_retrieve`) + `telemetry.etapa(campo)` — cronômetro para
+  sub-etapa que roda dentro de `answer()` mas fora do orquestrador, via ContextVar
+  `_registro_atual` setada em `registrar()` (mesma ideia de `_canal`/`_request_id`);
+  `retriever.retrieve` embrulha só a chamada de `rerank`. `eval_run` copia
+  `ms_retrieve`/`ms_rerank` para a linha da rodada (A/B do RET-3). **INF-11**:
+  `@lru_cache` de `response_cache._ensure_table` removido — checa
+  `information_schema.columns` (coluna `modelo` + `current_schema()`) a cada acesso
+  e só roda a DDL quando falta; tabela dropada em runtime volta a ser recriada.
+  Testes: `test_retrieval.py`, `test_response_cache.py` (novo). De quebra,
+  `test_retrieval` fixa `reranker_enabled=False` nos 2 testes do caminho
+  bi-encoder (dependiam do `.env`).
 - **2026-09-01** — KB-12: `FonteWeb.seeds` (lista fechada de URLs) — `descobrir_urls` usa as seeds
   em vez de sitemap quando presentes. `support.microsoft.com` entra no crawl com 16 seeds curadas
   (Teams: entrar/áudio/câmera; conta corporativa: senha/2FA), `_HOSTS_PADRAO` passou a incluí-lo.
