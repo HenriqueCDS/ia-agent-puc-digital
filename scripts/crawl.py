@@ -23,9 +23,11 @@ metadata (é isso que separa conteúdo crawlado de PDF oficial). O `assunto`
 continua sendo o da `FonteWeb` (`puc-digital`/`canvas`) e NÃO `"web"`, senão o
 retrieval filtrado por assunto (`--assunto puc-digital`) não enxergaria a página.
 
-ESCOPO: só entradas da `WEB_ALLOWLIST` cujo host responde a um sitemap. O Canvas
-(`community.instructure.com`) fica de fora por padrão — os guias já estão
-indexados como PDF e há ToS/robots a conferir; passe `--host` para forçar.
+ESCOPO: por padrão, toda `WEB_ALLOWLIST` menos `community.instructure.com` (é
+Khoros, sem sitemap padrão, e os guias já estão como PDF; passe `--host` para
+forçar). Cada fonte é descoberta por sitemap, EXCETO quando tem `seeds` na
+`FonteWeb` — aí o crawler indexa exatamente essa lista fixa (é o caso do
+`support.microsoft.com`, cujo sitemap tem 2266 sub-sitemaps).
 """
 
 import logging
@@ -87,10 +89,12 @@ _SELETORES_CONTEUDO = (
     ".site-content",
 )
 
-# Hosts crawlados quando nenhum `--host` é passado: os da PUC. O Canvas e o
-# support.microsoft.com ficam de fora (ver docstring).
+# Hosts crawlados quando nenhum `--host` é passado. `community.instructure.com`
+# fica de fora: é Khoros (sem sitemap padrão) e os guias já estão como PDF.
+# `support.microsoft.com` entra pela lista de `seeds` da FonteWeb (o sitemap
+# dele tem 2266 sub-sitemaps — inútil para crawlar). Ver docstring.
 _HOSTS_PADRAO = tuple(
-    f.host for f in WEB_ALLOWLIST if f.host.endswith("puc-campinas.edu.br")
+    f.host for f in WEB_ALLOWLIST if f.host != "community.instructure.com"
 )
 
 
@@ -144,17 +148,37 @@ def _locs(xml_bytes: bytes) -> tuple[list[str], bool]:
 
 
 def descobrir_urls(sessao: requests.Session, fonte: FonteWeb) -> tuple[list[str], bool]:
-    """URLs da `fonte` a partir do sitemap, já filtradas pelos `path_prefixes`.
+    """URLs da `fonte`, já filtradas pelos `path_prefixes`.
 
-    Devolve `(urls, confiavel)`. `confiavel` é `True` só quando algum sitemap
-    respondeu E nenhum sub-sitemap descoberto por um índice falhou ao ser
-    baixado/parseado — é a pré-condição do prune (`_podar_orfas`): sem essa
-    garantia, uma página que só está fora da lista por causa de um sub-sitemap
-    que deu 500 seria apagada do índice por engano (KB-5).
+    Duas origens:
+
+    - `fonte.seeds` preenchida → a lista curada É o resultado, sem nenhuma
+      chamada de rede. `confiavel=True` (a lista é determinística) e o prune
+      trata uma seed removida da config como remoção intencional.
+    - senão → descoberta por sitemap.
+
+    Devolve `(urls, confiavel)`. Para o sitemap, `confiavel` é `True` só quando
+    algum sitemap respondeu E nenhum sub-sitemap descoberto por um índice falhou
+    ao ser baixado/parseado — é a pré-condição do prune (`_podar_orfas`): sem
+    essa garantia, uma página que só está fora da lista por causa de um
+    sub-sitemap que deu 500 seria apagada do índice por engano (KB-5).
 
     Só entra URL que a `fonte_permitida` (a MESMA revalidação da busca ao vivo)
-    atribui a esta entrada da allowlist — sitemap não é confiado às cegas.
+    atribui a esta entrada da allowlist — nem sitemap nem seed é confiado às cegas.
     """
+    if fonte.seeds:
+        validas, rejeitadas = [], []
+        for u in fonte.seeds:
+            (validas if fonte_permitida(u) else rejeitadas).append(u.split("#")[0])
+        if rejeitadas:
+            typer.secho(
+                f"  aviso: {len(rejeitadas)} seed(s) de {fonte.host} fora dos path_prefixes, "
+                f"ignorada(s): {', '.join(rejeitadas)}",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+        return sorted(set(validas)), True
+
     # Tenta o host nu e o `www.`: o portal da PUC serve o sitemap só em
     # `www.puc-campinas.edu.br` — o apex responde, mas com cert TLS inválido
     # (só cobre o `www`), o que derruba o `requests.get` com SSLError.

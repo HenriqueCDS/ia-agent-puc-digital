@@ -89,6 +89,7 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [ ] | KB-9 | 🟠 | Cache de resposta sem TTL agora atinge o caminho da **base** via crawl — re-crawl mantém `source_path`+`chunk_index` → `chunk_id` estável → chave de cache não invalida → resposta velha p/ página web atualizada. O racional de não-cachear a web (`_responder_pela_web`) não vale p/ chunks `source_type='web'` no `_tentar_base` | `app/agent/responder._tentar_base` / `_cache_key`, `app/db/response_cache` | Não cachear quando algum chunk recuperado é `source_type='web'`, OU TTL na tabela `resposta_cache` | ⏳ | aberto 2026-09-01 |
 | [x] | KB-10 | 🟠 | Crawl sem guarda de tamanho de página — `/manual-do-aluno/` do portal PUC (visualizador de PDF embutido, ~16 MB de HTML) fazia BeautifulSoup + chunk + embed estourar a RAM (OOM em ambiente de 512 MB) | `scripts/crawl.py` | Feito (2026-09-01): `_MAX_HTML_BYTES=3MB` (pula a página antes do parse) + `_MAX_TEXT_CHARS=200k` (trunca o texto extraído). Teste em `test_crawl.py`. **Nota separada:** o crawl/ingest carrega o E5 (~1 GB) — não roda em 512 MB de qualquer forma; usar o `recrawl.yml` (GH Actions) ou local | ✅ | 2026-09-01 |
 | [x] | KB-11 | 🟡 | Conteúdo acadêmico do portal PUC (calendário, manual do aluno, prazos, requerimentos) NÃO está no sitemap como página HTML — `/calendario/` é só link p/ PDF (511 chars), `/manual-do-aluno/` é viewer de 16 MB, `requerimento`/`rematricula`/`vida-academica` = 0 páginas. O crawler (sitemap-only, não segue link) nunca vai pegar isso | `data/raw/puc-digital/`, `scripts/crawl.py` | Investigado 2026-09-01 (sitemap real: 29k URLs, ~20k são notícias). **Decisão:** esse conteúdo entra como **PDF em `data/raw/puc-digital/`** (`Calendário Acadêmico 2026`, `Manual do Aluno`) via `scripts.ingest` — é o design. O crawler fica com as páginas HTML de verdade (`/biblioteca/*`). `path_prefixes` da PUC mantidos como estão | ✅ | 2026-09-01 |
+| [x] | KB-12 | 🟡 | `support.microsoft.com` (Teams / conta corporativa) só existia no fallback ao vivo — o crawler não sabia crawlar host sem sitemap padrão, e o índice do MS tem 2266 sub-sitemaps (`/pt-br/teams/` sozinho = 777 URLs, quase nenhuma do caso de uso) | `app/core/config.FonteWeb`, `scripts/crawl.py` | Feito (2026-09-01): campo `FonteWeb.seeds` — lista FECHADA de URLs; quando presente, `descobrir_urls` devolve as seeds (revalidadas por `fonte_permitida`, `confiavel=True`, sem rede) em vez de descobrir por sitemap. MS entra com **16 seeds curadas** (entrar na reunião, áudio/câmera, senha da conta). `_HOSTS_PADRAO` passou a incluir MS (só Canvas fica fora). Prune trata seed removida da config como remoção. `web_fallback` ao vivo inalterado (ignora `seeds`). Testes em `test_crawl.py` | ✅ | 2026-09-01 |
 
 ## 7. Dataset / gabarito
 
@@ -127,10 +128,10 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | 3. Veto / fidelidade | 4 / 7 |
 | 4. LGPD / PII | 2 / 4 |
 | 5. Triagem / guardrail | 3 / 6 |
-| 6. Base de conhecimento / web | 6 / 11 (KB-3 parcial) |
+| 6. Base de conhecimento / web | 7 / 12 (KB-3 parcial) |
 | 7. Dataset / gabarito | 3 / 6 |
 | 8. Testes | 4 / 10 |
-| **Total** | **35 / 63** |
+| **Total** | **36 / 64** |
 
 > **2026-09-01** — 16 itens novos (INF-9/10/11, RET-7/8, VET-6/7, PII-3/4, KB-5/6/7/8/9,
 > T-9/10) abertos a partir da análise do código pós-RET-3/RET-4. Nenhum resolvido —
@@ -138,6 +139,10 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 ## Changelog
 
+- **2026-09-01** — KB-12: `FonteWeb.seeds` (lista fechada de URLs) — `descobrir_urls` usa as seeds
+  em vez de sitemap quando presentes. `support.microsoft.com` entra no crawl com 16 seeds curadas
+  (Teams: entrar/áudio/câmera; conta corporativa: senha/2FA), `_HOSTS_PADRAO` passou a incluí-lo.
+  O sitemap real do MS tem 2266 sub-sitemaps — inútil para crawlar. Testes em `test_crawl.py`.
 - **2026-09-01** — KB-10 + KB-11: guarda de tamanho no crawl (`_MAX_HTML_BYTES=3MB`, `_MAX_TEXT_CHARS=200k`)
   depois de `/manual-do-aluno/` (~16 MB, viewer de PDF) causar OOM. Investigação do sitemap real da PUC
   (29k URLs, quase tudo notícia): calendário/manual/prazos não existem como página HTML — entram como PDF

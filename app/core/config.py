@@ -25,6 +25,15 @@ class FonteWeb:
     QUALQUER um dos prefixos. `("/",)` (o default) libera o host inteiro; uma
     lista de páginas curadas (`("/calendario/", "/biblioteca/")`) restringe a
     busca ao que a equipe conferiu — ver KB-2 no comentário abaixo.
+
+    `seeds` é uma lista FECHADA de URLs para o crawler (`scripts/crawl.py`):
+    quando preenchida, o crawler NÃO descobre por sitemap — ele indexa exatamente
+    essas páginas (ainda revalidadas por `fonte_permitida`, e o prune trata seed
+    removida daqui como remoção intencional). Existe para host sem sitemap útil:
+    `support.microsoft.com` declara um índice com 2266 sub-sitemaps (um por
+    tópico×idioma) e `/pt-br/teams/` sozinho tem 777 URLs, quase nenhuma do caso
+    de uso do agente. Não afeta a busca ao vivo (`web_fallback` usa só
+    `host`/`path_prefixes`).
     """
 
     host: str
@@ -32,6 +41,7 @@ class FonteWeb:
     subdominios: bool = False
     termos: str = ""
     assunto: str | None = None  # casa com a pasta em data/raw (filtro do retrieval)
+    seeds: tuple[str, ...] = ()  # crawler: lista fechada de URLs, em vez de sitemap
 
 
 # Allowlist da busca externa: o conjunto FECHADO de páginas que o agente pode
@@ -122,12 +132,43 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
     # Outlook): `/pt-br/teams/` já traz o conteúdo de Teams em português (KB-2).
     # `assunto=None`: um resultado desses não é "canvas" nem "puc-digital" —
     # deixa o rótulo vir da própria pergunta. UMA entrada por host (regra 1).
+    #
+    # CRAWLER: `seeds` (lista fechada) em vez de sitemap. O índice de sitemap da
+    # MS (declarado no robots.txt) tem 2266 sub-sitemaps e `/pt-br/teams/`
+    # sozinho tem 777 URLs ("o que é o Teams", "breakout rooms", ...), quase
+    # nenhuma do caso de uso do agente. As seeds são os artigos que um aluno da
+    # PUC de fato precisa: entrar na reunião (conta/convidado/telefone/somente
+    # exibição), áudio e câmera, e a senha da conta corporativa. Artigo novo
+    # entra aqui depois de conferido; seed removida some do índice no próximo
+    # `--prune`. `web_fallback` ao vivo continua cobrindo o que não está nas
+    # seeds. Confira as URLs com: `python -m scripts.crawl --host support.microsoft.com --dry-run`.
     FonteWeb(
         host="support.microsoft.com",
         path_prefixes=(
             "/pt-br/teams/",
             "/en-us/teams/",
             "/pt-br/accounts-billing/work-school/",
+        ),
+        seeds=(
+            # entrar na reunião
+            "https://support.microsoft.com/pt-br/teams/meetings/join-a-meeting-in-microsoft-teams",
+            "https://support.microsoft.com/pt-br/teams/meetings/join-a-meeting-without-an-account-in-microsoft-teams",
+            "https://support.microsoft.com/pt-br/teams/meetings/join-a-meeting-as-a-view-only-attendee-in-microsoft-teams",
+            "https://support.microsoft.com/pt-br/teams/meetings-events/join-a-teams-meeting-by-phone",
+            "https://support.microsoft.com/pt-br/teams/meetings/i-can-t-join-a-meeting-in-microsoft-teams",
+            "https://support.microsoft.com/pt-br/teams/meetings/use-meeting-controls-in-microsoft-teams",
+            # áudio e câmera
+            "https://support.microsoft.com/pt-br/teams/meetings/manage-audio-settings-in-microsoft-teams-meetings",
+            "https://support.microsoft.com/pt-br/teams/meetings/my-microphone-isn-t-working-in-microsoft-teams",
+            "https://support.microsoft.com/pt-br/teams/meetings/my-camera-isn-t-working-in-microsoft-teams",
+            "https://support.microsoft.com/pt-br/teams/meetings/use-video-in-microsoft-teams",
+            "https://support.microsoft.com/pt-br/teams/meetings/change-your-background-in-microsoft-teams-meetings",
+            "https://support.microsoft.com/pt-br/teams/meetings/reduce-background-noise-in-microsoft-teams-meetings",
+            "https://support.microsoft.com/pt-br/teams/meetings/raise-your-hand-in-microsoft-teams-meetings",
+            # conta corporativa / de estudante (login da PUC no Teams)
+            "https://support.microsoft.com/pt-br/accounts-billing/work-school/change-your-work-or-school-account-password",
+            "https://support.microsoft.com/pt-br/accounts-billing/work-school/reset-your-microsoft-work-or-school-account-password-using-security-info",
+            "https://support.microsoft.com/pt-br/accounts-billing/work-school/common-problems-with-two-step-verification-for-a-work-or-school-account",
         ),
         termos="Teams reunião aula entrar conta",
         assunto=None,

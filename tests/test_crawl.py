@@ -129,6 +129,50 @@ def test_descobrir_urls_confiavel_ignora_404_dos_candidatos_iniciais():
     assert urls and confiavel is True
 
 
+# --- fonte com seeds (support.microsoft.com), em vez de sitemap ---------------
+
+_MS = FonteWeb(
+    host="support.microsoft.com",
+    path_prefixes=("/pt-br/teams/",),  # subconjunto do que a WEB_ALLOWLIST real permite
+    seeds=(
+        "https://support.microsoft.com/pt-br/teams/meetings/join-a-meeting-in-microsoft-teams",
+        "https://support.microsoft.com/pt-br/teams/meetings/use-video-in-microsoft-teams#passo-2",
+        "https://support.microsoft.com/pt-br/office/algo-fora-do-prefixo",  # descartada
+    ),
+)
+
+
+def test_descobrir_urls_com_seeds_nao_toca_a_rede():
+    sessao = FakeSessao({})
+
+    urls, confiavel = crawl.descobrir_urls(sessao, _MS)
+
+    assert confiavel is True
+    assert sessao.pedidos == []  # nenhuma chamada de sitemap
+    assert urls == [
+        "https://support.microsoft.com/pt-br/teams/meetings/join-a-meeting-in-microsoft-teams",
+        "https://support.microsoft.com/pt-br/teams/meetings/use-video-in-microsoft-teams",  # fragmento removido
+    ]
+    assert not any("office" in u for u in urls)  # seed fora dos path_prefixes descartada
+
+
+def test_crawl_fonte_com_seeds_crawla_a_lista(monkeypatch):
+    seed = "https://support.microsoft.com/pt-br/teams/meetings/join-a-meeting-in-microsoft-teams"
+    ms = FonteWeb(host="support.microsoft.com", path_prefixes=("/pt-br/teams/",), seeds=(seed,))
+    indexadas = []
+    monkeypatch.setattr(crawl, "ingest_documents", lambda docs, sp: indexadas.append(sp) or (1, 0))
+    html = (
+        "<html><head><title>Entrar</title></head><body><main>"
+        + "instrucoes para entrar na reuniao do teams " * 30
+        + "</main></body></html>"
+    )
+    sessao = FakeSessao({seed: _resp(text=html)})
+
+    stats = crawl._crawl_fonte(ms, sessao=sessao, limite=0, delay=0, dry_run=False)
+
+    assert indexadas == [seed] and stats["paginas"] == 1
+
+
 def test_extrair_tira_menu_e_rodape():
     html = """
     <html><head><title>Calendário Acadêmico</title></head>
