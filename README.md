@@ -9,6 +9,36 @@ pelo crawler da allowlist (`scripts/crawl.py`).
 Escopo da v1: base local + páginas da allowlist, sem dados sigilosos do aluno.
 Ver [arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md).
 
+## Para entrevistadores (TL;DR)
+
+Projeto pessoal de um **RAG de produção** (não um notebook de demo): pipeline de
+ingestão idempotente, retrieval com pgvector, cadeia de fallback entre 4
+provedores de LLM, e uma API FastAPI pronta para plugar no AVA da instituição.
+
+**Stack:** Python, FastAPI, PostgreSQL + pgvector, `sentence-transformers`
+(embeddings `e5-base` locais — sem depender de cota de API), `pydantic-settings`,
+Docker Compose, GitHub Actions. Provedores: Gemini / HuggingFace / Groq /
+OpenRouter atrás de uma interface única.
+
+**O que este projeto tenta demonstrar:**
+
+| Tema | Onde ver |
+|---|---|
+| Design para *custo* e *falha* de LLM | cadeia de fallback (erro de pedido propaga, erro de provedor cai p/ o próximo); cache por conjunto de chunks; teto diário + rate limit por consumidor |
+| Segurança de um agente | guardrail léxico (OWASP LLM Top 10) + triagem por assunto + allowlist fechada por *path*, não por domínio; camadas no `SYSTEM` atrás do léxico |
+| LGPD / privacidade | pergunta nunca é gravada (só hash); mascaramento de PII **antes do egress** (LLM nos EUA, busca no DuckDuckGo) e antes da persistência |
+| Observabilidade | 1 linha JSON por pergunta (token, latência por etapa, origem da resposta); telemetria vira relatório de lacunas de ingestão |
+| Idempotência e evolução de schema | id determinístico por chunk; coluna `vector` sem dimensão fixa; metadata desde o dia 1 p/ conviver com scraping/API depois |
+| Rigor de avaliação | dataset de eval versionado rodado contra o agente real; armadilhas documentadas (cache mascara o pipeline; fallback troca o gerador no meio da rodada; ~12% das perguntas oscilam pela busca externa) |
+
+**Números:** ~388 testes que rodam **sem banco, sem chave de API e sem rede**
+(dublês de vector store, LLM, cache, busca e relógio); validado ponta a ponta
+contra Postgres real com 1289 chunks.
+
+**Boa porta de entrada para leitura:** a seção
+[Decisões e trade-offs](#decisões-e-trade-offs) — cada bullet é uma escolha com o
+custo do outro lado explicitado.
+
 ## Estado atual do projeto
 
 Esqueleto da v1 implementado e executável localmente. O que existe hoje:

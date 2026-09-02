@@ -15,6 +15,7 @@ from app.api.errors import registrar_handlers
 from app.api.ratelimit import reset_rate_limiter
 from app.api.routers.demo import IMAGENS as demo_imagens
 from app.api.routers.demo import router as demo_router
+from app.api.routers.revisao import router as revisao_router
 from app.api.routers.v1 import router as v1_router
 from app.core.config import settings
 from app.core import telemetry
@@ -152,6 +153,11 @@ def create_app() -> FastAPI:
         # permite abri-la numa máquina sem internet.
         app.mount("/static", StaticFiles(directory=demo_imagens), name="static")
         _conferir_chave_da_demo()
+
+    if settings.revisao_enabled:
+        # Conferência manual de fidelidade de uma rodada de eval (ver o router).
+        # Não depende de `/static` — a página é autossuficiente, como a demo.
+        app.include_router(revisao_router)
 
     # O rate limiter é único por processo (ver ratelimit.py). Dois apps criados
     # no mesmo processo — o que só acontece em teste — não podem herdar a

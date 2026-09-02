@@ -597,6 +597,15 @@ class Settings(BaseSettings):
     # esquecer da cópia.
     demo_consumidor: str = "demo"
 
+    # --- Revisão manual de avaliação (ver app/api/routers/revisao.py) ---
+    # Serve `app/static/revisao.html` em `/revisao`: uma tela para conferir à
+    # mão a FIDELIDADE das respostas de uma rodada de `scripts.eval_run` (o que
+    # `acertou` não mede — ver a docstring de lá). Lê só os JSONs de
+    # `eval/resultados/`, não chama `/v1/ask` e não gasta orçamento de LLM.
+    # Kill switch para tirar a rota do ar em produção, onde essa pasta nem
+    # costuma existir — mesmo desenho de `demo_enabled`.
+    revisao_enabled: bool = True
+
     # --- Chamada ao LLM: cadeia de providers (T4.1) ---
     # Ordem de PRIORIDADE, separada por vírgula. É o único lugar que decide quem
     # é tentado e em que ordem — reordenar, tirar um provedor da cadeia ou rodar
