@@ -43,9 +43,10 @@ Flags que existem por causa de rate limit / cota do tier gratuito:
   responder com um provider diferente a cada pergunta (o do topo estoura a
   cota no meio da rodada) e o resultado deixa de comparar a mesma coisa. Sem
   `-m`, o script avisa.
-- `--limpar-cache/-c` apaga a `resposta_cache` antes de rodar — sem isso a
-  rodada mede o cache, não o pipeline, e a única pergunta não-cacheada pode
-  derrubar tudo num 413.
+- `--limpar-cache/-c` apaga os dois caches de resposta antes de rodar — sem isso
+  a rodada mede o cache, não o pipeline, e a única pergunta não-cacheada pode
+  derrubar tudo num 413. (O cache pré-retrieval já fica desligado no canal
+  `eval`; `-c` ainda limpa o que o tráfego real tenha deixado na tabela.)
 - `--timeout` define `LLM_TIMEOUT` desta execução, e o default é 20s (não os 30
   do `.env`): com o provider do topo sem cota, cada pergunta queima o timeout
   inteiro antes do fallback. Passe `--timeout 30` para medir com o valor de
@@ -480,7 +481,7 @@ def main(
     ),
     limpar_cache: bool = typer.Option(
         False, "--limpar-cache", "-c",
-        help="Apaga a resposta_cache antes de rodar (sem isso a rodada mede o cache).",
+        help="Apaga os caches de resposta antes de rodar (sem isso a rodada mede o cache).",
     ),
     timeout: float = typer.Option(
         20.0, "--timeout",

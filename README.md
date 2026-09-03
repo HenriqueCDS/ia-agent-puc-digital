@@ -396,7 +396,7 @@ pela tela `/revisao` ou por `/v1/perguntas` fica gravada.
 python -m scripts.seed_perguntas        # UPSERT idempotente do JSONC → exemplo_perguntas
 python -m scripts.seed_perguntas --dry-run
 
-# -c limpa a resposta_cache; -m fixa um provider (sem fallback); --timeout encurta o tempo morto
+# -c limpa os dois caches de resposta; -m fixa um provider (sem fallback); --timeout encurta o tempo morto
 # --grupo roda só um bloco; --intervalo roda só um trecho (1-based, inclusivo)
 python -m scripts.eval_run --grupo teste2 -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
 python -m scripts.eval_run --sem-arquivo          # resultado só na telemetria (canal eval)

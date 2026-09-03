@@ -21,7 +21,7 @@ _COMANDOS = [
     ("python -m scripts.list_ingested", "Lista os arquivos indexados na coleção atual."),
     ("python -m scripts.remove_ingested", "Remove arquivos indexados do pgvector."),
     ("python -m scripts.lacunas", "Perguntas que a base não respondeu, por frequência."),
-    ("python -m scripts.clear_cache", "Apaga o cache de respostas (resposta_cache)."),
+    ("python -m scripts.clear_cache", "Apaga os caches de resposta (pré e pós-retrieval)."),
     ("python -m scripts.clear_logs", "Apaga a telemetria/logs (tabela telemetria)."),
     ("python -m scripts.seed_perguntas", "Semeia exemplo_perguntas a partir do perguntas.jsonc."),
     ("python -m scripts.eval_run", "Roda o dataset de avaliação (do banco) contra o agente."),

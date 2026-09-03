@@ -743,7 +743,12 @@ def fake_pre_cache(monkeypatch):
             key, (resposta, fontes)
         ),
     )
-    return guardado
+    # `canal` é ContextVar de processo e vaza entre testes (scripts.eval_run o
+    # deixa em "eval"); fixa um valor não-eval para o cache pré-retrieval não
+    # ficar desligado pela ordem da suíte.
+    token = responder.telemetry._canal.set("cli")
+    yield guardado
+    responder.telemetry._canal.reset(token)
 
 
 def _retrieve_contado(monkeypatch, chunks):

@@ -44,7 +44,7 @@ flowchart TD
         D6[Busca externa - allowlist + similaridade]
         D7[LLM Gemini - síntese com citação de URL]
         D8[Encaminha para a secretaria]
-        DR[Resposta origem=base]
+        DR["Resposta (origem=base)"]
     end
 
     A1 --> B1 --> B2 --> B3 --> C1
@@ -52,7 +52,7 @@ flowchart TD
 
     D1 --> D9
     D9 -- hit --> C3
-    C3 -- resposta + fontes --> DR
+    C3 -- resposta e fontes --> DR
     D9 -- miss --> D2 --> C1
     D2 --> D5
     D5 -- não --> D4
@@ -149,8 +149,8 @@ novo. `CACHE_ENABLED` desliga as duas; `scripts/clear_cache.py` apaga as duas.
   responderia com confiança aparente e conteúdo errado
 - Qualquer falha da busca (rate limit, mudança no HTML do buscador) degrada para
   o encaminhamento à secretaria — nunca vira erro para o usuário
-- Sem cache: a chave do componente 4 depende de ids de chunk, que não existem
-  aqui, e conteúdo externo muda sem aviso
+- Sem cache: a chave do 4b depende de ids de chunk, que não existem aqui, e o 4a
+  só grava o desfecho `origem="base"`; além disso conteúdo externo muda sem aviso
 - `Answer.grounded` continua `False` quando a web responde (a informação não
   estava na base — sinal de documento faltando na ingestão); `Answer.origem`
   distingue `base` / `web` / `nenhuma`
