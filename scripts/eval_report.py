@@ -69,7 +69,9 @@ def _origens_aceitas(item: dict) -> list[str]:
     `origem_tambem_ok: ["nenhuma"]` nas perguntas em que o agente legitimamente
     não sabe, sem afrouxar os casos (PII/injeção) em que a distinção importa.
     """
-    return [item["origem_esperada"], *item.get("origem_tambem_ok", ())]
+    # `or ()`, não default do `.get`: com `--fonte db` a chave sempre vem, e vem
+    # `None` quando não há alias (`PerguntaExemplo.como_item`) — ver `eval_run`.
+    return [item["origem_esperada"], *(item.get("origem_tambem_ok") or ())]
 
 
 def _resumir(resposta: str | None, limite: int = 300) -> str:

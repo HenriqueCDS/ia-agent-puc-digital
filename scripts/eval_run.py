@@ -273,7 +273,10 @@ def _origens_aceitas(item: dict) -> list[str]:
     casos em que a distinção IMPORTA (PII/injeção: aí `nenhuma` significa que o
     payload chegou ao LLM antes da desistência, e continua sendo divergência).
     """
-    return [item["origem_esperada"], *item.get("origem_tambem_ok", ())]
+    # `or ()` e não um default do `.get`: com `--fonte db` a chave SEMPRE vem,
+    # e vem `None` quando não há alias (`PerguntaExemplo.como_item`, que copia
+    # a convenção do JSONC). Um default só cobriria a chave ausente.
+    return [item["origem_esperada"], *(item.get("origem_tambem_ok") or ())]
 
 
 def _capturar_telemetria() -> list[dict]:
