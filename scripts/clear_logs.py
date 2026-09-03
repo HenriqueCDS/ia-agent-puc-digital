@@ -10,6 +10,7 @@ execuções anteriores continuariam contando no relatório de lacunas
 
 import typer
 
+from app.db.revisao_store import limpar as limpar_veredictos
 from app.db.telemetry_store import limpar_telemetria
 
 app = typer.Typer(add_completion=False, help="Apaga a telemetria/logs (tabela telemetria).")
@@ -25,6 +26,11 @@ def main(
 
     removidos = limpar_telemetria()
     typer.secho(f"{removidos} registro(s) de telemetria removido(s).", fg=typer.colors.GREEN)
+    # Os veredictos da revisão referenciam `telemetria.id`; sem isto virariam
+    # órfãos apontando para linhas que não existem mais.
+    vered = limpar_veredictos()
+    if vered:
+        typer.secho(f"{vered} veredito(s) de revisão removido(s).", fg=typer.colors.GREEN)
 
 
 if __name__ == "__main__":

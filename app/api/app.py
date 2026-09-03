@@ -15,6 +15,7 @@ from app.api.errors import registrar_handlers
 from app.api.ratelimit import reset_rate_limiter
 from app.api.routers.demo import IMAGENS as demo_imagens
 from app.api.routers.demo import router as demo_router
+from app.api.routers.perguntas import router as perguntas_router
 from app.api.routers.revisao import router as revisao_router
 from app.api.routers.v1 import router as v1_router
 from app.core.config import settings
@@ -155,9 +156,32 @@ def create_app() -> FastAPI:
         _conferir_chave_da_demo()
 
     if settings.revisao_enabled:
-        # Conferência manual de fidelidade de uma rodada de eval (ver o router).
-        # Não depende de `/static` — a página é autossuficiente, como a demo.
+        # Dashboard + conferência manual de fidelidade das rodadas de eval (ver
+        # o router). Lê `telemetria` + `exemplo_perguntas`. Não depende de
+        # `/static` — a página é autossuficiente, como a demo.
         app.include_router(revisao_router)
+
+    if settings.perguntas_crud_enabled:
+        # CRUD do dataset de avaliação (`exemplo_perguntas`). Leitura para
+        # qualquer integração autenticada; escrita só para o consumidor de
+        # avaliação (ver `deps.consumidor_de_escrita_de_avaliacao`).
+        app.include_router(perguntas_router)
+        if (
+            settings.api_auth_enabled
+            and settings.chave_do_consumidor(settings.perguntas_consumidor_escrita) is None
+        ):
+            # Aviso no boot, não no primeiro PATCH: sem a integração
+            # `PERGUNTAS_CONSUMIDOR_ESCRITA` em API_KEYS, a leitura de
+            # /v1/perguntas funciona mas toda escrita programática responde 403.
+            # (A tela /revisao edita a expectativa por rota própria, não por
+            # aqui — ver `routers/revisao.ajustar_expectativa`.)
+            logger.warning(
+                "PERGUNTAS_CRUD_ENABLED=true mas API_KEYS não tem a integração "
+                "'%s': a escrita em /v1/perguntas vai responder 403. Cadastre "
+                "`%s:<chave>` em API_KEYS.",
+                settings.perguntas_consumidor_escrita,
+                settings.perguntas_consumidor_escrita,
+            )
 
     # O rate limiter é único por processo (ver ratelimit.py). Dois apps criados
     # no mesmo processo — o que só acontece em teste — não podem herdar a

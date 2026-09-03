@@ -1,33 +1,34 @@
 <!doctype html>
 <!--
-  Revisão manual de fidelidade de uma rodada de `scripts.eval_run` (ver
-  app/api/routers/revisao.py).
+  Revisão de Avaliação — dashboard (Chart.js) + conferência manual de fidelidade.
 
-  Um arquivo, sem build e sem NENHUM recurso externo — mesma regra da demo
-  (app/static/index.html): abre numa máquina sem internet e não vaza nada para
-  terceiro. A paleta e o renderizador de markdown são os mesmos de lá.
+  Chart.js é servido de /revisao/chart.js (vendorizado em app/static/vendor/,
+  NÃO de CDN): a página continua abrindo numa máquina sem internet e sem
+  depender de host de terceiro. Fora isso, nenhum recurso externo. Paleta e
+  renderizador de markdown são os mesmos da demo (app/static/index.html).
 
-  O que a página faz: carrega o JSON de uma rodada (`GET /revisao/resultados`
-  lista; `GET /revisao/resultados/{nome}` traz), mostra UMA pergunta por vez
-  com a resposta formatada + fontes + o `criterio` do dataset em destaque, e
-  três botões — satisfeito / insatisfeito / pular — que gravam o veredito e
-  avançam. No fim, monta o relatório (contagem + lista dos insatisfeitos) e
-  deixa baixar em JSON ou copiar em Markdown.
+  Fonte dos dados (ver app/api/routers/revisao.py):
+    GET  /revisao/dados      dataset (exemplo_perguntas) × última execução
+                             (telemetria, canal `eval`) × veredito, + agregados
+                             (`resumo`) e o array `fluxo` (métricas cruas por
+                             pergunta executada, de onde saem os histogramas)
+    GET  /revisao/serie      execuções por dia
+    PUT  /revisao/veredicto           grava satisfeito/insatisfeito/pulado de UMA resposta
+    PATCH /revisao/pergunta/{id}      ajusta a expectativa (origem_esperada / também_ok)
 
-  Os veredictos ficam em localStorage por nome de arquivo: fechar a aba no meio
-  da conferência não perde o trabalho.
+  A telemetria NUNCA guarda o texto da pergunta — ele vem de exemplo_perguntas,
+  casado por pergunta_hash.
 -->
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Revisão de Avaliação · Agente de Suporte Acadêmico</title>
+<script src="/revisao/chart.js"></script>
 <style>
-  /* Paleta institucional — idêntica à da demo (ver o comentário longo lá). */
   :root {
     --marca: #003383;
     --marca-forte: #00276a;
-    --marca-suave: #e2eaf7;
     --fundo: #f7fafd;
     --superficie: #ffffff;
     --superficie-2: #eef2f8;
@@ -50,7 +51,6 @@
     :root {
       --marca: #7ba7e8;
       --marca-forte: #9cbef0;
-      --marca-suave: #16264a;
       --fundo: #12151c;
       --superficie: #1a1f2b;
       --superficie-2: #232a38;
@@ -73,243 +73,174 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
-    margin: 0;
-    background: var(--fundo);
-    color: var(--texto);
+    margin: 0; background: var(--fundo); color: var(--texto);
     font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    display: flex;
-    flex-direction: column;
+    display: flex; flex-direction: column;
   }
 
-  /* ---------- cabeçalho ---------- */
   header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--borda);
-    background: var(--superficie);
-    position: sticky;
-    top: 0;
-    z-index: 2;
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px; border-bottom: 1px solid var(--borda);
+    background: var(--superficie); position: sticky; top: 0; z-index: 3;
   }
   .marca-svg { width: 34px; height: 34px; flex: none; color: var(--marca); }
   .divisor { width: 1px; height: 30px; background: var(--borda); flex: none; }
   .titulo { font-weight: 600; letter-spacing: -0.01em; }
   .subtitulo { font-size: 12px; color: var(--texto-fraco); }
-  header .direita { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  header .direita { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-  select, .botao-arquivo {
-    font: inherit; font-size: 13px;
-    padding: 6px 10px;
-    border-radius: 9px;
-    border: 1px solid var(--borda);
-    background: var(--superficie-2);
-    color: var(--texto);
-    max-width: 260px;
-    cursor: pointer;
+  select {
+    font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 9px;
+    border: 1px solid var(--borda); background: var(--superficie-2); color: var(--texto);
   }
-  .botao-arquivo:hover { border-color: var(--marca); }
-  .botao-arquivo input { display: none; }
+  .abas { display: flex; gap: 4px; background: var(--superficie-2); padding: 3px; border-radius: 10px; }
+  .abas button {
+    font: inherit; font-size: 13px; cursor: pointer; border: 0; border-radius: 8px;
+    padding: 6px 14px; background: transparent; color: var(--texto-fraco);
+  }
+  .abas button[aria-selected="true"] { background: var(--superficie); color: var(--texto); font-weight: 600; }
 
-  /* ---------- barra de progresso ---------- */
-  .progresso {
-    max-width: 820px; margin: 0 auto; width: 100%;
-    display: flex; align-items: center; gap: 14px;
-    padding: 12px 20px 0;
-    font-size: 13px; color: var(--texto-fraco);
-  }
-  .progresso .trilha {
-    flex: 1; height: 6px; border-radius: 999px;
-    background: var(--superficie-2); overflow: hidden;
-  }
-  .progresso .trilha span { display: block; height: 100%; background: var(--marca); width: 0; transition: width .2s; }
-  .contadores { display: inline-flex; gap: 10px; font-variant-numeric: tabular-nums; }
-  .contadores b { font-weight: 600; }
-  .c-sat { color: var(--base); }
-  .c-insat { color: var(--erro); }
-  .c-pulo { color: var(--texto-fraco); }
+  main { flex: 1; overflow-y: auto; padding: 18px 20px 40px; }
+  .painel { max-width: 1080px; margin: 0 auto; }
 
-  main {
-    flex: 1;
-    overflow-y: auto;
-    padding: 16px 20px 8px;
-  }
-  .painel { max-width: 820px; margin: 0 auto; }
-
-  /* ---------- cartão da pergunta ---------- */
-  .cartao {
-    background: var(--superficie);
-    border: 1px solid var(--borda);
-    border-radius: var(--raio);
-    padding: 18px 20px;
-  }
-  .pergunta {
-    font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
-    margin: 0 0 14px;
-  }
-  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12px; font-weight: 600;
-    padding: 3px 10px; border-radius: 999px;
-    border: 1px solid transparent;
-  }
-  .badge[data-origem="base"]        { color: var(--base);        background: var(--base-fundo); }
-  .badge[data-origem="web"]         { color: var(--web);         background: var(--web-fundo); }
-  .badge[data-origem="encaminhado"] { color: var(--encaminhado); background: var(--encaminhado-fundo); }
-  .badge[data-origem="nenhuma"]     { color: var(--nenhuma);     background: var(--nenhuma-fundo); }
-  .badge[data-origem="outra"]       { color: var(--erro);        background: var(--erro-fundo); }
-  .seta-origem { color: var(--texto-fraco); font-size: 12px; }
-  .chip {
-    font-size: 12px; color: var(--texto-fraco);
-    padding: 3px 9px; border-radius: 999px;
-    border: 1px solid var(--borda);
-  }
-  .chip[data-ok="sim"] { color: var(--base); border-color: var(--base); }
-  .chip[data-ok="nao"] { color: var(--erro); border-color: var(--erro); }
-
-  .rotulo-secao {
-    font-size: 11px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.07em; color: var(--texto-fraco);
-    margin: 16px 0 6px;
-  }
-  .resposta { white-space: normal; }
-  .resposta p { margin: 0 0 10px; }
-  .resposta ul, .resposta ol { margin: 0 0 10px; padding-left: 22px; }
-  .resposta li { margin-bottom: 4px; }
-  .resposta code {
-    background: var(--superficie-2); padding: 1px 5px; border-radius: 5px;
-    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em;
-  }
-  .resposta a { color: var(--marca); }
-  .resposta-vazia { color: var(--texto-fraco); font-style: italic; }
-
-  .criterio {
-    border: 1px solid var(--borda); border-left: 3px solid var(--web);
-    background: var(--web-fundo); color: var(--texto);
-    padding: 10px 14px; border-radius: 10px; font-size: 14px;
-  }
-  .criterio strong {
-    display: block; font-size: 11px; text-transform: uppercase;
-    letter-spacing: 0.07em; color: var(--web); margin-bottom: 3px;
-  }
-  .erro-linha {
+  .centro { text-align: center; padding: 54px 0; color: var(--texto-fraco); }
+  .centro h1 { font-size: 20px; color: var(--texto); margin: 0 0 8px; letter-spacing: -0.02em; }
+  .aviso {
     border: 1px solid var(--borda); border-left: 3px solid var(--erro);
     background: var(--erro-fundo); color: var(--erro);
-    padding: 10px 14px; border-radius: 10px; font-size: 13px;
-    font-family: ui-monospace, Consolas, monospace;
+    padding: 10px 14px; border-radius: 10px; font-size: 14px; margin: 12px auto; max-width: 560px;
   }
 
-  .fontes { font-size: 13px; }
-  .fontes ol { margin: 0; padding-left: 20px; }
-  .fontes li { margin-bottom: 3px; color: var(--texto-fraco); }
-  .fontes a { color: var(--marca); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .tile { background: var(--superficie); border: 1px solid var(--borda); border-radius: 12px; padding: 12px 14px; }
+  .tile .n { font-size: 21px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .tile .r { font-size: 11.5px; color: var(--texto-fraco); }
+  .tile .s { font-size: 11px; color: var(--texto-fraco); margin-top: 2px; }
+  .tile.bom .n { color: var(--base); }
+  .tile.ruim .n { color: var(--erro); }
 
-  .grade {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-    gap: 8px 14px; font-size: 12.5px;
+  .secao-h { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--texto-fraco); margin: 24px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--borda); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .card { background: var(--superficie); border: 1px solid var(--borda); border-radius: 12px; padding: 14px 16px; }
+  .card.wide { grid-column: 1 / -1; }
+  .card h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+  .card p.sub { margin: 0 0 8px; font-size: 11.5px; color: var(--texto-fraco); }
+  .chart-wrap { position: relative; height: 230px; }
+  .chart-wrap.alta { height: 300px; }
+  .vazia { color: var(--texto-fraco); font-style: italic; font-size: 13px; }
+
+  table.tab { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.tab th, table.tab td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--borda); }
+  table.tab th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--texto-fraco); }
+  table.tab td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .barra-exp { display: flex; flex-wrap: wrap; gap: 10px; margin: 24px 0 0; }
+  .barra-exp button { font: inherit; font-size: 13px; cursor: pointer; padding: 9px 14px; border-radius: 10px;
+    border: 1px solid var(--borda); background: var(--superficie); color: var(--texto); }
+  .barra-exp button:hover { border-color: var(--marca); }
+
+  /* ---------- conferência ---------- */
+  .progresso { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--texto-fraco); margin-bottom: 12px; }
+  .progresso .trilha { flex: 1; height: 6px; border-radius: 999px; background: var(--superficie-2); overflow: hidden; }
+  .progresso .trilha span { display: block; height: 100%; background: var(--marca); width: 0; transition: width .2s; }
+  .cont { display: inline-flex; gap: 9px; font-variant-numeric: tabular-nums; }
+  .cont .cs { color: var(--base); } .cont .ci { color: var(--erro); } .cont .cp { color: var(--texto-fraco); }
+
+  /* lista de pendentes */
+  .lista-pend { border: 1px solid var(--borda); border-radius: 12px; background: var(--superficie); margin-bottom: 14px; }
+  .lista-pend > summary {
+    cursor: pointer; padding: 10px 14px; font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px; list-style: none;
   }
+  .lista-pend > summary::-webkit-details-marker { display: none; }
+  .lista-pend > summary::before { content: "▸"; color: var(--texto-fraco); font-size: 11px; }
+  .lista-pend[open] > summary::before { content: "▾"; }
+  .lista-pend .badge-n { background: var(--web-fundo); color: var(--web); font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 999px; }
+  .lista-pend .badge-n.zero { background: var(--base-fundo); color: var(--base); }
+  .lista-pend .corpo { max-height: 260px; overflow-y: auto; border-top: 1px solid var(--borda); }
+  .pend-item {
+    display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: center;
+    width: 100%; text-align: left; border: 0; background: transparent; color: var(--texto);
+    font: inherit; font-size: 12.5px; padding: 7px 14px; cursor: pointer; border-bottom: 1px solid var(--borda);
+  }
+  .pend-item:last-child { border-bottom: 0; }
+  .pend-item:hover { background: var(--superficie-2); }
+  .pend-item[aria-current="true"] { background: var(--marca-suave, var(--superficie-2)); font-weight: 600; }
+  .pend-item.feito { color: var(--texto-fraco); }
+  .pend-item .q { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pend-item .st { font-size: 13px; line-height: 1; text-align: center; }
+  .pend-item .st.pendente { color: var(--web); }
+  .pend-item .st.satisfeito { color: var(--base); }
+  .pend-item .st.insatisfeito { color: var(--erro); }
+  .pend-item .st.pulado { color: var(--texto-fraco); }
+  .pend-item .gr { font-size: 10.5px; color: var(--texto-fraco); border: 1px solid var(--borda); border-radius: 999px; padding: 0 6px; }
+  .pend-vazia { padding: 10px 14px; font-size: 12.5px; color: var(--base); border-top: 1px solid var(--borda); }
+  .lista-pend .rodape { padding: 8px 14px; border-top: 1px solid var(--borda); display: flex; gap: 8px; flex-wrap: wrap; }
+  .lista-pend .rodape button { font: inherit; font-size: 12px; cursor: pointer; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--borda); background: var(--superficie); color: var(--texto); }
+  .lista-pend .rodape button:hover { border-color: var(--marca); }
+
+  .cartao { background: var(--superficie); border: 1px solid var(--borda); border-radius: var(--raio); padding: 18px 20px; }
+  .pergunta { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 12px; }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; }
+  .badge[data-o="base"] { color: var(--base); background: var(--base-fundo); }
+  .badge[data-o="web"] { color: var(--web); background: var(--web-fundo); }
+  .badge[data-o="encaminhado"] { color: var(--encaminhado); background: var(--encaminhado-fundo); }
+  .badge[data-o="nenhuma"] { color: var(--nenhuma); background: var(--nenhuma-fundo); }
+  .badge[data-o="outra"] { color: var(--erro); background: var(--erro-fundo); }
+  .chip { font-size: 12px; color: var(--texto-fraco); padding: 3px 9px; border-radius: 999px; border: 1px solid var(--borda); }
+  .chip[data-ok="sim"] { color: var(--base); border-color: var(--base); }
+  .chip[data-ok="nao"] { color: var(--erro); border-color: var(--erro); }
+  .seta { color: var(--texto-fraco); font-size: 12px; }
+
+  .rot-secao { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--texto-fraco); margin: 16px 0 6px; }
+  .resposta { white-space: normal; }
+  .resposta p { margin: 0 0 10px; } .resposta ul, .resposta ol { margin: 0 0 10px; padding-left: 22px; }
+  .resposta li { margin-bottom: 4px; }
+  .resposta code { background: var(--superficie-2); padding: 1px 5px; border-radius: 5px; font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; }
+  .resposta a { color: var(--marca); }
+
+  .criterio { border: 1px solid var(--borda); border-left: 3px solid var(--web); background: var(--web-fundo); padding: 10px 14px; border-radius: 10px; font-size: 14px; margin-top: 12px; }
+  .criterio strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--web); margin-bottom: 3px; }
+
+  .expectativa { background: var(--superficie-2); border: 1px solid var(--borda); border-radius: 10px; padding: 12px 14px; margin-top: 16px; display: flex; flex-direction: column; gap: 9px; }
+  .expectativa.aj { border-color: var(--marca); }
+  .expectativa .linha { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .expectativa label { font-size: 13px; color: var(--texto-fraco); display: inline-flex; align-items: center; gap: 6px; }
+  .expectativa select { background: var(--superficie); }
+  .tambem-ok { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }
+  .tambem-ok label { font-size: 12.5px; }
+  .vr { font-size: 13px; } .vr b[data-ok="sim"] { color: var(--base); } .vr b[data-ok="nao"] { color: var(--erro); }
+  .vr .antes { color: var(--texto-fraco); font-size: 12px; }
+
+  .grade { display: grid; grid-template-columns: repeat(auto-fill, minmax(115px, 1fr)); gap: 7px 13px; font-size: 12.5px; margin-top: 6px; }
   .grade div { display: flex; flex-direction: column; }
   .grade dt { color: var(--texto-fraco); font-size: 11px; }
   .grade dd { margin: 0; font-variant-numeric: tabular-nums; }
 
-  details { margin-top: 14px; font-size: 12px; }
-  details summary { cursor: pointer; color: var(--texto-fraco); }
-  details pre {
-    margin: 8px 0 0; padding: 12px;
-    background: var(--superficie-2); border: 1px solid var(--borda);
-    border-radius: 10px; overflow-x: auto;
-    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11.5px;
-    line-height: 1.5;
-  }
+  details.crua { margin-top: 12px; font-size: 12px; }
+  details.crua summary { cursor: pointer; color: var(--texto-fraco); }
+  details.crua pre { margin: 8px 0 0; padding: 12px; background: var(--superficie-2); border: 1px solid var(--borda); border-radius: 10px; overflow-x: auto; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; }
 
-  /* ---------- barra de ações ---------- */
   .acoes {
-    position: sticky; bottom: 0;
-    max-width: 820px; margin: 0 auto; width: 100%;
-    padding: 12px 0 18px;
-    background: linear-gradient(to top, var(--fundo) 70%, transparent);
+    position: sticky; bottom: 0; margin-top: 14px; padding: 12px 0 4px;
+    background: linear-gradient(to top, var(--fundo) 72%, transparent);
     display: flex; gap: 10px; align-items: center;
   }
-  .acoes .nav {
-    font: inherit; font-size: 13px; cursor: pointer;
-    padding: 9px 12px; border-radius: 10px;
-    border: 1px solid var(--borda); background: var(--superficie); color: var(--texto);
-  }
+  .acoes .nav { font: inherit; font-size: 13px; cursor: pointer; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--borda); background: var(--superficie); color: var(--texto); }
   .acoes .nav:disabled { opacity: .4; cursor: default; }
-  .voto {
-    flex: 1;
-    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
-    padding: 11px 12px; border-radius: 10px;
-    border: 1px solid var(--borda); background: var(--superficie); color: var(--texto);
-    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  }
+  .voto { flex: 1; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--borda); background: var(--superficie); color: var(--texto); display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+  .voto:disabled { opacity: .4; cursor: default; }
   .voto small { font-weight: 400; opacity: .6; font-size: 11px; }
-  .voto.sat:hover, .voto.sat[aria-pressed="true"]   { border-color: var(--base); color: var(--base); background: var(--base-fundo); }
+  .voto.sat:hover, .voto.sat[aria-pressed="true"] { border-color: var(--base); color: var(--base); background: var(--base-fundo); }
   .voto.insat:hover, .voto.insat[aria-pressed="true"] { border-color: var(--erro); color: var(--erro); background: var(--erro-fundo); }
-  .voto.pulo:hover, .voto.pulo[aria-pressed="true"]  { border-color: var(--texto-fraco); color: var(--texto-fraco); background: var(--superficie-2); }
-
-  /* ---------- estados de tela ---------- */
-  .centro { text-align: center; padding: 54px 0 20px; color: var(--texto-fraco); }
-  .centro h1 { font-size: 21px; font-weight: 600; margin: 0 0 8px; color: var(--texto); letter-spacing: -0.02em; }
-  .centro p { margin: 0 auto 18px; max-width: 460px; }
-
-  /* ---------- relatório ---------- */
-  .relatorio h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 4px 0 4px; }
-  .relatorio .fonte-rodada { font-size: 12.5px; color: var(--texto-fraco); margin-bottom: 18px; }
-  .cards {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 10px; margin-bottom: 20px;
-  }
-  .card {
-    background: var(--superficie); border: 1px solid var(--borda);
-    border-radius: 12px; padding: 14px 16px;
-  }
-  .card .n { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-  .card .r { font-size: 12px; color: var(--texto-fraco); }
-  .card.sat .n { color: var(--base); }
-  .card.insat .n { color: var(--erro); }
-
-  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0 20px; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--borda); }
-  th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--texto-fraco); font-weight: 600; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-
-  .lista-insat { list-style: none; padding: 0; margin: 0 0 20px; display: flex; flex-direction: column; gap: 8px; }
-  .lista-insat li {
-    background: var(--superficie); border: 1px solid var(--borda);
-    border-left: 3px solid var(--erro); border-radius: 10px; padding: 9px 13px;
-  }
-  .lista-insat .q { font-weight: 500; }
-  .lista-insat .o { font-size: 12px; color: var(--texto-fraco); margin-top: 2px; }
-  .lista-insat button {
-    font: inherit; font-size: 12px; cursor: pointer; margin-top: 6px;
-    padding: 3px 9px; border-radius: 8px;
-    border: 1px solid var(--borda); background: var(--superficie-2); color: var(--texto);
-  }
-
-  .barra-relatorio { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 40px; }
-  .barra-relatorio button {
-    font: inherit; font-size: 13px; cursor: pointer;
-    padding: 9px 14px; border-radius: 10px;
-    border: 1px solid var(--borda); background: var(--superficie); color: var(--texto);
-  }
-  .barra-relatorio button.primario { background: var(--marca); color: #fff; border-color: var(--marca); }
-  .barra-relatorio button:hover { border-color: var(--marca); }
-
-  .aviso {
-    border: 1px solid var(--borda); border-left: 3px solid var(--erro);
-    background: var(--erro-fundo); color: var(--erro);
-    padding: 10px 14px; border-radius: 10px; font-size: 14px; margin: 0 auto; max-width: 460px;
-  }
+  .voto.pulo:hover, .voto.pulo[aria-pressed="true"] { border-color: var(--texto-fraco); background: var(--superficie-2); }
 
   @media (max-width: 560px) {
-    header { flex-wrap: wrap; }
-    header .direita { width: 100%; margin-left: 0; }
-    select { max-width: none; flex: 1; }
-    .acoes { flex-wrap: wrap; }
-    .voto { flex-basis: 100%; }
+    header { flex-wrap: wrap; } header .direita { width: 100%; margin-left: 0; }
+    .acoes { flex-wrap: wrap; } .voto { flex-basis: 100%; }
   }
 </style>
 </head>
@@ -317,57 +248,44 @@
 
 <header>
   <svg class="marca-svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <path d="M8 3h6l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"
-          stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-    <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8"
-          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M8 3h6l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
   <span class="divisor" aria-hidden="true"></span>
   <div>
     <div class="titulo">Revisão de Avaliação</div>
-    <div class="subtitulo">Conferência manual de fidelidade &middot; scripts.eval_run</div>
+    <div class="subtitulo">telemetria do canal <code>eval</code> &middot; scripts.eval_run</div>
   </div>
   <div class="direita">
-    <select id="arquivo" aria-label="Escolher rodada">
-      <option value="">Escolher rodada…</option>
+    <div class="abas" role="tablist">
+      <button role="tab" data-modo="dashboard" aria-selected="true">Visão geral</button>
+      <button role="tab" data-modo="revisao" aria-selected="false">Conferir</button>
+    </div>
+    <select id="f-dias" aria-label="Janela">
+      <option value="7">7 dias</option>
+      <option value="30">30 dias</option>
+      <option value="90" selected>90 dias</option>
+      <option value="365">1 ano</option>
     </select>
-    <label class="botao-arquivo">
-      Abrir arquivo…
-      <input type="file" id="upload" accept=".json,application/json">
-    </label>
+    <select id="f-grupo" aria-label="Grupo"><option value="">Todos os grupos</option></select>
+    <select id="f-origem" aria-label="Origem obtida">
+      <option value="">Todas as origens</option>
+      <option value="base">base</option>
+      <option value="web">web</option>
+      <option value="encaminhado">encaminhado</option>
+      <option value="nenhuma">nenhuma</option>
+    </select>
   </div>
 </header>
 
-<div class="progresso" id="progresso" hidden>
-  <span id="posicao">—</span>
-  <div class="trilha"><span id="trilha-preenche"></span></div>
-  <span class="contadores">
-    <span class="c-sat">✓ <b id="n-sat">0</b></span>
-    <span class="c-insat">✗ <b id="n-insat">0</b></span>
-    <span class="c-pulo">– <b id="n-pulo">0</b></span>
-  </span>
-</div>
-
 <main>
   <div class="painel" id="painel">
-    <div class="centro" id="inicial">
-      <h1>Conferir uma rodada de avaliação</h1>
-      <p>
-        A taxa de <code>acertou</code> mede só o roteamento (origem esperada vs. obtida).
-        Aqui você lê a resposta inteira de cada pergunta e diz se ela está satisfatória —
-        e no fim sai um relatório.
-      </p>
-      <p id="sem-rodadas" hidden>
-        Nenhum arquivo em <code>eval/resultados/</code> — rode
-        <code>python -m scripts.eval_run</code> ou use “Abrir arquivo…”.
-      </p>
-    </div>
+    <div class="centro" id="carregando"><p>Carregando…</p></div>
   </div>
 </main>
 
 <script>
 "use strict";
-
 const $ = (id) => document.getElementById(id);
 
 const VEREDICTOS = {
@@ -375,473 +293,663 @@ const VEREDICTOS = {
   insatisfeito: { rotulo: "Insatisfeito", classe: "insat", tecla: "2 / I" },
   pulado:       { rotulo: "Pular",        classe: "pulo",  tecla: "3 / P" },
 };
-
-// Origens conhecidas — as quatro de models.Origem mais os desfechos que só o
-// harness de avaliação produz (ver _ORIGEM_* em scripts/eval_run.py).
 const ORIGENS = {
-  base:                    "material interno",
-  web:                     "página oficial",
-  encaminhado:             "encaminhado",
-  nenhuma:                 "sem resposta",
-  provedores_indisponivel: "provedores fora",
+  base: "material interno", web: "página oficial", encaminhado: "encaminhado",
+  nenhuma: "sem resposta", provedores_indisponivel: "provedores fora",
 };
+const ORIGENS_ESPERAVEIS = ["base", "web", "encaminhado", "nenhuma"];
 
-const estado = { nome: null, linhas: [], idx: 0, veredictos: {} };
+const estado = {
+  filtros: { dias: 90, grupo: "", origem: "" },
+  linhas: [], resumo: null, serie: [],
+  modo: "dashboard", idx: 0,
+};
+const charts = {};
 
-/* ---------- utilidades de texto (idênticas à demo) ---------- */
-
-function escapar(txt) {
-  return String(txt).replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/* ---------- texto (igual à demo) ---------- */
+function escapar(t) {
+  return String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-
+function inline(txt) {
+  return txt.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/(https?:\/\/[^\s<]+[^\s<.,;:)])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+}
 function renderizarResposta(texto) {
   const linhas = escapar(texto).split("\n");
-  let html = "", lista = null, paragrafo = [];
-  const fecharParagrafo = () => {
-    if (paragrafo.length) { html += "<p>" + inline(paragrafo.join(" ")) + "</p>"; paragrafo = []; }
-  };
-  const fecharLista = () => { if (lista) { html += `</${lista}>`; lista = null; } };
+  let html = "", lista = null, par = [];
+  const fp = () => { if (par.length) { html += "<p>" + inline(par.join(" ")) + "</p>"; par = []; } };
+  const fl = () => { if (lista) { html += `</${lista}>`; lista = null; } };
   for (const bruta of linhas) {
-    const linha = bruta.trim();
-    if (!linha) { fecharParagrafo(); fecharLista(); continue; }
-    const marcador = linha.match(/^[-*•]\s+(.*)$/);
-    const numerada = linha.match(/^\d+[.)]\s+(.*)$/);
-    const tipo = marcador ? "ul" : numerada ? "ol" : null;
-    if (tipo) {
-      fecharParagrafo();
-      if (lista !== tipo) { fecharLista(); html += `<${tipo}>`; lista = tipo; }
-      html += "<li>" + inline((marcador || numerada)[1]) + "</li>";
-    } else {
-      fecharLista();
-      paragrafo.push(linha);
-    }
+    const l = bruta.trim();
+    if (!l) { fp(); fl(); continue; }
+    const m = l.match(/^[-*•]\s+(.*)$/), n = l.match(/^\d+[.)]\s+(.*)$/);
+    const tipo = m ? "ul" : n ? "ol" : null;
+    if (tipo) { fp(); if (lista !== tipo) { fl(); html += `<${tipo}>`; lista = tipo; } html += "<li>" + inline((m || n)[1]) + "</li>"; }
+    else { fl(); par.push(l); }
   }
-  fecharParagrafo();
-  fecharLista();
+  fp(); fl();
   return html;
 }
 
-function inline(txt) {
-  return txt
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/(https?:\/\/[^\s<]+[^\s<.,;:)])/g,
-             '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
-}
-
-/* ---------- persistência local ---------- */
-
-function chaveStorage(nome) { return "revisao:" + nome; }
-
-function carregarVeredictos(nome) {
+/* ---------- carga ---------- */
+async function carregar() {
+  const q = new URLSearchParams({ dias: estado.filtros.dias });
+  if (estado.filtros.grupo) q.set("grupo", estado.filtros.grupo);
+  if (estado.filtros.origem) q.set("origem", estado.filtros.origem);
   try {
-    const cru = localStorage.getItem(chaveStorage(nome));
-    if (!cru) return {};
-    const dados = JSON.parse(cru);
-    return (dados && typeof dados.veredictos === "object" && dados.veredictos) || {};
-  } catch { return {}; }
-}
-
-function salvarVeredictos() {
-  try {
-    localStorage.setItem(chaveStorage(estado.nome), JSON.stringify({
-      veredictos: estado.veredictos,
-      atualizado: new Date().toISOString(),
-    }));
-  } catch { /* modo privado / storage cheio — a revisão segue só em memória */ }
-}
-
-/* ---------- carga da rodada ---------- */
-
-async function carregarLista() {
-  try {
-    const r = await fetch("/revisao/resultados");
-    if (!r.ok) return;
-    const { arquivos } = await r.json();
-    const seletor = $("arquivo");
-    for (const a of arquivos) {
-      const marcados = Object.keys(carregarVeredictos(a.nome)).length;
-      const sufixo = marcados ? `  (${marcados} conferida${marcados > 1 ? "s" : ""})` : "";
-      seletor.insertAdjacentHTML("beforeend",
-        `<option value="${escapar(a.nome)}">${escapar(a.nome)}${sufixo}</option>`);
-    }
-    $("sem-rodadas").hidden = arquivos.length > 0;
-  } catch {
-    $("sem-rodadas").hidden = false;
-  }
-}
-
-function validarLinhas(dados) {
-  if (!Array.isArray(dados) || !dados.length) throw new Error("arquivo vazio ou não é uma lista");
-  if (typeof dados[0].pergunta !== "string") throw new Error("linhas sem campo `pergunta` — isto é um resultado de eval_run?");
-  return dados;
-}
-
-async function abrirRodada(nome) {
-  try {
-    const r = await fetch("/revisao/resultados/" + encodeURIComponent(nome));
-    const corpo = await r.json().catch(() => null);
-    if (!r.ok) throw new Error((corpo && corpo.detail) || `HTTP ${r.status}`);
-    iniciar(nome, validarLinhas(corpo));
+    const [rd, rs] = await Promise.all([
+      fetch("/revisao/dados?" + q),
+      fetch("/revisao/serie?dias=" + estado.filtros.dias),
+    ]);
+    if (!rd.ok) throw new Error("HTTP " + rd.status + " em /revisao/dados");
+    const dados = await rd.json();
+    estado.linhas = dados.linhas;
+    estado.resumo = dados.resumo;
+    estado.serie = rs.ok ? (await rs.json()).pontos : [];
+    preencherGrupos(dados.filtros.grupos_disponiveis);
+    estado.idx = Math.max(0, estado.linhas.findIndex((l) => l.executada && !l.veredicto));
+    render();
   } catch (e) {
-    telaErro(`Não foi possível abrir ${nome}: ${e.message}`);
+    $("painel").innerHTML = `<div class="aviso">Não foi possível carregar: ${escapar(e.message)}<br>
+      <span style="font-size:12px">Se o servidor foi iniciado antes desta versão, reinicie o uvicorn.</span></div>`;
   }
 }
 
-function abrirArquivoLocal(file) {
-  const leitor = new FileReader();
-  leitor.onload = () => {
-    try {
-      iniciar(file.name, validarLinhas(JSON.parse(leitor.result)));
-    } catch (e) {
-      telaErro(`${file.name} não é um JSON de resultado válido: ${e.message}`);
-    }
-  };
-  leitor.onerror = () => telaErro(`Falha ao ler ${file.name}.`);
-  leitor.readAsText(file);
-}
-
-function iniciar(nome, linhas) {
-  estado.nome = nome;
-  estado.linhas = linhas;
-  estado.veredictos = carregarVeredictos(nome);
-  // Retoma na primeira pergunta ainda sem veredito.
-  estado.idx = linhas.findIndex((_, i) => !estado.veredictos[i]);
-  if (estado.idx < 0) estado.idx = linhas.length;  // tudo conferido → relatório
-  $("progresso").hidden = false;
-  render();
-}
-
-/* ---------- votação e navegação ---------- */
-
-function votar(v) {
-  estado.veredictos[estado.idx] = v;
-  salvarVeredictos();
-  estado.idx = Math.min(estado.idx + 1, estado.linhas.length);
-  render();
-}
-
-function irPara(i) {
-  estado.idx = Math.max(0, Math.min(i, estado.linhas.length));
-  render();
-}
-
-/* ---------- render ---------- */
-
-function contagem() {
-  const c = { satisfeito: 0, insatisfeito: 0, pulado: 0 };
-  for (const v of Object.values(estado.veredictos)) if (v in c) c[v]++;
-  return c;
-}
-
-function atualizarProgresso() {
-  const total = estado.linhas.length;
-  const c = contagem();
-  const feitas = c.satisfeito + c.insatisfeito + c.pulado;
-  $("posicao").textContent = estado.idx < total
-    ? `Pergunta ${estado.idx + 1} de ${total}`
-    : `${total} de ${total} — revisão completa`;
-  $("trilha-preenche").style.width = (100 * feitas / total) + "%";
-  $("n-sat").textContent = c.satisfeito;
-  $("n-insat").textContent = c.insatisfeito;
-  $("n-pulo").textContent = c.pulado;
-}
-
-function badgeOrigem(valor) {
-  const chave = valor == null ? "nenhuma" : valor;
-  const conhecida = chave in ORIGENS;
-  const rotulo = conhecida ? ORIGENS[chave] : (valor == null ? "—" : valor);
-  const attr = ["base", "web", "encaminhado", "nenhuma"].includes(chave) ? chave : "outra";
-  return `<span class="badge" data-origem="${attr}">${escapar(rotulo)}</span>`;
-}
-
-function linhaMetricas(l) {
-  const campos = [
-    ["score_top", l.score_top], ["score_min", l.score_min], ["score_mean", l.score_mean],
-    ["margem_relativa", l.margem_relativa], ["score_top_bruto", l.score_top_bruto],
-    ["chunks", l.chunks_recuperados], ["fontes na resp.", l.fontes_resposta],
-    ["reranker", l.reranker_aplicado == null ? null : (l.reranker_aplicado ? "sim" : "não")],
-    ["ms_total", l.ms_total == null ? null : Math.round(l.ms_total)],
-    ["ms_retrieve", l.ms_retrieve == null ? null : Math.round(l.ms_retrieve)],
-    ["tokens saída", l.output_tokens], ["provider", l.provider], ["modelo", l.chat_model],
-  ].filter(([, v]) => v !== null && v !== undefined && v !== "");
-  return campos.map(([k, v]) =>
-    `<div><dt>${escapar(k)}</dt><dd>${escapar(v)}</dd></div>`).join("");
+let gruposPreenchidos = false;
+function preencherGrupos(grupos) {
+  if (gruposPreenchidos) return;
+  for (const g of grupos) $("f-grupo").insertAdjacentHTML("beforeend", `<option value="${escapar(g)}">${escapar(g)}</option>`);
+  gruposPreenchidos = true;
 }
 
 function render() {
-  const painel = $("painel");
+  document.querySelectorAll(".abas button").forEach((b) =>
+    b.setAttribute("aria-selected", b.dataset.modo === estado.modo));
+  if (!estado.resumo) return;
+  if (estado.modo === "dashboard") renderDashboard();
+  else { destruirCharts(); renderRevisao(); }
+}
 
-  if (!estado.nome) {  // nada carregado ainda
-    atualizarProgressoOculto();
+/* ==================== DASHBOARD (Chart.js) ==================== */
+
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function paleta() {
+  return [css("--marca"), css("--base"), css("--web"), css("--encaminhado"), css("--erro"),
+    css("--texto-fraco"), "#8b5cf6", "#0ea5e9", "#f59e0b", "#ec4899", "#14b8a6", "#a3a3a3"];
+}
+const CORES_ORIGEM = () => ({
+  base: css("--base"), web: css("--web"), encaminhado: css("--encaminhado"),
+  nenhuma: css("--nenhuma"), "—": css("--borda"),
+});
+
+function destruirCharts() { for (const k in charts) { charts[k].destroy(); delete charts[k]; } }
+
+function graf(id, cfg) {
+  const el = $(id);
+  if (!el) return;
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(el, cfg);
+}
+const OPTS_BASE = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
+};
+
+function doughnut(id, obj, coresPorChave) {
+  const labels = Object.keys(obj), valores = Object.values(obj);
+  const cores = coresPorChave ? labels.map((k) => coresPorChave[k] || css("--borda")) : paleta();
+  graf(id, {
+    type: "doughnut",
+    data: { labels, datasets: [{ data: valores, backgroundColor: cores, borderWidth: 0 }] },
+    options: { ...OPTS_BASE, cutout: "58%" },
+  });
+}
+
+function barra(id, obj, { cor, horizontal = false, max } = {}) {
+  const labels = Object.keys(obj), valores = Object.values(obj);
+  graf(id, {
+    type: "bar",
+    data: { labels, datasets: [{ data: valores, backgroundColor: cor || css("--marca"), borderRadius: 3 }] },
+    options: {
+      ...OPTS_BASE, indexAxis: horizontal ? "y" : "x",
+      plugins: { legend: { display: false } },
+      scales: { x: { grid: { display: !horizontal } }, y: { grid: { display: horizontal }, max, beginAtZero: true } },
+    },
+  });
+}
+
+function empilhado(id, labels, datasets, { horizontal = true } = {}) {
+  graf(id, {
+    type: "bar",
+    data: { labels, datasets: datasets.map((d) => ({ ...d, borderRadius: 2 })) },
+    options: {
+      ...OPTS_BASE, indexAxis: horizontal ? "y" : "x",
+      scales: { x: { stacked: true, beginAtZero: true }, y: { stacked: true } },
+    },
+  });
+}
+
+// Histograma no cliente: bina o array e devolve p/ um bar chart.
+function histograma(id, valores, { cor, bins = 12, fmt = (v) => Math.round(v), titulo } = {}) {
+  const vals = (valores || []).filter((v) => v !== null && v !== undefined && !Number.isNaN(v));
+  const wrap = $(id) && $(id).closest(".card");
+  if (!vals.length) { if (wrap) wrap.querySelector(".chart-wrap").innerHTML = `<p class="vazia">sem dados</p>`; return; }
+  const min = Math.min(...vals), max = Math.max(...vals);
+  let labels, counts;
+  if (min === max) { labels = [fmt(min)]; counts = [vals.length]; }
+  else {
+    const w = (max - min) / bins;
+    counts = new Array(bins).fill(0);
+    for (const v of vals) counts[Math.min(bins - 1, Math.floor((v - min) / w))]++;
+    labels = counts.map((_, i) => fmt(min + i * w));
+  }
+  graf(id, {
+    type: "bar",
+    data: { labels, datasets: [{ data: counts, backgroundColor: cor || css("--marca"), borderRadius: 2, barPercentage: 1, categoryPercentage: 1 }] },
+    options: {
+      ...OPTS_BASE,
+      plugins: { legend: { display: false }, title: titulo ? { display: true, text: titulo, font: { size: 11 } } : {} },
+      scales: { x: { grid: { display: false }, ticks: { font: { size: 9 }, maxRotation: 0 } }, y: { beginAtZero: true, ticks: { precision: 0 } } },
+    },
+  });
+}
+
+function card(id, titulo, sub, alta) {
+  return `<div class="card"><h3>${escapar(titulo)}</h3>${sub ? `<p class="sub">${escapar(sub)}</p>` : ""}
+    <div class="chart-wrap ${alta ? "alta" : ""}"><canvas id="${id}"></canvas></div></div>`;
+}
+function cardWide(id, titulo, sub, alta) {
+  return `<div class="card wide"><h3>${escapar(titulo)}</h3>${sub ? `<p class="sub">${escapar(sub)}</p>` : ""}
+    <div class="chart-wrap ${alta ? "alta" : ""}"><canvas id="${id}"></canvas></div></div>`;
+}
+
+function renderDashboard() {
+  const r = estado.resumo;
+  if (typeof Chart === "undefined") {
+    $("painel").innerHTML = `<div class="aviso">Chart.js não carregou (/revisao/chart.js). Reinicie o servidor com a versão nova.</div>`;
     return;
   }
-  atualizarProgresso();
+  Chart.defaults.color = css("--texto-fraco");
+  Chart.defaults.borderColor = css("--borda");
+  Chart.defaults.font.family = "ui-sans-serif, system-ui, sans-serif";
 
-  if (estado.idx >= estado.linhas.length) { renderRelatorio(); return; }
+  const taxa = r.acerto_geral.taxa;
+  const ver = r.veredictos;
+  const m = r.medias, d = r.distribuicoes, et = r.tempo_por_etapa;
+  const fl = r.flags;
+  const flagSim = (k) => fl[k] ? fl[k].sim : 0;
 
-  const l = estado.linhas[estado.idx];
-  const v = estado.veredictos[estado.idx];
-  const aceitas = [l.origem_esperada, ...(l.origem_tambem_ok || [])].filter(Boolean);
+  $("painel").innerHTML = `
+    <div class="tiles">
+      <div class="tile ${taxa === null ? "" : taxa >= 0.8 ? "bom" : "ruim"}">
+        <div class="n">${taxa === null ? "—" : Math.round(taxa * 100) + "%"}</div>
+        <div class="r">acerto de roteamento</div><div class="s">${r.acerto_geral.acertou}/${r.acerto_geral.avaliaveis}</div></div>
+      <div class="tile"><div class="n">${r.executadas}</div><div class="r">execuções</div><div class="s">${r.nao_executadas} sem execução</div></div>
+      <div class="tile ${ver.insatisfeito ? "ruim" : ver.satisfeito ? "bom" : ""}"><div class="n">${ver.satisfeito}/${ver.insatisfeito}</div>
+        <div class="r">fidelidade ✓ / ✗</div><div class="s">${ver.sem_veredicto} sem conferir</div></div>
+      <div class="tile ${r.nao_grounded ? "ruim" : ""}"><div class="n">${r.nao_grounded}</div><div class="r">não-grounded</div>
+        <div class="s">grounded=true: ${fl.grounded.sim}</div></div>
+      <div class="tile"><div class="n">${r.cache_hits}</div><div class="r">cache hit</div><div class="s">sem cache: ${fl.cache_hit.nao}</div></div>
+      <div class="tile"><div class="n">${flagSim("pii")}</div><div class="r">com PII</div><div class="s">sem PII: ${fl.pii.nao}</div></div>
+      <div class="tile ${flagSim("erro") ? "ruim" : ""}"><div class="n">${flagSim("erro")}</div><div class="r">com erro</div><div class="s">sem erro: ${fl.erro.nao}</div></div>
+      <div class="tile"><div class="n">${r.latencia_ms.p50 ?? "—"}<span style="font-size:12px"> ms</span></div>
+        <div class="r">latência p50</div><div class="s">p95 ${r.latencia_ms.p95 ?? "—"} · méd ${r.latencia_ms.media ?? "—"}</div></div>
+      <div class="tile"><div class="n">${m.n_chunks ?? "—"}</div><div class="r">média n_chunks</div>
+        <div class="s">score_top méd ${m.score_top ?? "—"}</div></div>
+      <div class="tile"><div class="n">${m.input_tokens ?? "—"}<span style="font-size:12px"> / ${m.output_tokens ?? "—"}</span></div>
+        <div class="r">tokens médios in / out</div></div>
+      <div class="tile"><div class="n">${flagSim("base_insuficiente")}</div><div class="r">base insuficiente</div>
+        <div class="s">web insuf.: ${flagSim("web_insuficiente")}</div></div>
+      <div class="tile"><div class="n">${flagSim("reranker_aplicado")}</div><div class="r">reranker aplicado</div>
+        <div class="s">recusa modelo: ${flagSim("recusa_modelo")} · ctx suspeito: ${flagSim("contexto_suspeito")}</div></div>
+    </div>
 
-  const fontes = (l.fontes_citadas || []).map((f) => {
-    const url = /^https?:\/\//.test(f);
-    return `<li>${url ? `<a href="${escapar(f)}" target="_blank" rel="noopener noreferrer">${escapar(f)}</a>` : escapar(f)}</li>`;
+    <div class="secao-h">Roteamento &amp; fidelidade</div>
+    <div class="grid">
+      ${card("c-origem", "Origem obtida", "para onde a resposta foi (nenhuma = agente desistiu)")}
+      ${card("c-veredictos", "Vereditos", "conferência manual de fidelidade")}
+      ${cardWide("c-grupo", "Roteamento por grupo", "roteou certo × divergiu × indeterminado")}
+      ${card("c-cruz", "Roteamento × fidelidade", "o que interessa: roteou certo mas insatisfeito")}
+    </div>
+
+    <div class="secao-h">Latência — onde vai o tempo</div>
+    <div class="grid">
+      ${card("c-etapa-media", "Tempo médio por etapa (ms)", "retrieve · rerank · LLM · web")}
+      ${cardWide("c-fluxo", "Fluxo de latência por pergunta (ms empilhado)", "cada barra = uma pergunta executada", true)}
+      ${card("c-hist-total", "Distribuição de ms_total")}
+      ${card("c-hist-llm", "Distribuição de ms_llm")}
+      ${card("c-hist-web", "Distribuição de ms_web")}
+      ${card("c-hist-rerank", "Distribuição de ms_rerank")}
+      ${card("c-hist-retrieve", "Distribuição de ms_retrieve")}
+    </div>
+
+    <div class="secao-h">Retrieval — scores &amp; chunks</div>
+    <div class="grid">
+      ${card("c-hist-stop", "Distribuição de score_top")}
+      ${card("c-hist-smin", "Distribuição de score_min")}
+      ${card("c-hist-sbruto", "Distribuição de score_top_bruto (bi-encoder, pré-rerank)")}
+      ${card("c-nchunks", "n_chunks recuperados", "contagem por valor")}
+    </div>
+
+    <div class="secao-h">Custo — tokens &amp; provedores</div>
+    <div class="grid">
+      ${cardWide("c-tokens-prov", "Tokens por provider (soma)", "input × output")}
+      ${card("c-exec-prov", "Execuções por provider")}
+      ${card("c-exec-modelo", "Execuções por modelo")}
+    </div>
+
+    <div class="secao-h">Guardrails &amp; flags</div>
+    <div class="grid">
+      ${cardWide("c-flags", "Flags (sim / não / indefinido)", "grounded, cache, PII, erro, base/web insuficiente, reranker, recusa, contexto suspeito, veto", true)}
+      ${card("c-pii-cat", "PII por categoria", "quando aparece")}
+      ${card("c-assunto-origem", "assunto_origem", "de onde veio o rótulo de assunto")}
+    </div>
+
+    <div class="secao-h">Assuntos &amp; tópicos</div>
+    <div class="grid">
+      ${card("c-assunto", "Execuções por assunto")}
+      ${cardWide("c-topicos", "Principais tópicos (escritos pelo LLM)", "top 12 por frequência", true)}
+    </div>
+
+    <div class="secao-h">Tendência</div>
+    <div class="grid">
+      ${cardWide("c-serie", "Execuções por dia", "volume de cada rodada ao longo do tempo")}
+    </div>
+
+    <div class="barra-exp">
+      <button id="ir-conferir">Ir para a conferência →</button>
+      <button id="baixar">Baixar dados (JSON)</button>
+      <button id="copiar">Copiar resumo (Markdown)</button>
+    </div>
+  `;
+
+  const P = paleta();
+
+  doughnut("c-origem", r.por_origem, CORES_ORIGEM());
+  doughnut("c-veredictos", {
+    satisfeito: ver.satisfeito, insatisfeito: ver.insatisfeito, pulado: ver.pulado, "sem veredito": ver.sem_veredicto,
+  }, { satisfeito: css("--base"), insatisfeito: css("--erro"), pulado: css("--texto-fraco"), "sem veredito": css("--borda") });
+
+  const grupos = Object.keys(r.por_grupo);
+  empilhado("c-grupo", grupos, [
+    { label: "roteou certo", data: grupos.map((g) => r.por_grupo[g].acertou), backgroundColor: css("--base") },
+    { label: "divergiu", data: grupos.map((g) => r.por_grupo[g].divergiu), backgroundColor: css("--erro") },
+    { label: "indeterminado", data: grupos.map((g) => r.por_grupo[g].indeterminado), backgroundColor: css("--borda") },
+  ]);
+
+  const cx = r.roteamento_x_fidelidade;
+  graf("c-cruz", {
+    type: "bar",
+    data: {
+      labels: ["roteou certo", "divergiu"],
+      datasets: [
+        { label: "satisfeito", data: [cx.certo_sat, cx.divergiu_sat], backgroundColor: css("--base"), borderRadius: 3 },
+        { label: "insatisfeito", data: [cx.certo_insat, cx.divergiu_insat], backgroundColor: css("--erro"), borderRadius: 3 },
+      ],
+    },
+    options: { ...OPTS_BASE, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+  });
+
+  barra("c-etapa-media", {
+    retrieve: et.ms_retrieve || 0, rerank: et.ms_rerank || 0, LLM: et.ms_llm || 0, web: et.ms_web || 0,
+  }, { horizontal: true, cor: P });
+
+  const fx = r.fluxo;
+  empilhado("c-fluxo", fx.map((_, i) => i + 1), [
+    { label: "retrieve", data: fx.map((f) => f.ms_retrieve), backgroundColor: css("--marca") },
+    { label: "rerank", data: fx.map((f) => f.ms_rerank || 0), backgroundColor: css("--encaminhado") },
+    { label: "LLM", data: fx.map((f) => f.ms_llm || 0), backgroundColor: css("--web") },
+    { label: "web", data: fx.map((f) => f.ms_web || 0), backgroundColor: css("--erro") },
+  ], { horizontal: false });
+
+  const msFmt = (v) => Math.round(v).toLocaleString("pt-BR");
+  histograma("c-hist-total", fx.map((f) => f.ms_total), { cor: css("--marca"), fmt: msFmt });
+  histograma("c-hist-llm", fx.map((f) => f.ms_llm), { cor: css("--web"), fmt: msFmt });
+  histograma("c-hist-web", fx.map((f) => f.ms_web), { cor: css("--erro"), fmt: msFmt });
+  histograma("c-hist-rerank", fx.map((f) => f.ms_rerank), { cor: css("--encaminhado"), fmt: msFmt });
+  histograma("c-hist-retrieve", fx.map((f) => f.ms_retrieve), { cor: css("--marca"), fmt: msFmt });
+
+  const sFmt = (v) => v.toFixed(2);
+  histograma("c-hist-stop", fx.map((f) => f.score_top), { cor: css("--base"), fmt: sFmt });
+  histograma("c-hist-smin", fx.map((f) => f.score_min), { cor: css("--texto-fraco"), fmt: sFmt });
+  histograma("c-hist-sbruto", fx.map((f) => f.score_top_bruto), { cor: css("--encaminhado"), fmt: sFmt });
+
+  const nchunks = {};
+  for (const f of fx) { const k = String(f.n_chunks ?? "—"); nchunks[k] = (nchunks[k] || 0) + 1; }
+  barra("c-nchunks", nchunks, { cor: css("--marca") });
+
+  const provs = Object.keys(r.por_provider);
+  empilhado("c-tokens-prov", provs, [
+    { label: "input", data: provs.map((p) => r.por_provider[p].input), backgroundColor: css("--marca") },
+    { label: "output", data: provs.map((p) => r.por_provider[p].output), backgroundColor: css("--web") },
+  ], { horizontal: false });
+  barra("c-exec-prov", Object.fromEntries(provs.map((p) => [p, r.por_provider[p].execucoes])), { cor: css("--marca") });
+  barra("c-exec-modelo", r.por_modelo, { cor: css("--encaminhado"), horizontal: true });
+
+  const flagsNomes = ["grounded", "cache_hit", "pii", "erro", "base_insuficiente", "web_insuficiente", "reranker_aplicado", "recusa_modelo", "contexto_suspeito", "veto_escapou"];
+  empilhado("c-flags", flagsNomes, [
+    { label: "sim", data: flagsNomes.map((k) => fl[k].sim), backgroundColor: css("--base") },
+    { label: "não", data: flagsNomes.map((k) => fl[k].nao), backgroundColor: css("--texto-fraco") },
+    { label: "indefinido", data: flagsNomes.map((k) => fl[k].indef), backgroundColor: css("--borda") },
+  ]);
+
+  if (Object.keys(r.pii_categorias).length) barra("c-pii-cat", r.pii_categorias, { cor: css("--erro"), horizontal: true });
+  else { const w = $("c-pii-cat") && $("c-pii-cat").closest(".chart-wrap"); if (w) w.innerHTML = '<p class="vazia">nenhuma PII na janela</p>'; }
+
+  barra("c-assunto-origem", r.por_assunto_origem, { cor: css("--texto-fraco"), horizontal: true });
+  barra("c-assunto", r.por_assunto, { cor: css("--marca"), horizontal: true });
+
+  const tops = Object.fromEntries(r.topicos.map(([t, n]) => [t.length > 42 ? t.slice(0, 42) + "…" : t, n]));
+  if (Object.keys(tops).length) barra("c-topicos", tops, { cor: css("--marca"), horizontal: true });
+  else { const w = $("c-topicos") && $("c-topicos").closest(".chart-wrap"); if (w) w.innerHTML = '<p class="vazia">nenhum tópico (nenhuma chamada ao LLM registrada)</p>'; }
+
+  renderSerie();
+
+  $("ir-conferir").onclick = () => { estado.modo = "revisao"; render(); };
+  $("baixar").onclick = baixarJSON;
+  $("copiar").onclick = copiarMarkdown;
+}
+
+function renderSerie() {
+  const s = estado.serie;
+  if (!s || s.length < 2) {
+    const w = $("c-serie") && $("c-serie").closest(".chart-wrap");
+    if (w) w.innerHTML = `<p class="vazia">Poucas rodadas na janela para uma tendência (${s ? s.length : 0}).</p>`;
+    return;
+  }
+  graf("c-serie", {
+    type: "line",
+    data: {
+      labels: s.map((p) => p.dia),
+      datasets: [
+        { label: "execuções", data: s.map((p) => p.execucoes), borderColor: css("--marca"), backgroundColor: css("--marca") + "22", fill: true, tension: 0.25 },
+        { label: "não-grounded", data: s.map((p) => p.nao_grounded), borderColor: css("--erro"), tension: 0.25 },
+        { label: "cache hits", data: s.map((p) => p.cache_hits), borderColor: css("--texto-fraco"), borderDash: [4, 3], tension: 0.25 },
+      ],
+    },
+    options: { ...OPTS_BASE, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+  });
+}
+
+/* ==================== CONFERÊNCIA ==================== */
+function badge(o) {
+  const chave = o == null ? "nenhuma" : o;
+  const rot = ORIGENS[chave] || (o == null ? "—" : o);
+  const attr = ORIGENS_ESPERAVEIS.includes(chave) ? chave : "outra";
+  return `<span class="badge" data-o="${attr}">${escapar(rot)}</span>`;
+}
+function acertouLocal(l) {
+  if (!l.origem_obtida || !l.origem_esperada) return null;
+  return [l.origem_esperada, ...(l.origem_tambem_ok || [])].includes(l.origem_obtida);
+}
+function contagem() {
+  const c = { satisfeito: 0, insatisfeito: 0, pulado: 0 };
+  for (const l of estado.linhas) if (l.veredicto in c) c[l.veredicto]++;
+  return c;
+}
+
+let listaPendAberta = true;  // lembra o estado do <details> entre re-renders
+const ST_ICONE = { pendente: "○", satisfeito: "✓", insatisfeito: "✗", pulado: "–", nao_executada: "⊘" };
+
+function statusLinha(l) {
+  if (!l.executada) return "nao_executada";
+  return l.veredicto || "pendente";
+}
+
+// Próximo índice (circular) de uma pergunta executada e ainda sem veredito.
+function proximaPendente(depoisDe) {
+  const n = estado.linhas.length;
+  for (let k = 1; k <= n; k++) {
+    const i = (depoisDe + k) % n;
+    const l = estado.linhas[i];
+    if (l.executada && !l.veredicto) return i;
+  }
+  return -1;
+}
+
+function listaPendentesHtml() {
+  const exec = estado.linhas.map((l, i) => ({ l, i })).filter((x) => x.l.executada);
+  if (!exec.length) return "";
+  const pend = exec.filter((x) => !x.l.veredicto);
+  const ordem = [...pend, ...exec.filter((x) => x.l.veredicto)];  // pendentes primeiro
+  const rows = ordem.map(({ l, i }) => {
+    const st = statusLinha(l);
+    const texto = l.pergunta || l.pergunta_hash;
+    return `<button class="pend-item ${l.veredicto ? "feito" : ""}" data-goto="${i}" aria-current="${i === estado.idx}">
+      <span class="st ${st}" title="${st}">${ST_ICONE[st]}</span>
+      <span class="q" title="${escapar(texto)}">${escapar(texto)}</span>
+      ${l.grupo ? `<span class="gr">${escapar(l.grupo)}</span>` : "<span></span>"}
+    </button>`;
   }).join("");
+  const naoRodaram = estado.linhas.length - exec.length;
+  return `
+    <details class="lista-pend" id="lista-pend" ${listaPendAberta ? "open" : ""}>
+      <summary>
+        Pendentes de avaliar
+        <span class="badge-n ${pend.length ? "" : "zero"}">${pend.length}</span>
+        <span style="font-weight:400;color:var(--texto-fraco)">de ${exec.length} executada${exec.length === 1 ? "" : "s"}${naoRodaram ? ` · ${naoRodaram} não rodaram` : ""}</span>
+      </summary>
+      ${pend.length === 0 ? '<div class="pend-vazia">Tudo avaliado nesta janela ✓</div>' : ""}
+      <div class="corpo">${rows}</div>
+      <div class="rodape">
+        ${pend.length ? '<button id="pp-btn">Próxima pendente →</button>' : ""}
+        <button id="pp-jump-dash">Ver na visão geral</button>
+      </div>
+    </details>`;
+}
 
-  painel.innerHTML = `
+function renderRevisao() {
+  const revisaveis = estado.linhas;
+  if (!revisaveis.length) { $("painel").innerHTML = `<div class="centro"><h1>Nada nesta janela</h1><p>Rode <code>python -m scripts.eval_run</code> e volte.</p></div>`; return; }
+  estado.idx = Math.max(0, Math.min(estado.idx, revisaveis.length - 1));
+  const l = revisaveis[estado.idx];
+  const c = contagem();
+  const feitas = c.satisfeito + c.insatisfeito + c.pulado;
+  const acertou = acertouLocal(l);
+  const aceitas = l.origem_esperada ? [l.origem_esperada, ...(l.origem_tambem_ok || [])] : [];
+
+  const grade = [
+    ["origem obtida", l.origem_obtida], ["grounded", l.grounded == null ? null : (l.grounded ? "sim" : "não")],
+    ["score_top", l.score_top], ["score_min", l.score_min], ["score_bruto", l.score_top_bruto], ["margem_rel", l.margem_relativa],
+    ["chunks", l.n_chunks], ["provider", l.provider], ["modelo", l.chat_model],
+    ["ms_total", l.ms_total == null ? null : Math.round(l.ms_total)],
+    ["ms_llm", l.ms_llm == null ? null : Math.round(l.ms_llm)],
+    ["ms_web", l.ms_web == null ? null : Math.round(l.ms_web)],
+    ["tokens in/out", (l.input_tokens ?? "—") + " / " + (l.output_tokens ?? "—")],
+    ["tópico", l.topico], ["assunto_origem", l.assunto_origem],
+    ["cache hit", l.cache_hit == null ? null : (l.cache_hit ? "sim" : "não")],
+    ["base insuf.", l.base_insuficiente == null ? null : (l.base_insuficiente ? "sim" : "não")],
+    ["PII", (l.pii && l.pii.length) ? l.pii.join(", ") : null],
+    ["executada em", l.criado_em ? l.criado_em.replace("T", " ").slice(0, 16) : null],
+  ].filter(([, v]) => v !== null && v !== undefined && v !== "");
+
+  const podeVotar = l.executada;
+
+  $("painel").innerHTML = `
+    <div class="progresso">
+      <span>${estado.idx + 1} / ${revisaveis.length}</span>
+      <div class="trilha"><span style="width:${100 * feitas / revisaveis.length}%"></span></div>
+      <span class="cont"><span class="cs">✓ ${c.satisfeito}</span><span class="ci">✗ ${c.insatisfeito}</span><span class="cp">– ${c.pulado}</span></span>
+    </div>
+
+    ${listaPendentesHtml()}
+
     <div class="cartao">
-      <p class="pergunta">${escapar(l.pergunta)}</p>
+      <p class="pergunta">${l.pergunta ? escapar(l.pergunta) : `<span class="vazia">pergunta fora do dataset — hash ${escapar(l.pergunta_hash)}</span>`}</p>
       <div class="meta">
-        <span class="chip">esperado</span>${aceitas.map(badgeOrigem).join('<span class="seta-origem">ou</span>')}
-        <span class="seta-origem">→</span>
-        <span class="chip">obtido</span>${badgeOrigem(l.origem_obtida)}
-        <span class="chip" data-ok="${l.acertou ? "sim" : "nao"}">${l.acertou ? "roteou certo" : "divergiu"}</span>
+        ${aceitas.length ? `<span class="chip">esperado</span>${aceitas.map(badge).join('<span class="seta">ou</span>')}<span class="seta">→</span>` : ""}
+        <span class="chip">obtido</span>${badge(l.origem_obtida)}
+        ${acertou === null ? "" : `<span class="chip" data-ok="${acertou ? "sim" : "nao"}">${acertou ? "roteou certo" : "divergiu"}</span>`}
         ${l.grupo ? `<span class="chip">${escapar(l.grupo)}</span>` : ""}
-        ${l.assunto ? `<span class="chip">assunto: ${escapar(l.assunto)}</span>` : ""}
+        ${!l.executada ? '<span class="chip" data-ok="nao">não executada nesta janela</span>' : ""}
         ${l.cache_hit ? '<span class="chip">cache hit</span>' : ""}
-        ${l.grounded === false ? '<span class="chip" data-ok="nao">não-grounded</span>' : ""}
+        ${(l.pii && l.pii.length) ? `<span class="chip" data-ok="nao">PII: ${escapar(l.pii.join(","))}</span>` : ""}
       </div>
 
       ${l.criterio ? `<div class="criterio"><strong>Critério de conferência (do dataset)</strong>${escapar(l.criterio)}</div>` : ""}
-      ${l.erro ? `<div class="rotulo-secao">Erro</div><div class="erro-linha">${escapar(l.erro)}</div>` : ""}
 
-      <div class="rotulo-secao">Resposta do agente</div>
-      ${l.resposta
-        ? `<div class="resposta">${renderizarResposta(l.resposta)}</div>`
-        : '<p class="resposta-vazia">(sem resposta — a linha não produziu texto)</p>'}
+      <div class="rot-secao">Resposta do agente</div>
+      ${l.resposta ? `<div class="resposta">${renderizarResposta(l.resposta)}</div>`
+        : `<p class="vazia">${l.executada ? "(a telemetria não guardou o texto — canal ≠ eval?)" : "(sem execução na janela)"}</p>`}
 
-      ${fontes ? `<div class="rotulo-secao">Fontes citadas na resposta</div><div class="fontes"><ol>${fontes}</ol></div>` : ""}
+      ${l.pergunta_id ? editorExpectativa(l) : ""}
 
-      <div class="rotulo-secao">Retrieval</div>
-      <dl class="grade">${linhaMetricas(l)}</dl>
+      <div class="rot-secao">Retrieval / custo</div>
+      <dl class="grade">${grade.map(([k, v]) => `<div><dt>${escapar(k)}</dt><dd>${escapar(v)}</dd></div>`).join("")}</dl>
 
-      <details>
-        <summary>Ver linha crua do JSON</summary>
-        <pre>${escapar(JSON.stringify(l, null, 2))}</pre>
-      </details>
+      <details class="crua"><summary>Ver linha crua</summary><pre>${escapar(JSON.stringify(l, null, 2))}</pre></details>
     </div>
 
     <div class="acoes">
-      <button class="nav" id="btn-voltar" ${estado.idx === 0 ? "disabled" : ""}>← Voltar</button>
-      ${Object.entries(VEREDICTOS).map(([chave, meta]) => `
-        <button class="voto ${meta.classe}" data-voto="${chave}" aria-pressed="${v === chave}">
-          ${meta.rotulo} <small>${meta.tecla}</small>
-        </button>`).join("")}
-      <button class="nav" id="btn-avancar">${estado.idx === estado.linhas.length - 1 ? "Relatório →" : "Pular sem votar →"}</button>
+      <button class="nav" id="b-volta" ${estado.idx === 0 ? "disabled" : ""}>← Voltar</button>
+      ${Object.entries(VEREDICTOS).map(([k, m]) => `<button class="voto ${m.classe}" data-v="${k}" aria-pressed="${l.veredicto === k}" ${podeVotar ? "" : "disabled"}>${m.rotulo} <small>${m.tecla}</small></button>`).join("")}
+      <button class="nav" id="b-pendente" title="Pula para a próxima ainda sem veredito (tecla N)">Pendente →</button>
+      <button class="nav" id="b-avanca">${estado.idx === revisaveis.length - 1 ? "Fim" : "Pular →"}</button>
     </div>
   `;
 
-  painel.querySelector("#btn-voltar").onclick = () => irPara(estado.idx - 1);
-  painel.querySelector("#btn-avancar").onclick = () => irPara(estado.idx + 1);
-  painel.querySelectorAll("[data-voto]").forEach((b) =>
-    b.onclick = () => votar(b.dataset.voto));
+  $("b-volta").onclick = () => { estado.idx--; renderRevisao(); };
+  $("b-avanca").onclick = () => { estado.idx = Math.min(estado.idx + 1, revisaveis.length - 1); renderRevisao(); };
+  $("b-pendente").onclick = irParaProximaPendente;
+  $("painel").querySelectorAll("[data-v]").forEach((b) => b.onclick = () => votar(l, b.dataset.v));
+
+  const det = $("lista-pend");
+  if (det) {
+    det.addEventListener("toggle", () => { listaPendAberta = det.open; });
+    $("painel").querySelectorAll("[data-goto]").forEach((b) =>
+      b.onclick = () => { estado.idx = +b.dataset.goto; renderRevisao(); });
+    const pp = $("pp-btn");
+    if (pp) pp.onclick = irParaProximaPendente;
+    $("pp-jump-dash").onclick = () => { estado.modo = "dashboard"; render(); };
+  }
+  ligarEditor(l);
 }
 
-function atualizarProgressoOculto() { $("progresso").hidden = true; }
-
-function telaErro(msg) {
-  $("progresso").hidden = true;
-  estado.nome = null;
-  $("painel").innerHTML = `<div class="centro"><div class="aviso">${escapar(msg)}</div></div>`;
+function irParaProximaPendente() {
+  const i = proximaPendente(estado.idx);
+  if (i < 0) { alert("Nenhuma pendente — tudo avaliado nesta janela."); return; }
+  estado.idx = i;
+  renderRevisao();
 }
 
-/* ---------- relatório ---------- */
-
-function montarRelatorio() {
-  const total = estado.linhas.length;
-  const c = contagem();
-  const semVeredito = total - (c.satisfeito + c.insatisfeito + c.pulado);
-  const pct = (n) => total ? Math.round(100 * n / total) : 0;
-
-  const porGrupo = {};
-  estado.linhas.forEach((l, i) => {
-    const g = l.grupo || "(sem grupo)";
-    porGrupo[g] = porGrupo[g] || { total: 0, satisfeito: 0, insatisfeito: 0, pulado: 0 };
-    porGrupo[g].total++;
-    const v = estado.veredictos[i];
-    if (v in porGrupo[g]) porGrupo[g][v]++;
-  });
-
-  // Cruzamento roteamento × fidelidade: o caso que mais interessa é
-  // "roteou certo, mas a resposta não presta".
-  const cruz = { certoSat: 0, certoInsat: 0, erradoSat: 0, erradoInsat: 0 };
-  estado.linhas.forEach((l, i) => {
-    const v = estado.veredictos[i];
-    if (v === "satisfeito")   l.acertou ? cruz.certoSat++   : cruz.erradoSat++;
-    if (v === "insatisfeito") l.acertou ? cruz.certoInsat++ : cruz.erradoInsat++;
-  });
-
-  const insatisfeitos = estado.linhas
-    .map((l, i) => ({ l, i, v: estado.veredictos[i] }))
-    .filter((x) => x.v === "insatisfeito");
-
-  return { total, c, semVeredito, pct, porGrupo, cruz, insatisfeitos };
-}
-
-function renderRelatorio() {
-  const rel = montarRelatorio();
-  const linhasGrupo = Object.entries(rel.porGrupo).map(([g, d]) =>
-    `<tr><td>${escapar(g)}</td><td class="num">${d.total}</td>
-     <td class="num">${d.satisfeito}</td><td class="num">${d.insatisfeito}</td>
-     <td class="num">${d.pulado}</td></tr>`).join("");
-
-  const itensInsat = rel.insatisfeitos.map(({ l, i }) => `
-    <li>
-      <div class="q">${escapar(l.pergunta)}</div>
-      <div class="o">${escapar(l.origem_esperada)} → ${escapar(l.origem_obtida == null ? "—" : l.origem_obtida)}${l.grupo ? " · " + escapar(l.grupo) : ""}</div>
-      <button data-ir="${i}">Rever pergunta ${i + 1}</button>
-    </li>`).join("");
-
-  $("painel").innerHTML = `
-    <div class="relatorio">
-      <h1>Relatório da revisão</h1>
-      <div class="fonte-rodada">${escapar(estado.nome)} &middot; ${rel.total} perguntas</div>
-
-      <div class="cards">
-        <div class="card sat"><div class="n">${rel.c.satisfeito}</div><div class="r">satisfeito · ${rel.pct(rel.c.satisfeito)}%</div></div>
-        <div class="card insat"><div class="n">${rel.c.insatisfeito}</div><div class="r">insatisfeito · ${rel.pct(rel.c.insatisfeito)}%</div></div>
-        <div class="card"><div class="n">${rel.c.pulado}</div><div class="r">pulado</div></div>
-        <div class="card"><div class="n">${rel.semVeredito}</div><div class="r">sem veredito</div></div>
+function editorExpectativa(l) {
+  const ajustada = !!l._ajustada;
+  const opcoes = ORIGENS_ESPERAVEIS.map((o) => `<option value="${o}" ${o === l.origem_esperada ? "selected" : ""}>${o} — ${ORIGENS[o]}</option>`).join("");
+  const checks = ORIGENS_ESPERAVEIS.filter((o) => o !== l.origem_esperada)
+    .map((o) => `<label><input type="checkbox" class="ok" value="${o}" ${(l.origem_tambem_ok || []).includes(o) ? "checked" : ""}> ${o}</label>`).join("");
+  const acertou = acertouLocal(l);
+  return `
+    <div class="expectativa ${ajustada ? "aj" : ""}">
+      <div class="rot-secao" style="margin:0">Expectativa ${ajustada ? "· <span style=\"color:var(--marca)\">ajustada nesta sessão</span>" : ""}</div>
+      <div class="linha">
+        <label>origem esperada <select id="e-origem">${opcoes}</select></label>
+        <span class="tambem-ok">também ok: ${checks}</span>
       </div>
-
-      <div class="rotulo-secao">Roteamento × fidelidade</div>
-      <table>
-        <tr><th></th><th class="num">satisfeito</th><th class="num">insatisfeito</th></tr>
-        <tr><td>roteou certo</td><td class="num">${rel.cruz.certoSat}</td><td class="num">${rel.cruz.certoInsat}</td></tr>
-        <tr><td>divergiu</td><td class="num">${rel.cruz.erradoSat}</td><td class="num">${rel.cruz.erradoInsat}</td></tr>
-      </table>
-
-      <div class="rotulo-secao">Por grupo</div>
-      <table>
-        <tr><th>grupo</th><th class="num">total</th><th class="num">✓</th><th class="num">✗</th><th class="num">–</th></tr>
-        ${linhasGrupo}
-      </table>
-
-      ${rel.insatisfeitos.length ? `<div class="rotulo-secao">Insatisfeitos (${rel.insatisfeitos.length})</div><ul class="lista-insat">${itensInsat}</ul>` : ""}
-
-      <div class="barra-relatorio">
-        <button class="primario" id="baixar">Baixar relatório (JSON)</button>
-        <button id="copiar">Copiar Markdown</button>
-        <button id="rever">Voltar à revisão</button>
-        <button id="limpar">Recomeçar (apagar vereditos)</button>
-      </div>
-    </div>
-  `;
-
-  $("painel").querySelectorAll("[data-ir]").forEach((b) =>
-    b.onclick = () => irPara(Number(b.dataset.ir)));
-  $("baixar").onclick = baixarJSON;
-  $("copiar").onclick = copiarMarkdown;
-  $("rever").onclick = () => irPara(estado.linhas.length - 1);
-  $("limpar").onclick = () => {
-    if (!confirm("Apagar todos os vereditos desta rodada?")) return;
-    try { localStorage.removeItem(chaveStorage(estado.nome)); } catch {}
-    estado.veredictos = {};
-    irPara(0);
-  };
+      <div class="vr">Com esta expectativa: <b data-ok="${acertou ? "sim" : "nao"}">${acertou ? "roteou certo" : "divergiu"}</b></div>
+      <div class="vr antes">Salvar faz <code>PATCH /revisao/pergunta/${l.pergunta_id}</code> — vale para as próximas rodadas.</div>
+    </div>`;
 }
 
-function dadosRelatorio() {
-  const rel = montarRelatorio();
-  return {
-    arquivo: estado.nome,
-    gerado_em: new Date().toISOString(),
-    total: rel.total,
-    contagem: { ...rel.c, sem_veredito: rel.semVeredito },
-    roteamento_x_fidelidade: rel.cruz,
-    por_grupo: rel.porGrupo,
-    vereditos: estado.linhas.map((l, i) => ({
-      indice: i,
-      pergunta: l.pergunta,
-      grupo: l.grupo ?? null,
-      origem_esperada: l.origem_esperada,
-      origem_obtida: l.origem_obtida ?? null,
-      acertou: l.acertou,
-      veredito: estado.veredictos[i] || null,
-    })),
+function ligarEditor(l) {
+  const sel = $("e-origem");
+  if (!sel) return;
+  const lerOk = () => [...$("painel").querySelectorAll(".ok:checked")].map((c) => c.value);
+  const aplicar = async () => {
+    const nova = sel.value;
+    const ok = lerOk().filter((o) => o !== nova);
+    try {
+      const r = await fetch("/revisao/pergunta/" + l.pergunta_id, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origem_esperada: nova, origem_tambem_ok: ok }),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const d = await r.json();
+      l.origem_esperada = d.origem_esperada;
+      l.origem_tambem_ok = d.origem_tambem_ok;
+      l._ajustada = true;
+      renderRevisao();
+    } catch (e) { alert("Falha ao salvar expectativa: " + e.message); }
   };
+  sel.addEventListener("change", aplicar);
+  $("painel").querySelectorAll(".ok").forEach((c) => c.addEventListener("change", aplicar));
 }
 
+async function votar(l, v) {
+  if (!l.executada) return;
+  try {
+    const r = await fetch("/revisao/veredicto", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ telemetria_id: l.telemetria_id, pergunta_hash: l.pergunta_hash, veredicto: v }),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    l.veredicto = v;
+    // Depois de votar, pula para a próxima PENDENTE (não só a seguinte) — é o
+    // fluxo de quem está zerando a lista. Se não houver mais, avança uma.
+    const prox = proximaPendente(estado.idx);
+    estado.idx = prox >= 0 ? prox : Math.min(estado.idx + 1, estado.linhas.length - 1);
+    renderRevisao();
+  } catch (e) { alert("Falha ao gravar veredito: " + e.message); }
+}
+
+/* ---------- export ---------- */
 function baixarJSON() {
-  const blob = new Blob([JSON.stringify(dadosRelatorio(), null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify({ filtros: estado.filtros, resumo: estado.resumo, linhas: estado.linhas }, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "revisao-" + estado.nome.replace(/\.json$/, "") + ".json";
+  a.download = "revisao-eval.json";
   a.click();
   URL.revokeObjectURL(a.href);
 }
-
-function markdownRelatorio() {
-  const rel = montarRelatorio();
-  const linhas = [
-    `# Revisão de fidelidade — ${estado.nome}`,
+function copiarMarkdown() {
+  const r = estado.resumo, c = r.roteamento_x_fidelidade;
+  const md = [
+    `# Revisão de avaliação (${estado.filtros.dias}d${estado.filtros.grupo ? ", grupo " + estado.filtros.grupo : ""})`,
     "",
-    `- Total: ${rel.total}`,
-    `- Satisfeito: ${rel.c.satisfeito} (${rel.pct(rel.c.satisfeito)}%)`,
-    `- Insatisfeito: ${rel.c.insatisfeito} (${rel.pct(rel.c.insatisfeito)}%)`,
-    `- Pulado: ${rel.c.pulado}`,
-    `- Sem veredito: ${rel.semVeredito}`,
+    `- Acerto de roteamento: ${r.acerto_geral.acertou}/${r.acerto_geral.avaliaveis}` + (r.acerto_geral.taxa !== null ? ` (${Math.round(r.acerto_geral.taxa * 100)}%)` : ""),
+    `- Executadas: ${r.executadas} · sem execução: ${r.nao_executadas}`,
+    `- Fidelidade: ${r.veredictos.satisfeito} satisfeito / ${r.veredictos.insatisfeito} insatisfeito / ${r.veredictos.sem_veredicto} sem veredito`,
+    `- grounded=true: ${r.flags.grounded.sim} · não-grounded: ${r.nao_grounded} · cache hits: ${r.cache_hits} · com PII: ${r.flags.pii.sim} · com erro: ${r.flags.erro.sim}`,
+    `- Latência: p50 ${r.latencia_ms.p50} ms · p95 ${r.latencia_ms.p95} ms · média por etapa: retrieve ${r.tempo_por_etapa.ms_retrieve} / rerank ${r.tempo_por_etapa.ms_rerank} / LLM ${r.tempo_por_etapa.ms_llm} / web ${r.tempo_por_etapa.ms_web}`,
+    `- Médias: n_chunks ${r.medias.n_chunks} · tokens ${r.medias.input_tokens} in / ${r.medias.output_tokens} out · score_top ${r.medias.score_top}`,
     "",
     "## Roteamento × fidelidade",
+    "| | satisfeito | insatisfeito |", "|---|---:|---:|",
+    `| roteou certo | ${c.certo_sat} | ${c.certo_insat} |`,
+    `| divergiu | ${c.divergiu_sat} | ${c.divergiu_insat} |`,
     "",
-    "| | satisfeito | insatisfeito |",
-    "|---|---:|---:|",
-    `| roteou certo | ${rel.cruz.certoSat} | ${rel.cruz.certoInsat} |`,
-    `| divergiu | ${rel.cruz.erradoSat} | ${rel.cruz.erradoInsat} |`,
+    "## Principais tópicos",
+    ...r.topicos.map(([t, n]) => `- ${t} — ${n}`),
     "",
-    "## Por grupo",
-    "",
-    "| grupo | total | satisfeito | insatisfeito | pulado |",
-    "|---|---:|---:|---:|---:|",
-    ...Object.entries(rel.porGrupo).map(([g, d]) =>
-      `| ${g} | ${d.total} | ${d.satisfeito} | ${d.insatisfeito} | ${d.pulado} |`),
-  ];
-  if (rel.insatisfeitos.length) {
-    linhas.push("", `## Insatisfeitos (${rel.insatisfeitos.length})`, "");
-    rel.insatisfeitos.forEach(({ l }, n) => {
-      linhas.push(`${n + 1}. **${l.pergunta}**  `);
-      linhas.push(`   \`${l.origem_esperada} → ${l.origem_obtida == null ? "—" : l.origem_obtida}\`${l.grupo ? " · " + l.grupo : ""}`);
-    });
-  }
-  return linhas.join("\n");
+    "## Insatisfeitos",
+    ...estado.linhas.filter((l) => l.veredicto === "insatisfeito").map((l) =>
+      `- **${l.pergunta || l.pergunta_hash}** \`${l.origem_esperada} → ${l.origem_obtida}\`${l.grupo ? " · " + l.grupo : ""}`),
+  ].join("\n");
+  navigator.clipboard.writeText(md).then(
+    () => { $("copiar").textContent = "Copiado ✓"; setTimeout(() => ($("copiar").textContent = "Copiar resumo (Markdown)"), 1500); },
+    () => window.prompt("Copie:", md));
 }
 
-async function copiarMarkdown() {
-  const md = markdownRelatorio();
-  try {
-    await navigator.clipboard.writeText(md);
-    $("copiar").textContent = "Copiado ✓";
-    setTimeout(() => ($("copiar").textContent = "Copiar Markdown"), 1500);
-  } catch {
-    // clipboard bloqueado (sem HTTPS, permissão negada): cai para um prompt.
-    window.prompt("Copie o Markdown:", md);
-  }
-}
-
-/* ---------- eventos globais ---------- */
-
-$("arquivo").addEventListener("change", (e) => {
-  if (e.target.value) abrirRodada(e.target.value);
-});
-$("upload").addEventListener("change", (e) => {
-  const f = e.target.files[0];
-  if (f) abrirArquivoLocal(f);
-  e.target.value = "";  // permite reabrir o mesmo arquivo
-});
+/* ---------- eventos ---------- */
+document.querySelectorAll(".abas button").forEach((b) =>
+  b.onclick = () => { estado.modo = b.dataset.modo; render(); });
+$("f-dias").addEventListener("change", (e) => { estado.filtros.dias = +e.target.value; carregar(); });
+$("f-grupo").addEventListener("change", (e) => { estado.filtros.grupo = e.target.value; carregar(); });
+$("f-origem").addEventListener("change", (e) => { estado.filtros.origem = e.target.value; carregar(); });
 
 document.addEventListener("keydown", (e) => {
-  if (!estado.nome || estado.idx >= estado.linhas.length) return;
+  if (estado.modo !== "revisao" || !estado.linhas.length) return;
   if (e.target.matches("input, textarea, select")) return;
+  const l = estado.linhas[estado.idx];
   const mapa = { "1": "satisfeito", s: "satisfeito", "2": "insatisfeito", i: "insatisfeito", "3": "pulado", p: "pulado" };
   const v = mapa[e.key.toLowerCase()];
-  if (v) { e.preventDefault(); votar(v); return; }
-  if (e.key === "ArrowLeft" && estado.idx > 0) { e.preventDefault(); irPara(estado.idx - 1); }
-  if (e.key === "ArrowRight") { e.preventDefault(); irPara(estado.idx + 1); }
+  if (v && l && l.executada) { e.preventDefault(); votar(l, v); return; }
+  if (e.key.toLowerCase() === "n") { e.preventDefault(); irParaProximaPendente(); return; }
+  if (e.key === "ArrowLeft" && estado.idx > 0) { e.preventDefault(); estado.idx--; renderRevisao(); }
+  if (e.key === "ArrowRight" && estado.idx < estado.linhas.length - 1) { e.preventDefault(); estado.idx++; renderRevisao(); }
 });
 
-carregarLista();
+carregar();
 </script>
 </body>
 </html>

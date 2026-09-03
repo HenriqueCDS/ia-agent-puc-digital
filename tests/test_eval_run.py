@@ -212,6 +212,70 @@ def test_intervalo_invalido_e_erro_amigavel():
         eval_run._aplicar_intervalo(itens, "abc")
 
 
+# --- fonte do dataset: banco x arquivo -------------------------------------
+
+
+def test_filtrar_grupo():
+    itens = [_item("a", grupo="teste"), _item("b", grupo="teste2"), _item("c", grupo="teste")]
+    assert [i["pergunta"] for i in eval_run._filtrar_grupo(itens, "teste")] == ["a", "c"]
+
+
+def test_filtrar_grupo_inexistente_lista_os_disponiveis():
+    with pytest.raises(Exception, match="teste2"):
+        eval_run._filtrar_grupo([_item("a", grupo="teste2")], "owasp-9")
+
+
+def test_carregar_do_banco_usa_perguntas_store(monkeypatch):
+    from app.db import perguntas_store
+
+    chamada = {}
+    fake = perguntas_store.PerguntaExemplo(
+        id=1, grupo="teste", pergunta="P?", pergunta_hash="h", assunto=None,
+        origem_esperada="base", origem_tambem_ok=["web"], criterio="conf", ativo=True,
+    )
+    monkeypatch.setattr(
+        perguntas_store, "listar",
+        lambda grupo=None, apenas_ativas=True, store=None: chamada.update(grupo=grupo) or [fake],
+    )
+
+    itens = eval_run._carregar_do_banco("teste")
+
+    assert chamada == {"grupo": "teste"}
+    # `como_item` devolve o formato que `_linha`/`_origens_aceitas` já consomem.
+    assert itens[0] == {
+        "grupo": "teste", "pergunta": "P?", "assunto": None, "origem_esperada": "base",
+        "origem_tambem_ok": ["web"], "criterio": "conf",
+    }
+
+
+def test_carregar_do_banco_vazio_manda_semear(monkeypatch):
+    from app.db import perguntas_store
+
+    monkeypatch.setattr(perguntas_store, "listar", lambda **k: [])
+    with pytest.raises(Exception, match="seed_perguntas"):
+        eval_run._carregar_do_banco(None)
+
+
+def test_sem_arquivo_nao_grava_resultado(tmp_path, monkeypatch):
+    dataset = tmp_path / "d.json"
+    dataset.write_text(json.dumps([_item("p?")]), encoding="utf-8")
+    monkeypatch.setattr(eval_run.telemetry_store, "habilitar", lambda: None)
+    monkeypatch.setattr(eval_run.telemetry, "configurar_logs", lambda: None)
+    monkeypatch.setattr(eval_run, "clear_cache", lambda: 0)
+    monkeypatch.setattr(eval_run, "aquecer", lambda: None)
+    monkeypatch.setattr(eval_run, "answer", lambda *a, **k: _answer())
+
+    salvou = []
+    monkeypatch.setattr(eval_run, "_salvar", lambda *a, **k: salvou.append(a))
+
+    resultado = CliRunner().invoke(
+        eval_run.app,
+        ["--fonte", "arquivo", str(dataset), "-m", "groq:x", "--sem-arquivo"],
+    )
+    assert resultado.exit_code == 0, resultado.output
+    assert salvou == []
+
+
 # --- resiliência da rodada ---------------------------------------------------
 
 
@@ -310,7 +374,8 @@ def _rodar_main(tmp_path, monkeypatch, *args):
     monkeypatch.setattr(eval_run, "answer", answer_falso)
 
     resultado = CliRunner().invoke(
-        eval_run.app, [str(dataset), "-o", str(tmp_path / "r.json"), "-m", "groq:x", *args]
+        eval_run.app,
+        ["--fonte", "arquivo", str(dataset), "-o", str(tmp_path / "r.json"), "-m", "groq:x", *args],
     )
     assert resultado.exit_code == 0, resultado.output
     return eventos

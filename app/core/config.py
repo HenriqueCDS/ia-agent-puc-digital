@@ -481,6 +481,16 @@ class Settings(BaseSettings):
     # o prompt para o mesmo conjunto de chunks.
     cache_enabled: bool = True
 
+    # Cache PRÉ-RETRIEVAL (ver app/db/pre_retrieval_cache.py): um hit numa
+    # pergunta já respondida pela base devolve a resposta sem tocar em pgvector
+    # nem no cross-encoder — mata o `retrieve()` inteiro, não só a chamada ao
+    # LLM (que o cache pós-retrieval já poupa). A chave é `pergunta normalizada +
+    # assunto`, sem ids de chunk, então a invalidação é EXPLÍCITA: cada
+    # reingestão limpa esta tabela (`ingestion.pipeline._indexar_chunks`).
+    # Respeita `cache_enabled` acima; ignorado no canal `eval` e com
+    # `query.modelo`. Subordinado ao `cache_enabled`.
+    pre_retrieval_cache_enabled: bool = True
+
     # --- Telemetria (ver app/core/telemetry.py) ---
     # Mostra (ou não) a linha JSON de cada pergunta no terminal. Desligar aqui
     # não desliga a gravação no banco: são destinos independentes.
@@ -494,6 +504,15 @@ class Settings(BaseSettings):
     # dado é operacional — custo, latência e documento faltando na semana —, e
     # guardar hash de pergunta de aluno indefinidamente não se justifica.
     telemetry_retention_days: int = 7
+    # Retenção PRÓPRIA do canal `eval` (rodadas de `scripts.eval_run`). Os 7
+    # dias acima existem por privacidade — o tráfego real carrega hash de
+    # pergunta de aluno. O canal `eval` é dataset sintético (`exemplo_perguntas`),
+    # sem aluno por trás, então não há motivo para a mesma janela: manter mais
+    # tempo é o que dá ao dashboard de `/revisao` uma série temporal com
+    # sentido (comparar rodadas de calibração ao longo de semanas). Aplicado
+    # num `CASE` dentro do mesmo `DELETE` da limpeza — ver
+    # `telemetry_store._limpar_expirados`.
+    telemetry_retention_days_eval: int = 90
 
     # --- Triagem por assunto (ver app/agent/triagem.py) ---
     # Kill switch de rollback: com False, a pergunta de assunto fora de escopo
@@ -598,13 +617,25 @@ class Settings(BaseSettings):
     demo_consumidor: str = "demo"
 
     # --- Revisão manual de avaliação (ver app/api/routers/revisao.py) ---
-    # Serve `app/static/revisao.html` em `/revisao`: uma tela para conferir à
-    # mão a FIDELIDADE das respostas de uma rodada de `scripts.eval_run` (o que
-    # `acertou` não mede — ver a docstring de lá). Lê só os JSONs de
-    # `eval/resultados/`, não chama `/v1/ask` e não gasta orçamento de LLM.
-    # Kill switch para tirar a rota do ar em produção, onde essa pasta nem
-    # costuma existir — mesmo desenho de `demo_enabled`.
+    # Serve `app/static/revisao.html` em `/revisao`: dashboard da telemetria do
+    # canal `eval` (distribuição de origem, acerto por grupo, latência, custo) +
+    # conferência à mão, uma pergunta por vez, da FIDELIDADE de cada resposta (o
+    # que `acertou` não mede — ver a docstring de `scripts.eval_run`). Lê a
+    # `telemetria` e a `exemplo_perguntas`, não chama `/v1/ask`, não gasta
+    # orçamento de LLM. Kill switch para tirar do ar em produção — mesmo desenho
+    # de `demo_enabled`.
     revisao_enabled: bool = True
+
+    # --- CRUD do dataset de avaliação (ver app/api/routers/perguntas.py) ---
+    # Expõe `/v1/perguntas` (list/get) e, para ESCRITA (create/update/delete),
+    # só o consumidor nomeado em `perguntas_consumidor_escrita`. A leitura serve
+    # a tela de revisão; a escrita é mutação do dataset que decide se uma
+    # próxima rodada passa ou falha — não pode ficar atrás da chave da demo, que
+    # é pública no HTML. Dois controles de propósito: o kill switch tira a rota
+    # inteira do ar (produção não precisa dela), e o consumidor de escrita
+    # garante que ligá-la não dá poder de edição a toda integração.
+    perguntas_crud_enabled: bool = True
+    perguntas_consumidor_escrita: str = "avaliacao"
 
     # --- Chamada ao LLM: cadeia de providers (T4.1) ---
     # Ordem de PRIORIDADE, separada por vírgula. É o único lugar que decide quem

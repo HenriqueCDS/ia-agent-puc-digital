@@ -1,12 +1,10 @@
-"""Testes da rota de revisão manual de fidelidade (app/api/routers/revisao.py).
+"""Testes da rota de revisão (app/api/routers/revisao.py) — agora sobre o banco.
 
-O que precisa estar travado: o `nome` do arquivo na URL nunca alcança nada fora
-de `eval/resultados/` (é o único ponto que lê disco a partir de entrada do
-cliente), a página não puxa recurso externo (mesma promessa da demo), e a rota
-inteira some com `REVISAO_ENABLED=false`.
+O store (`revisao_store` / `perguntas_store`) é dublado: o que se trava aqui é o
+contrato da rota e a AGREGAÇÃO do dashboard (`_resumo`), que é lógica pura. A
+página continua sem poder puxar recurso externo.
 """
 
-import json
 import re
 
 import pytest
@@ -15,115 +13,162 @@ from fastapi.testclient import TestClient
 from app.api import app as app_module
 from app.api.routers import revisao as revisao_router
 from app.core.config import settings
+from app.db import perguntas_store, revisao_store
 
-_LINHAS = [
-    {"pergunta": "Como envio uma atividade?", "grupo": "teste", "origem_esperada": "base",
-     "origem_obtida": "base", "acertou": True, "resposta": "Passo 1..."},
-    {"pergunta": "Qual o calendário?", "grupo": "teste", "origem_esperada": "web",
-     "origem_obtida": "nenhuma", "acertou": False, "resposta": "Não encontrei..."},
-]
+
+def _linha(**kw):
+    base = dict(
+        pergunta_hash="h1", pergunta_id=1, grupo="teste", pergunta="P?", assunto=None,
+        origem_esperada="base", origem_tambem_ok=[], criterio=None,
+        telemetria_id=10, criado_em=None, origem_obtida="base", grounded=True,
+        resposta="R.", provider="gemini", chat_model="x", cache_hit=False,
+        score_top=0.9, score_min=0.3, score_mean=0.5, n_chunks=5,
+        input_tokens=100, output_tokens=20, ms_total=1000.0, ms_retrieve=200.0,
+        ms_llm=700.0, telemetria={}, veredicto=None, nota=None,
+    )
+    base.update(kw)
+    return revisao_store.LinhaRevisao(**base)
 
 
 @pytest.fixture
-def resultados_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(revisao_router, "_RESULTADOS_DIR", tmp_path)
-    return tmp_path
-
-
-@pytest.fixture
-def client(resultados_dir, monkeypatch):
+def client(monkeypatch):
     monkeypatch.setattr(app_module.telemetry_store, "habilitar", lambda: None)
     monkeypatch.setattr(settings, "revisao_enabled", True)
+    monkeypatch.setattr(perguntas_store, "grupos", lambda store=None: ["teste", "teste2"])
     return TestClient(app_module.create_app(), raise_server_exceptions=False)
 
 
 def test_serve_o_html(client):
-    resposta = client.get("/revisao")
-
-    assert resposta.status_code == 200
-    assert resposta.headers["content-type"].startswith("text/html")
-    assert "<title>Revisão de Avaliação" in resposta.text
+    r = client.get("/revisao")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "<title>Revisão de Avaliação" in r.text
 
 
 def test_html_nao_referencia_recurso_externo():
-    """Mesma regressão da demo: nenhum `src`/`href` pode apontar para fora —
-    é o que mantém a página abrindo numa máquina sem internet."""
+    """Chart.js vem de /revisao/chart.js (mesma origem, vendorizado), nunca de
+    CDN — a página abre sem internet, como a demo."""
     html = revisao_router._PAGINA.read_text(encoding="utf-8")
-    externos = re.findall(r'(?:src|href)="((?:https?:)?//[^"]+)"', html)
-
-    assert externos == []
-
-
-def test_lista_resultados_mais_recente_primeiro(client, resultados_dir):
-    antigo = resultados_dir / "20260101T000000Z.json"
-    novo = resultados_dir / "20260902T000000Z.json"
-    antigo.write_text("[]", encoding="utf-8")
-    novo.write_text("[]", encoding="utf-8")
-    import os
-    os.utime(antigo, (1_000_000, 1_000_000))
-    os.utime(novo, (2_000_000, 2_000_000))
-
-    nomes = [a["nome"] for a in client.get("/revisao/resultados").json()["arquivos"]]
-
-    assert nomes == ["20260902T000000Z.json", "20260101T000000Z.json"]
+    assert re.findall(r'(?:src|href)="((?:https?:)?//[^"]+)"', html) == []
+    assert 'src="/revisao/chart.js"' in html
 
 
-def test_lista_vazia_sem_o_diretorio(client, resultados_dir):
-    resultados_dir.rmdir()
-
-    assert client.get("/revisao/resultados").json() == {"arquivos": []}
-
-
-def test_obtem_o_array_da_rodada(client, resultados_dir):
-    (resultados_dir / "run.json").write_text(json.dumps(_LINHAS), encoding="utf-8")
-
-    resposta = client.get("/revisao/resultados/run.json")
-
-    assert resposta.status_code == 200
-    assert resposta.json() == _LINHAS
+def test_serve_o_chart_js_vendorizado(client):
+    r = client.get("/revisao/chart.js")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/javascript")
+    assert "Chart" in r.text and len(r.content) > 50_000  # o bundle inteiro
+    assert r.headers.get("cache-control") == "public, max-age=86400"
 
 
-@pytest.mark.parametrize(
-    "nome",
-    [
-        "../config.py",
-        "..%2f..%2f.env",
-        "sub/dir.json",
-        "run.txt",
-        "run.json.bak",
-        ".env",
-    ],
-)
-def test_nome_fora_do_diretorio_ou_sem_json_da_404(client, resultados_dir, nome):
-    (resultados_dir / "run.json").write_text("[]", encoding="utf-8")
+def test_dados_devolve_resumo_e_linhas(client, monkeypatch):
+    linhas = [
+        _linha(pergunta_hash="a", grupo="teste", origem_esperada="base", origem_obtida="base"),
+        _linha(pergunta_hash="b", grupo="teste", origem_esperada="web", origem_obtida="nenhuma",
+               telemetria_id=11, veredicto="insatisfeito"),
+        _linha(pergunta_hash="c", grupo="teste2", telemetria_id=None, origem_obtida=None),
+    ]
+    monkeypatch.setattr(revisao_router.revisao_store, "linhas_da_rodada", lambda **k: linhas)
 
-    assert client.get(f"/revisao/resultados/{nome}").status_code == 404
+    corpo = client.get("/revisao/dados").json()
 
-
-def test_symlink_para_fora_nao_e_servido(client, resultados_dir, tmp_path):
-    """A regex deixa passar `escape.json`; a revalidação de path é o que barra —
-    o link resolve para fora de `_RESULTADOS_DIR`."""
-    segredo = tmp_path / "segredo.txt"
-    segredo.write_text("[]", encoding="utf-8")
-    link = resultados_dir / "escape.json"
-    try:
-        link.symlink_to(segredo)
-    except (OSError, NotImplementedError):
-        pytest.skip("sem permissão para criar symlink neste ambiente")
-
-    assert client.get("/revisao/resultados/escape.json").status_code == 404
+    assert corpo["resumo"]["total"] == 3
+    assert corpo["resumo"]["executadas"] == 2
+    assert corpo["resumo"]["nao_executadas"] == 1
+    assert corpo["resumo"]["acerto_geral"] == {"acertou": 1, "avaliaveis": 2, "taxa": 0.5}
+    assert corpo["resumo"]["veredictos"]["insatisfeito"] == 1
+    assert corpo["filtros"]["grupos_disponiveis"] == ["teste", "teste2"]
+    assert [l["pergunta_hash"] for l in corpo["linhas"]] == ["a", "b", "c"]
 
 
-def test_json_invalido_vira_422(client, resultados_dir):
-    (resultados_dir / "quebrado.json").write_text("{ nao fecha", encoding="utf-8")
+def test_resumo_cruza_roteamento_e_fidelidade():
+    linhas = [
+        _linha(origem_esperada="base", origem_obtida="base", veredicto="insatisfeito"),   # certo × insat
+        _linha(origem_esperada="base", origem_obtida="web", veredicto="satisfeito"),      # divergiu × sat
+        _linha(origem_esperada="base", origem_obtida="base", veredicto="satisfeito"),     # certo × sat
+    ]
+    cruz = revisao_router._resumo(linhas)["roteamento_x_fidelidade"]
+    assert cruz == {"certo_sat": 1, "certo_insat": 1, "divergiu_sat": 1, "divergiu_insat": 0}
 
-    assert client.get("/revisao/resultados/quebrado.json").status_code == 422
+
+def test_resumo_percentil_de_latencia():
+    linhas = [_linha(ms_total=v) for v in (100, 200, 300, 400, 500)]
+    lat = revisao_router._resumo(linhas)["latencia_ms"]
+    assert lat["p50"] == 300 and lat["media"] == 300
+    assert lat["p95"] == 480
 
 
-def test_json_que_nao_e_lista_vira_422(client, resultados_dir):
-    (resultados_dir / "objeto.json").write_text('{"a": 1}', encoding="utf-8")
+def test_resumo_flags_contam_do_jsonb_de_telemetria():
+    linhas = [
+        _linha(telemetria={"pii": ["cpf"], "base_insuficiente": True, "reranker_aplicado": True}),
+        _linha(telemetria={"pii": None, "base_insuficiente": False, "reranker_aplicado": True}),
+        _linha(telemetria={"erro": "Timeout", "reranker_aplicado": None}),
+    ]
+    r = revisao_router._resumo(linhas)
+    assert r["flags"]["pii"] == {"sim": 1, "nao": 2, "indef": 0}
+    assert r["flags"]["erro"] == {"sim": 1, "nao": 2, "indef": 0}
+    assert r["flags"]["base_insuficiente"] == {"sim": 1, "nao": 1, "indef": 1}
+    assert r["flags"]["reranker_aplicado"] == {"sim": 2, "nao": 0, "indef": 1}
+    assert r["pii_categorias"] == {"cpf": 1}
 
-    assert client.get("/revisao/resultados/objeto.json").status_code == 422
+
+def test_resumo_topicos_e_fluxo():
+    linhas = [
+        _linha(telemetria={"topico": "Transferência externa", "ms_rerank": 300.0, "ms_web": 8000.0},
+               ms_total=17000.0, ms_retrieve=6000.0, ms_llm=2700.0),
+        _linha(telemetria={"topico": "Transferência externa"}),
+        _linha(telemetria={"topico": "Fórum avaliativo"}),
+    ]
+    r = revisao_router._resumo(linhas)
+    assert r["topicos"][0] == ["Transferência externa", 2]
+    assert len(r["fluxo"]) == 3
+    # ms_retrieve no fluxo já desconta o rerank (1º estágio isolado).
+    assert r["fluxo"][0]["ms_retrieve"] == 5700.0
+    assert r["tempo_por_etapa"]["ms_web"] == 8000.0  # média só das que têm web
+
+
+def test_grava_veredicto(client, monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(
+        revisao_router.revisao_store, "salvar_veredicto",
+        lambda *a, **k: chamadas.append((a, k)),
+    )
+    r = client.put("/revisao/veredicto", json={
+        "telemetria_id": 5, "pergunta_hash": "h1", "veredicto": "satisfeito",
+    })
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert chamadas == [((5, "h1", "satisfeito", None), {})]
+
+
+def test_veredicto_invalido_vira_422(client, monkeypatch):
+    chamou = []
+    monkeypatch.setattr(
+        revisao_router.revisao_store, "salvar_veredicto", lambda *a, **k: chamou.append(1)
+    )
+    r = client.put("/revisao/veredicto", json={
+        "telemetria_id": 5, "pergunta_hash": "h1", "veredicto": "x",
+    })
+    assert r.status_code == 422
+    assert r.json()["erro"] == "veredicto_invalido"
+    assert chamou == []  # nem chega ao store
+
+
+def test_ajustar_expectativa_chama_o_store(client, monkeypatch):
+    p = perguntas_store.PerguntaExemplo(
+        id=3, grupo="teste", pergunta="P?", pergunta_hash="h", assunto=None,
+        origem_esperada="nenhuma", origem_tambem_ok=["encaminhado"], criterio=None, ativo=True,
+    )
+    monkeypatch.setattr(revisao_router.perguntas_store, "atualizar", lambda id_, campos, store=None: p)
+
+    r = client.patch("/revisao/pergunta/3", json={"origem_esperada": "nenhuma"})
+    assert r.status_code == 200
+    assert r.json()["origem_esperada"] == "nenhuma"
+    assert r.json()["origem_tambem_ok"] == ["encaminhado"]
+
+
+def test_ajustar_expectativa_404_sem_a_pergunta(client, monkeypatch):
+    monkeypatch.setattr(revisao_router.perguntas_store, "atualizar", lambda *a, **k: None)
+    assert client.patch("/revisao/pergunta/999", json={"criterio": "x"}).status_code == 404
 
 
 def test_desligada_tira_a_rota_do_ar(monkeypatch):
@@ -132,5 +177,4 @@ def test_desligada_tira_a_rota_do_ar(monkeypatch):
     client = TestClient(app_module.create_app(), raise_server_exceptions=False)
 
     assert client.get("/revisao").status_code == 404
-    # A v1 continua de pé — desligar a revisão não é desligar o serviço.
     assert client.get("/v1/health").status_code == 200

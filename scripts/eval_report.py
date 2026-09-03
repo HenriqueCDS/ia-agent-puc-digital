@@ -1,10 +1,10 @@
 """CLI de avaliação — audita, na tabela `telemetria`, o que o agente
 respondeu de fato para o dataset de teste, e compara com a origem esperada.
 
-    python -m scripts.eval_report
-    python -m scripts.eval_report --dias 1
+    python -m scripts.eval_report                 # dataset: banco (exemplo_perguntas)
+    python -m scripts.eval_report --grupo teste2
     python -m scripts.eval_report --detalhe
-    python -m scripts.eval_report --json > relatorio.json
+    python -m scripts.eval_report --fonte arquivo --json > relatorio.json
 
 Complementa `scripts.eval_run`: aquele já devolve o resultado na hora (arquivo
 local); este lê a MESMA fonte de verdade do `scripts.lacunas` — a telemetria
@@ -12,12 +12,17 @@ persistida no Postgres — o que permite comparar rodadas passadas (duas
 janelas de `--dias`) sem reexecutar nada, e serve de checagem de que a
 telemetria está gravando o que o agente de fato decidiu.
 
+FONTE DO DATASET — como o `eval_run`, o default é `--fonte db` (a tabela
+`exemplo_perguntas`). Ler do JSONC com `--fonte arquivo` compararia a origem
+obtida contra uma `origem_esperada` que pode já ter sido corrigida pela tela
+`/revisao` ou por `/v1/perguntas` — e o relatório apontaria "divergência" numa
+pergunta que já foi reclassificada.
+
 CORRELAÇÃO POR HASH — a telemetria nunca grava o texto da pergunta (só um
-hash de 12 chars, ver `app/core/telemetry.py`), por isso este script recebe o
-mesmo `dataset` do `eval_run`: calcula o hash de cada pergunta com a mesma
-função (`telemetry.hash_pergunta`) e casa com as linhas gravadas com
-`canal='eval'`. Perguntas repetidas na janela usam a ocorrência MAIS RECENTE
-(ver `telemetry_store.origem_por_hash`).
+hash de 12 chars, ver `app/core/telemetry.py`): este script calcula o hash de
+cada pergunta com a mesma função (`telemetry.hash_pergunta`) e casa com as
+linhas gravadas com `canal='eval'`. Perguntas repetidas na janela usam a
+ocorrência MAIS RECENTE (ver `telemetry_store.origem_por_hash`).
 
 RESPOSTA E MODELO — a telemetria normalmente NUNCA grava o texto da resposta.
 A exceção é só o canal `eval`: `responder.answer` grava `Registro.resposta`
@@ -45,6 +50,18 @@ def _carregar_dataset(caminho: Path) -> list[dict]:
     return json.loads(texto)
 
 
+def _carregar_itens(fonte: str, dataset: Path, grupo: str | None) -> list[dict]:
+    """`--fonte db` (default) usa a tabela `exemplo_perguntas` — a mesma fonte
+    viva do `eval_run`. Ler do JSONC quando o dataset já foi editado pela API /
+    pela tela compararia contra uma expectativa desatualizada."""
+    if fonte == "db":
+        from app.db import perguntas_store
+
+        return [p.como_item() for p in perguntas_store.listar(grupo=grupo, apenas_ativas=True)]
+    itens = _carregar_dataset(dataset)
+    return [i for i in itens if grupo is None or (i.get("grupo") or "") == grupo]
+
+
 def _origens_aceitas(item: dict) -> list[str]:
     """`origem_esperada` + os aliases de `origem_tambem_ok` — igual `scripts.eval_run`.
 
@@ -65,8 +82,12 @@ def _resumir(resposta: str | None, limite: int = 300) -> str:
 @app.command()
 def main(
     dataset: Path = typer.Argument(
-        Path("eval/perguntas/perguntas.jsonc"), help="Mesmo dataset usado em scripts.eval_run."
+        Path("eval/perguntas/perguntas.jsonc"), help="Dataset JSONC — só com --fonte arquivo."
     ),
+    fonte: str = typer.Option(
+        "db", "--fonte", help="`db` (exemplo_perguntas, a fonte viva) ou `arquivo`."
+    ),
+    grupo: str | None = typer.Option(None, "--grupo", "-g", help="Só um bloco do dataset."),
     dias: int = typer.Option(1, help="Janela de busca na telemetria, em dias."),
     canal: str = typer.Option("eval", help="Canal gravado por scripts.eval_run."),
     detalhe: bool = typer.Option(
@@ -74,15 +95,22 @@ def main(
     ),
     formato_json: bool = typer.Option(False, "--json", help="Saída JSON, para pipeline."),
 ) -> None:
-    if dias > settings.telemetry_retention_days and not formato_json:
+    if fonte not in ("db", "arquivo"):
+        raise typer.BadParameter("--fonte deve ser 'db' ou 'arquivo'.")
+
+    retencao = (
+        settings.telemetry_retention_days_eval if canal == "eval"
+        else settings.telemetry_retention_days
+    )
+    if dias > retencao and not formato_json:
         typer.secho(
-            f"aviso: a retenção da telemetria é de {settings.telemetry_retention_days} "
-            f"dias; os dias além disso vêm vazios.",
+            f"aviso: a retenção do canal {canal!r} é de {retencao} dias; "
+            "os dias além disso vêm vazios.",
             fg=typer.colors.YELLOW,
             err=True,
         )
 
-    itens = _carregar_dataset(dataset)
+    itens = _carregar_itens(fonte, dataset, grupo)
     hashes = [telemetry.hash_pergunta(item["pergunta"]) for item in itens]
     registrado = origem_por_hash(hashes, dias=dias, canal=canal)
 

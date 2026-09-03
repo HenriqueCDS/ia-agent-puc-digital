@@ -5,6 +5,7 @@ import logging
 
 from dataclasses import replace
 
+from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 
 from app.agent.preprocess import normalize
@@ -24,6 +25,7 @@ from app.agent.web_fallback import buscar_na_web, fonte_permitida, termo_bloquea
 from app.core import pii, telemetry
 from app.core.config import CONTATO_PADRAO, settings
 from app.core.models import Answer, Query, RetrievedChunk
+from app.db.pre_retrieval_cache import get_cached_pre_retrieval, set_cached_pre_retrieval
 from app.db.response_cache import get_cached_answer, set_cached_answer
 from app.providers.chain import cadeia_para_modelo, get_chat_model
 from app.retrieval.retriever import retrieve
@@ -151,6 +153,76 @@ def _cache_key(query: Query, chunks: list[RetrievedChunk]) -> str:
         f"{','.join(ids)}|{query.modelo or ''}"
     )
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+# Teto do trecho de cada fonte guardado no cache pré-retrieval. O
+# `page_content` completo só serve para montar o prompt do LLM — que o hit
+# pré-retrieval justamente pula. Guardar ~400 chars mantém o `scripts/ask.py
+# --debug` legível sem inchar a linha do JSONB.
+_TRECHO_FONTE_MAX = 400
+
+
+def _pre_retrieval_cache_key(query: Query) -> str:
+    """Chave do cache PRÉ-RETRIEVAL: só pergunta normalizada + assunto, sem os
+    ids dos chunks (que não existem antes do retrieval — esse é o ponto).
+
+    `query` aqui já passou por `_sem_pii`, igual em `_cache_key`: o texto que
+    entra no hash é o mascarado, então PII nunca vira chave. Sem `query.modelo`
+    na chave de propósito — o caminho que usa este cache já exige
+    `query.modelo is None` (ver `_responder`).
+    """
+    base = f"{_normalizar_pergunta(query.text)}|{query.assunto or ''}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def _fonte_para_json(chunk: RetrievedChunk) -> dict:
+    """Serializa um `RetrievedChunk` para o `fontes` JSONB do cache pré-retrieval.
+
+    Guarda o suficiente para reconstruir o que roda DEPOIS de `answer()`:
+    `schemas._fonte_para_source_out` (lê `metadata` e `score`), `RetrievedChunk.
+    citation`/`is_web` (lê `metadata`) e o `--debug` da CLI (lê um trecho do
+    `page_content`). O texto completo do chunk não é guardado — ver
+    `_TRECHO_FONTE_MAX`.
+    """
+    return {
+        "id": chunk.document.id,
+        "page_content": chunk.document.page_content[:_TRECHO_FONTE_MAX],
+        "metadata": chunk.document.metadata,
+        "score": chunk.score,
+        "score_bruto": chunk.score_bruto,
+    }
+
+
+def _fonte_de_json(dados: dict) -> RetrievedChunk:
+    """Inverso de `_fonte_para_json`."""
+    return RetrievedChunk(
+        document=Document(
+            id=dados.get("id"),
+            page_content=dados.get("page_content", ""),
+            metadata=dados.get("metadata") or {},
+        ),
+        score=dados["score"],
+        score_bruto=dados.get("score_bruto"),
+    )
+
+
+def _registrar_scores(registro: telemetry.Registro, chunks: list[RetrievedChunk]) -> None:
+    """Preenche os campos de qualidade do retrieval (M5 / RET-3) a partir dos
+    chunks — a MESMA lógica no caminho normal e no hit pré-retrieval (onde os
+    chunks vêm da entrada cacheada, com os scores da vez em que foi gerada)."""
+    registro.n_chunks = len(chunks)
+    registro.score_top = round(chunks[0].score, 4) if chunks else None
+    # Dispersão do top-k junto do topo: é o par que permite testar a margem
+    # relativa depois, sem guardar os k scores. Ver `telemetry.Registro`.
+    if chunks:
+        registro.score_min = round(chunks[-1].score, 4)
+        registro.score_mean = round(sum(c.score for c in chunks) / len(chunks), 4)
+        # RET-3 — quando o reranker rodou, `chunks[*].score` é do cross-encoder
+        # (outra escala); `score_bruto` traz o score de E5 do 1º estágio, e é o
+        # que mantém a série `score_top` histórica comparável.
+        if chunks[0].score_bruto is not None:
+            registro.reranker_aplicado = True
+            registro.score_top_bruto = round(chunks[0].score_bruto, 4)
 
 
 def _rotulo_do_modelo(registro: telemetry.Registro) -> str:
@@ -429,22 +501,41 @@ def _responder(
     # original em `telemetry.registrar`.
     query = _sem_pii(query)
 
+    # Cache PRÉ-RETRIEVAL: um hit numa pergunta já respondida pela base devolve a
+    # resposta sem tocar em pgvector nem no cross-encoder — mata o `retrieve()`
+    # inteiro, não só a chamada ao LLM (que o cache pós-retrieval já poupa). Só o
+    # caminho `origem="base"` bem-sucedido é gravado (ver `_tentar_base`).
+    #
+    # Fica DEPOIS de guardrail/triagem/PII (léxico sobre o texto original, sem
+    # egress) e ANTES do retrieval. A chave não tem os ids dos chunks, então a
+    # invalidação é explícita: cada reingestão limpa a tabela
+    # (`ingestion.pipeline._indexar_chunks`). Desligado no canal `eval` (a suíte
+    # precisa medir retrieval + rerank) e com `query.modelo` (a chave não carrega
+    # o modelo — mesma razão do cache pós-retrieval).
+    pre_cache_key = None
+    if (
+        settings.cache_enabled
+        and settings.pre_retrieval_cache_enabled
+        and not query.modelo
+        and registro.canal != "eval"
+    ):
+        pre_cache_key = _pre_retrieval_cache_key(query)
+        cacheado = get_cached_pre_retrieval(pre_cache_key)
+        if cacheado is not None:
+            bruto, fontes_json = cacheado
+            logger.info("cache pré-retrieval hit (%s...)", pre_cache_key[:8])
+            registro.cache_hit = True
+            registro.cache_pre_retrieval = True
+            fontes = [_fonte_de_json(f) for f in fontes_json]
+            _registrar_scores(registro, fontes)
+            _registrar_assunto(registro, _assunto_dos_chunks(fontes), "metadata")
+            texto, registro.topico = separar_topico(bruto)
+            return Answer(text=texto, sources=fontes, grounded=True, cached=True)
+
     with telemetry.cronometro(registro, "ms_retrieve"):
         chunks = retrieve(query)
 
-    registro.n_chunks = len(chunks)
-    registro.score_top = round(chunks[0].score, 4) if chunks else None
-    # Dispersão do top-k junto do topo: é o par que permite testar a margem
-    # relativa depois, sem guardar os k scores. Ver `telemetry.Registro`.
-    if chunks:
-        registro.score_min = round(chunks[-1].score, 4)
-        registro.score_mean = round(sum(c.score for c in chunks) / len(chunks), 4)
-        # RET-3 — quando o reranker rodou, `chunks[*].score` é do cross-encoder
-        # (outra escala); `score_bruto` traz o score de E5 do 1º estágio, e é o
-        # que mantém a série `score_top` histórica comparável.
-        if chunks[0].score_bruto is not None:
-            registro.reranker_aplicado = True
-            registro.score_top_bruto = round(chunks[0].score_bruto, 4)
+    _registrar_scores(registro, chunks)
     _registrar_assunto(registro, _assunto_dos_chunks(chunks), "metadata")
 
     # Guardrail: em suporte acadêmico, não responder é melhor que alucinar um
@@ -483,7 +574,7 @@ def _responder(
             )
             registro.contexto_suspeito = True
 
-    resultado = _tentar_base(query, llm, chunks, registro)
+    resultado = _tentar_base(query, llm, chunks, registro, pre_cache_key)
     if resultado is not None:
         return resultado
 
@@ -504,12 +595,18 @@ def _tentar_base(
     llm: BaseChatModel | None,
     chunks: list[RetrievedChunk],
     registro: telemetry.Registro,
+    pre_cache_key: str | None = None,
 ) -> Answer | None:
     """Responde com o contexto da base, ou None se o LLM considerar insuficiente.
 
     None é o sinal para `_responder` tentar a busca externa antes da secretaria
     — mesmo veto que `_responder_pela_web` já aplicava do lado da web
     (`CONTEXTO_INSUFICIENTE`, ver prompts.py), agora também do lado da base.
+
+    `pre_cache_key`, quando não-nulo, é onde a resposta bem-sucedida também é
+    gravada no cache PRÉ-RETRIEVAL — para a próxima ocorrência da mesma pergunta
+    pular o `retrieve()` inteiro. Só o desfecho de sucesso é gravado (veto de
+    contexto e `#FORA_DE_ESCOPO#` não).
     """
     prompt = ANSWER_PROMPT
 
@@ -569,5 +666,20 @@ def _tentar_base(
         logger.info("base: LLM considerou os %d chunks recuperados insuficientes", len(chunks))
         registro.base_insuficiente = True
         return None
+
+    # Cache PRÉ-RETRIEVAL da resposta bem-sucedida (ver `_pre_retrieval_cache_key`
+    # e o hit em `_responder`). Grava mesmo num hit do cache pós-retrieval: ali o
+    # retrieval + rerank ainda rodaram, e popular aqui elimina esse custo na
+    # próxima vez — útil, por ex., logo depois de uma reingestão ter limpado só
+    # este cache mas não o pós-retrieval (ids do doc inalterados).
+    if pre_cache_key is not None:
+        set_cached_pre_retrieval(
+            pre_cache_key,
+            _normalizar_pergunta(query.text),
+            registro.assunto,
+            bruto,
+            [_fonte_para_json(c) for c in chunks],
+            _rotulo_do_modelo(registro),
+        )
 
     return Answer(text=texto, sources=chunks, grounded=True, cached=bool(registro.cache_hit))

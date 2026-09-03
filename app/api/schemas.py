@@ -99,6 +99,54 @@ class ProntidaoOut(BaseModel):
     checagens: dict[str, bool]
 
 
+class PerguntaOut(BaseModel):
+    """Um item do dataset de avaliação (`GET /v1/perguntas`).
+
+    `pergunta_hash` sai no contrato de propósito: é a chave de junção com a
+    telemetria (que nunca guarda o texto da pergunta), e a tela de revisão
+    precisa dele para casar pergunta × execução."""
+
+    id: int
+    grupo: str
+    pergunta: str
+    pergunta_hash: str
+    assunto: str | None
+    origem_esperada: Origem
+    origem_tambem_ok: list[Origem]
+    criterio: str | None
+    ativo: bool
+
+
+class PerguntaCreate(BaseModel):
+    pergunta: str = Field(min_length=3, max_length=1000)
+    origem_esperada: Origem
+    grupo: str = Field(default="", max_length=60)
+    assunto: str | None = Field(default=None, max_length=60)
+    # `nenhuma` e `encaminhado` dão a mesma mensagem ao aluno — ver
+    # `eval_run._origens_aceitas`. Lista, não escalar: uma pergunta pode aceitar
+    # mais de uma origem alternativa.
+    origem_tambem_ok: list[Origem] = Field(default_factory=list)
+    criterio: str | None = Field(default=None, max_length=2000)
+
+
+class PerguntaUpdate(BaseModel):
+    """PATCH: só o que vier é alterado. `ativo=false` é o delete lógico;
+    `ativo=true` reativa."""
+
+    pergunta: str | None = Field(default=None, min_length=3, max_length=1000)
+    origem_esperada: Origem | None = None
+    grupo: str | None = Field(default=None, max_length=60)
+    assunto: str | None = Field(default=None, max_length=60)
+    origem_tambem_ok: list[Origem] | None = None
+    criterio: str | None = Field(default=None, max_length=2000)
+    ativo: bool | None = None
+
+
+class PerguntasListOut(BaseModel):
+    perguntas: list[PerguntaOut]
+    total: int
+
+
 class ErroOut(BaseModel):
     """Envelope único para toda resposta de erro — ver app/api/errors.py.
 
@@ -125,6 +173,21 @@ def _fonte_para_source_out(chunk: RetrievedChunk) -> SourceOut:
         tipo="documento",
         pagina=(pagina + 1) if pagina is not None else None,
         score=chunk.score,
+    )
+
+
+def pergunta_out_de(p) -> PerguntaOut:
+    """`perguntas_store.PerguntaExemplo` → contrato HTTP."""
+    return PerguntaOut(
+        id=p.id,
+        grupo=p.grupo,
+        pergunta=p.pergunta,
+        pergunta_hash=p.pergunta_hash,
+        assunto=p.assunto,
+        origem_esperada=p.origem_esperada,
+        origem_tambem_ok=list(p.origem_tambem_ok),
+        criterio=p.criterio,
+        ativo=p.ativo,
     )
 
 

@@ -23,7 +23,8 @@ _COMANDOS = [
     ("python -m scripts.lacunas", "Perguntas que a base não respondeu, por frequência."),
     ("python -m scripts.clear_cache", "Apaga o cache de respostas (resposta_cache)."),
     ("python -m scripts.clear_logs", "Apaga a telemetria/logs (tabela telemetria)."),
-    ("python -m scripts.eval_run", "Roda o dataset de avaliação contra o agente."),
+    ("python -m scripts.seed_perguntas", "Semeia exemplo_perguntas a partir do perguntas.jsonc."),
+    ("python -m scripts.eval_run", "Roda o dataset de avaliação (do banco) contra o agente."),
     ("python -m scripts.eval_report", "Compara origem esperada x obtida via telemetria."),
     ("python -m scripts.eval_export", "Exporta a telemetria de um canal para .jsonl."),
 ]

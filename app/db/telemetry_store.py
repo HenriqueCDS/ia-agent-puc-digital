@@ -62,7 +62,14 @@ def _garantir_tabela(session) -> None:
 
 
 def _limpar_expirados(session) -> None:
-    """Apaga o que passou da retenção. No máximo 1x/hora por processo."""
+    """Apaga o que passou da retenção. No máximo 1x/hora por processo.
+
+    Retenção POR CANAL: o tráfego real (`TELEMETRY_RETENTION_DAYS`, 7 dias)
+    carrega hash de pergunta de aluno e some rápido; o canal `eval` é dataset
+    sintético e fica `TELEMETRY_RETENTION_DAYS_EVAL` (90) para o dashboard de
+    `/revisao` ter série temporal. Um `CASE` no mesmo DELETE, sem segunda
+    query.
+    """
     global _ultima_limpeza
     agora = time.perf_counter()
     if _ultima_limpeza is not None and agora - _ultima_limpeza < _INTERVALO_LIMPEZA_S:
@@ -70,10 +77,13 @@ def _limpar_expirados(session) -> None:
 
     resultado = session.execute(
         text(
-            "DELETE FROM telemetria "
-            "WHERE criado_em < now() - make_interval(days => :dias)"
+            "DELETE FROM telemetria WHERE criado_em < now() - make_interval(days => "
+            "CASE WHEN dados->>'canal' = 'eval' THEN :dias_eval ELSE :dias END)"
         ),
-        {"dias": settings.telemetry_retention_days},
+        {
+            "dias": settings.telemetry_retention_days,
+            "dias_eval": settings.telemetry_retention_days_eval,
+        },
     )
     _ultima_limpeza = agora
     if resultado.rowcount:

@@ -34,6 +34,23 @@ class AssuntoInvalido(ValueError):
         super().__init__(f'Assunto "{assunto}" não existe. Válidos: {opcoes}')
 
 
+class RecursoNaoEncontrado(Exception):
+    """Um `id` de rota que não existe (ver `routers/perguntas.py`). 404 no
+    envelope padrão, em vez do `{"detail": ...}` cru da HTTPException do
+    Starlette — quem integra lê `erro` do mesmo jeito que nos outros erros."""
+
+
+class SemPermissao(Exception):
+    """Consumidor autenticado, mas sem direito a esta operação (ver
+    `deps.consumidor_de_escrita_de_avaliacao`).
+
+    403 e não 401: 401 diria "sua credencial não vale, tente outra"; aqui a
+    credencial vale, o consumidor foi identificado — ele só não pode. O CRUD
+    de escrita de `/v1/perguntas` usa isto para barrar toda integração que não
+    seja a de avaliação (a da demo, por exemplo, cuja chave é pública no HTML).
+    """
+
+
 class NaoAutenticado(Exception):
     """Chave de API ausente ou inválida (ver `deps.get_consumidor`).
 
@@ -82,6 +99,14 @@ def registrar_handlers(app: FastAPI) -> None:
         # Ex.: pergunta vazia (app/agent/preprocess.normalize). AssuntoInvalido
         # já foi pego pelo handler mais específico acima.
         return _envelope(request, 422, "pergunta_invalida", str(exc))
+
+    @app.exception_handler(SemPermissao)
+    async def _sem_permissao(request: Request, exc: SemPermissao) -> JSONResponse:
+        return _envelope(request, 403, "sem_permissao", str(exc))
+
+    @app.exception_handler(RecursoNaoEncontrado)
+    async def _nao_encontrado(request: Request, exc: RecursoNaoEncontrado) -> JSONResponse:
+        return _envelope(request, 404, "nao_encontrado", str(exc))
 
     @app.exception_handler(NaoAutenticado)
     async def _nao_autenticado(request: Request, exc: NaoAutenticado) -> JSONResponse:

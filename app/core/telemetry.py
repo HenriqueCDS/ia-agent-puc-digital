@@ -239,6 +239,12 @@ class Registro:
 
     # Custo (M1/M2): cache hit é resposta com zero token de API.
     cache_hit: bool | None = None
+    # O hit foi no cache PRÉ-RETRIEVAL (ver app/db/pre_retrieval_cache.py): além
+    # de zero token, o `retrieve()` inteiro foi pulado — `ms_retrieve`/`ms_rerank`
+    # nulos, `n_chunks`/`score_*` vêm da entrada cacheada, não de uma busca desta
+    # pergunta. `cache_hit` também fica `True`. `None`/`False` = o hit (se houve)
+    # foi no cache pós-retrieval, com o retrieval rodando normalmente.
+    cache_pre_retrieval: bool | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
 

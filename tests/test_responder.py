@@ -632,9 +632,9 @@ def _capturar_registro(monkeypatch):
     caixa = {}
     orig = responder._tentar_base
 
-    def captura(query, llm, chunks, registro):
+    def captura(query, llm, chunks, registro, pre_cache_key=None):
         caixa["registro"] = registro
-        return orig(query, llm, chunks, registro)
+        return orig(query, llm, chunks, registro, pre_cache_key)
 
     monkeypatch.setattr(responder, "_tentar_base", captura)
     return caixa
@@ -724,3 +724,126 @@ def test_chunk_de_pdf_interno_nao_ganha_a_marca_de_web(monkeypatch):
     prompt = "\n".join(str(m.content) for m in llm.mensagens)
     assert "[Fonte web pública indexada:" not in prompt
     assert "[Fonte: guia.pdf, p. 2]" in prompt
+
+
+# --- Cache PRÉ-RETRIEVAL: um hit pula retrieve() inteiro ------------------
+# (a conftest desliga o cache pré-retrieval por padrão; `fake_pre_cache` instala
+#  um dict em memória por cima)
+
+
+@pytest.fixture
+def fake_pre_cache(monkeypatch):
+    guardado: dict[str, tuple[str, list[dict]]] = {}
+
+    monkeypatch.setattr(responder, "get_cached_pre_retrieval", guardado.get)
+    monkeypatch.setattr(
+        responder,
+        "set_cached_pre_retrieval",
+        lambda key, pergunta_norm, assunto, resposta, fontes, modelo=None: guardado.__setitem__(
+            key, (resposta, fontes)
+        ),
+    )
+    return guardado
+
+
+def _retrieve_contado(monkeypatch, chunks):
+    """Substitui `retrieve` por um contador — para provar que o 2º `answer()`
+    não tocou o pipeline."""
+    n = {"chamadas": 0}
+
+    def _retrieve(_query):
+        n["chamadas"] += 1
+        return list(chunks)
+
+    monkeypatch.setattr(responder, "retrieve", _retrieve)
+    return n
+
+
+def test_pergunta_repetida_serve_do_cache_pre_retrieval_sem_retrieval(monkeypatch, fake_pre_cache):
+    n = _retrieve_contado(monkeypatch, [_chunk(page=1)])
+
+    primeiro = responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+    assert primeiro.text == "Resposta gerada."
+    assert n["chamadas"] == 1
+
+    llm2 = FakeLLM()
+    segundo = responder.answer(Query(text="  Como  ENVIO a atividade  "), llm=llm2)
+
+    assert n["chamadas"] == 1  # retrieve NÃO rodou de novo
+    assert llm2.mensagens is None  # nem o LLM
+    assert segundo.text == "Resposta gerada."
+    assert segundo.cached is True
+    assert segundo.grounded is True
+    assert segundo.origem == "base"
+    # a fonte sobrevive ao round-trip pelo cache (citação para o /ask e o --debug)
+    assert [c.citation for c in segundo.sources] == ["guia.pdf, p. 2"]
+
+
+def test_hit_pre_retrieval_recupera_o_topico(monkeypatch, fake_pre_cache):
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
+
+    responder.answer(
+        Query(text="como envio a atividade?"),
+        llm=FakeLLM(resposta=f"Acesse Tarefas.\n{MARCADOR_TOPICO} envio de atividade"),
+    )
+
+    # 2ª chamada: hit pré-retrieval. O texto cacheado guarda o marcador; o hit
+    # roda `separar_topico` de novo, então o marcador não vaza para o aluno.
+    segundo = responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+
+    assert segundo.text == "Acesse Tarefas."
+    assert MARCADOR_TOPICO not in segundo.text
+
+
+def test_veto_de_contexto_insuficiente_nao_e_cacheado_pre_retrieval(monkeypatch, fake_pre_cache):
+    """`_tentar_base` devolvendo None (LLM vetou o contexto) não pode virar
+    entrada no cache pré-retrieval — senão a 2ª ocorrência pularia o retrieval e
+    nunca mais tentaria a web."""
+    monkeypatch.setattr(responder.settings, "web_fallback_enabled", True)
+    n = _retrieve_contado(monkeypatch, [_chunk(page=1)])
+    monkeypatch.setattr(responder, "buscar_na_web", lambda q: [_chunk_web()])
+
+    responder.answer(
+        Query(text="como envio atividade?"), llm=FakeLLM(resposta=CONTEXTO_INSUFICIENTE)
+    )
+    assert fake_pre_cache == {}  # nada gravado
+
+    responder.answer(
+        Query(text="como envio atividade?"), llm=FakeLLM(resposta=CONTEXTO_INSUFICIENTE)
+    )
+    assert n["chamadas"] == 2  # retrieve rodou de novo na 2ª
+
+
+def test_cache_pre_retrieval_ignorado_quando_setting_desligado(monkeypatch, fake_pre_cache):
+    monkeypatch.setattr(responder.settings, "pre_retrieval_cache_enabled", False)
+    n = _retrieve_contado(monkeypatch, [_chunk(page=1)])
+
+    responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+    responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+
+    assert n["chamadas"] == 2
+    assert fake_pre_cache == {}
+
+
+def test_cache_pre_retrieval_ignorado_no_canal_eval(monkeypatch, fake_pre_cache):
+    """A suíte de eval precisa medir retrieval + rerank na 2ª rodada, não o
+    atalho pré-retrieval."""
+    token = responder.telemetry._canal.set("eval")
+    try:
+        n = _retrieve_contado(monkeypatch, [_chunk(page=1)])
+        responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+        responder.answer(Query(text="como envio a atividade?"), llm=FakeLLM())
+        assert n["chamadas"] == 2
+        assert fake_pre_cache == {}
+    finally:
+        responder.telemetry._canal.reset(token)
+
+
+def test_cache_pre_retrieval_ignorado_com_modelo_override(monkeypatch, fake_pre_cache):
+    n = _retrieve_contado(monkeypatch, [_chunk(page=1)])
+
+    responder.answer(Query(text="como envio a atividade?", modelo="groq:x"), llm=FakeLLM())
+    responder.answer(Query(text="como envio a atividade?", modelo="groq:x"), llm=FakeLLM())
+
+    assert n["chamadas"] == 2
+    assert fake_pre_cache == {}
