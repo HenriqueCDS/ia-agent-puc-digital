@@ -31,7 +31,7 @@ OpenRouter atrás de uma interface única.
 | Idempotência e evolução de schema | id determinístico por chunk; coluna `vector` sem dimensão fixa; metadata desde o dia 1 p/ conviver com scraping/API depois |
 | Rigor de avaliação | dataset de eval versionado rodado contra o agente real; armadilhas documentadas (cache mascara o pipeline; fallback troca o gerador no meio da rodada; ~12% das perguntas oscilam pela busca externa) |
 
-**Números:** ~388 testes que rodam **sem banco, sem chave de API e sem rede**
+**Números:** 602 testes que rodam **sem banco, sem chave de API e sem rede**
 (dublês de vector store, LLM, cache, busca e relógio); validado ponta a ponta
 contra Postgres real com 1289 chunks.
 
@@ -142,7 +142,7 @@ estão em `ENCAMINHAMENTOS` (`app/core/config.py`); ver `app/agent/triagem.py`.
 substitui as defesas do pipeline (RAG fechado no CONTEXTO, `SYSTEM_WEB`,
 allowlist), é a 1ª linha que evita mandar a entrada hostil para um LLM ou para a
 busca externa. Liga/desliga com `GUARDRAIL_ENABLED`; ver `app/agent/guardrail.py`
-e `eval/analise-telemetria-2026-08-27.md`.
+e `eval/analises/analise-telemetria-2026-08-27.md`.
 
 O léxico não pega paráfrase, outro idioma nem injeção **indireta** (payload
 dentro de um chunk). Camadas atrás dele: (a) `SYSTEM`/`SYSTEM_WEB` tratam o
@@ -196,7 +196,7 @@ libera a requisição com WARNING, não derruba o agente.
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
 
-**Testes** — 388 testes cobrindo chunking, ids determinísticos, corte por
+**Testes** — 602 testes cobrindo chunking, ids determinísticos, corte por
 limiar, filtro por assunto, formatação de citação, o guardrail do agente, o
 hit/miss do cache de resposta, a cobertura de loader de toda fonte em
 `data/raw/` (`test_ingestao`), o crawler da allowlist (parsing de sitemap,
@@ -214,7 +214,7 @@ de vector store, de LLM, de cache, de busca e de relógio.
 O caminho completo `ingest → embeddings locais (e5-base) → pgvector →
 retrieve → LLM` já rodou contra um banco real e um corpus de 3 PDFs (1289
 chunks) — ver a rodada de avaliação em
-[`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md).
+[`eval/analises/analise-telemetria-2026-08-26.md`](eval/analises/analise-telemetria-2026-08-26.md).
 
 O backlog priorizado de calibração e correções — com histórico e o que já foi
 aplicado — está em [`eval/backlog-problemas.md`](eval/backlog-problemas.md).
@@ -423,15 +423,15 @@ de uma pergunta se ajusta ali mesmo.
 > os três scores do retrieval (`score_top`/`score_min`/`score_mean`), os flags de
 > veto (`base_insuficiente`, `web_insuficiente`, `veto_escapou`) e o `criterio` de
 > conferência manual do dataset. O arquivo é a base da revisão, não o veredito —
-> ver [`eval/plano-testes-2026-08-28.md`](eval/plano-testes-2026-08-28.md) §1.
+> ver [`eval/analises/analise-telemetria-2026-08-28.md`](eval/analises/analise-telemetria-2026-08-28.md).
 >
 > Duas colunas com nomes parecidos, de propósito: `fontes_resposta`/`score_fonte_top`
 > são as fontes **da resposta** (vazias quando a origem é `nenhuma`/`encaminhado`);
 > `chunks_recuperados`/`score_top` são o que o **retrieval** trouxe (quase sempre 5).
 
 As flags existem por causa de armadilhas achadas
-nas rodadas reais ([`analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md)
-§6, [`-2026-08-27.md`](eval/analise-telemetria-2026-08-27.md) §10):
+nas rodadas reais ([`analise-telemetria-2026-08-26.md`](eval/analises/analise-telemetria-2026-08-26.md)
+§6, [`-2026-08-27.md`](eval/analises/analise-telemetria-2026-08-27.md) §10):
 
 - **Cache mascara o pipeline.** Uma pergunta já respondida antes serve do cache
   sem tocar no LLM — e, se bater no cache **pré-retrieval**, sem tocar nem em

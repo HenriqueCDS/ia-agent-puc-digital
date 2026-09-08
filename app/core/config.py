@@ -95,10 +95,20 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
             "/secretaria-geral/",     # competência da secretaria, procedimentos oficiais
             "/biblioteca/",           # serviços e regulamentos da biblioteca
             "/mestrado-e-doutorado/",  # stricto sensu (/relacionamento/mestrado-e-doutorado/ redireciona pra cá)
-            "/atualizacao/",          # cursos de atualização/extensão
+            "/atualizacao/",             # cursos de atualização/extensão
+            "/relacionamento/",
+            "/ouvidoria/",
+            "/graduacao/",
+            "/reitoria/",
+            "/escolas/",
+            "/diplomas-e-certificados/",
+            "/financiamento-bolsas/",
+            "/prograd/proaces/",
+            "/parcerias-e-convenios/",
+            "/protecao-de-dados-pessoais/",
         ),
-        termos="PUC Digital estudante",
-        assunto="puc-digital",
+        termos="PUC Campinas",
+        assunto="puc-campinas",
     ),
     # Base de conhecimento oficial do Canvas (guias do estudante, do professor e
     # dos apps mobile — todos sob /en/kb/).
