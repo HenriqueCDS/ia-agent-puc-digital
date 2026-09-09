@@ -1,81 +1,33 @@
-# Arquitetura — Agente de IA para Suporte ao Aluno EAD (v0 — modelo inicial simplificado)
+# Arquitetura — Agente de IA para Suporte ao Aluno EAD (v1)
 
 ## Visão geral
 
-Modelo inicial simplificado: RAG (Retrieval-Augmented Generation) consumindo
-arquivos PDF e texto como base de conhecimento, com um fallback de busca em
-páginas públicas oficiais quando o retrieval não encontra nada. Sem ingestão por
-scraping, interpretação de print ou escalonamento. Este documento é o diagrama e a lista
-de componentes; o estado de implementação, contagem de testes e instruções de
-uso ficam no [README.md](README.md) — mantenha os dois em sincronia ao mexer
-na estrutura.
+RAG (Retrieval-Augmented Generation) sobre uma base local (PDF, texto, DOCX e a
+planilha de modelos de e-mail) somada às páginas oficiais da `WEB_ALLOWLIST`
+pré-indexadas pelo crawler (`scripts/crawl.py`); quando nem a base nem o conteúdo
+crawlado cobrem a pergunta, um fallback faz busca ao vivo restrita à mesma
+allowlist antes de encaminhar para a secretaria. Fora do escopo: interpretação de
+print, APIs em tempo real e escalonamento para humano. Este documento é o
+diagrama e a lista de componentes; o estado de implementação, contagem de testes
+e instruções de uso ficam no [README.md](README.md) — mantenha os dois em
+sincronia ao mexer na estrutura.
 
-```mermaid
-flowchart TD
-    subgraph Fontes["Fontes de Dados"]
-        A1[Arquivos PDF]
-        A2[Arquivos de texto/.md/.txt]
-    end
+![Arquitetura atual do agente](Prints/arquitetura-agente-ia-suporte-ead-v0.png)
 
-    subgraph Ingestao["Pipeline de Ingestão"]
-        B1[Extração de conteúdo - PDF → texto]
-        B2[Chunking + Metadata]
-        B3[Embeddings locais - HuggingFace]
-    end
+Fonte do diagrama (mermaid, layout `elk`):
+[Prints/arquitetura-agente-ia-suporte-ead-v0.mmd](Prints/arquitetura-agente-ia-suporte-ead-v0.mmd).
 
-    subgraph Armazenamento["Armazenamento (Postgres)"]
-        C1[(Vector Store - pgvector)]
-        C2[(Cache pós-retrieval - resposta_cache)]
-        C3[(Cache pré-retrieval - resposta_cache_pergunta)]
-    end
+O hit **pré-retrieval** devolve `origem="base"` sem tocar em pgvector, reranker
+nem LLM. O hit **pós-retrieval** vem depois da busca e do rerank e só poupa a
+chamada ao LLM. Uma resposta nova de base grava nas duas camadas. Como a chave do
+cache pré-retrieval não tem os ids dos chunks, cada reingestão
+(`pipeline._indexar_chunks`) limpa a tabela inteira — é a invalidação da camada.
 
-    subgraph Externo["Fontes públicas oficiais (allowlist)"]
-        E1[puc-campinas.edu.br]
-        E2[community.instructure.com/en/kb/]
-    end
-
-    subgraph Agente["Camada do Agente"]
-        D1[Recepção da pergunta - texto]
-        D9{Cache pré-retrieval hit? - pergunta+assunto}
-        D2[Retriever - busca no Vector Store]
-        D5{Retrieval vazio?}
-        D4{Cache pós-retrieval hit? - pergunta+assunto+chunks+modelo}
-        D3[LLM Gemini - resposta com contexto recuperado]
-        D6[Busca externa - allowlist + similaridade]
-        D7[LLM Gemini - síntese com citação de URL]
-        D8[Encaminha para a secretaria]
-        DR["Resposta (origem=base)"]
-    end
-
-    A1 --> B1 --> B2 --> B3 --> C1
-    A2 --> B2
-
-    D1 --> D9
-    D9 -- hit --> C3
-    C3 -- resposta e fontes --> DR
-    D9 -- miss --> D2 --> C1
-    D2 --> D5
-    D5 -- não --> D4
-    D4 -- miss --> D3
-    D3 --> C2
-    D3 --> C3
-    D4 -- hit --> DR
-    D3 --> DR
-    D5 -- sim --> D6
-    D6 --> E1
-    D6 --> E2
-    D6 -- achou --> D7
-    D6 -- nada --> D8
-    D7 -- trechos insuficientes --> D8
-
-    B2 -. reingestão limpa .-> C3
-```
-
-O hit **pré-retrieval** (D9) devolve `origem="base"` sem tocar em pgvector,
-reranker nem LLM. O hit **pós-retrieval** (D4) vem depois da busca e do rerank e
-só poupa a chamada ao LLM. Uma resposta nova de base (D3) grava nas duas camadas.
-Como a chave de C3 não tem os ids dos chunks, cada reingestão
-(`pipeline._indexar_chunks`) limpa C3 inteiro — é a invalidação da camada.
+Antes do retrieval, dois guardrails léxicos: o **guardrail de entrada**
+(injeção/abuso, OWASP LLM Top 10) e a **triagem por assunto** (perguntas de outro
+departamento), os dois com desfecho `origem="encaminhado"`. Depois deles, o
+**mascaramento de PII** (RA/CPF/e-mail/telefone/senha) roda antes de qualquer
+egress (LLM nos EUA, busca externa).
 
 ## Componentes
 
@@ -156,14 +108,9 @@ novo. `CACHE_ENABLED` desliga as duas; `scripts/clear_cache.py` apaga as duas.
   distingue `base` / `web` / `nenhuma`
 
 ## Fora do escopo (por enquanto)
-- Reranker cross-encoder no retrieval (2º estágio, RET-3): encanamento já no
-  código (`app/retrieval/reranker.py`), mas `RERANKER_ENABLED=false` — ligar
-  está travado na suíte de fidelidade. Desenho, relação com o backlog e
-  pré-requisitos em `eval/future_feature/cross-encoder.md`
 - Busca híbrida (BM25 + vetor) — eixo de recall, ortogonal ao reranker
-- Ingestão por web scraping do site da PUC (o fallback busca em tempo real, não
-  indexa)
-- Leitura da página completa dos resultados da busca (hoje só os snippets)
+- Leitura da página completa dos resultados da busca ao vivo (hoje só os snippets;
+  o pré-crawl já indexa o conteúdo inteiro das páginas da allowlist)
 - Interpretação de print/imagem
 - Classificador de intenção / escalonamento para humano
 - Canal de atendimento (WhatsApp, portal, etc.)

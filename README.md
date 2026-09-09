@@ -7,7 +7,20 @@ atendimento em `data/raw/email_modelos/`) e as páginas oficiais pré-indexadas
 pelo crawler da allowlist (`scripts/crawl.py`).
 
 Escopo da v1: base local + páginas da allowlist, sem dados sigilosos do aluno.
-Ver [arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md).
+
+## Arquitetura
+
+![Arquitetura atual do agente](Prints/arquitetura-agente-ia-suporte-ead-v0.png)
+
+Ingestão offline (arquivos locais + páginas da allowlist crawladas) → pgvector;
+runtime por pergunta com guardrail, triagem, mascaramento de PII, retrieval de 2
+estágios (E5 + reranker cross-encoder), cache em duas camadas, cadeia de fallback
+entre 4 provedores de LLM e busca externa restrita; cada resposta gera uma linha
+de telemetria que alimenta o relatório de lacunas, a suíte de eval e o dashboard
+`/revisao`. A lista de componentes e as decisões estão em
+[arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md);
+a fonte do diagrama é
+[Prints/arquitetura-agente-ia-suporte-ead-v0.mmd](Prints/arquitetura-agente-ia-suporte-ead-v0.mmd).
 
 ## Resumo
 
@@ -300,6 +313,8 @@ Suba a API e abra <http://localhost:8000/demo> (a raiz `/` redireciona para lá)
 **sem nenhum recurso externo** — abre numa máquina sem internet e não manda a
 pergunta do aluno para terceiro nenhum.
 
+![Tela /demo com uma resposta ancorada na base](Prints/demo.png)
+
 O que a demo mostra, e por que cada coisa está lá:
 
 - **badge de origem** — o guardrail ficando visível. `base` (verde, material
@@ -415,6 +430,10 @@ distribuição de origem, acerto por grupo, latência p50/p95, tokens por provid
 tendência por dia — e a conferência à mão da fidelidade de cada resposta
 (satisfeito / insatisfeito / pular), gravando o veredito no banco. A expectativa
 de uma pergunta se ajusta ali mesmo.
+
+![Dashboard /revisao — visão geral](Prints/revisao.png)
+
+![/revisao — aba Conferir, uma pergunta por vez](Prints/revisao-conferir.png)
 
 > **`acertou` mede só o ROTEAMENTO.** Ele compara `resultado.origem` com
 > `origem_esperada` — uma resposta que inventa um prazo ou cita a página errada

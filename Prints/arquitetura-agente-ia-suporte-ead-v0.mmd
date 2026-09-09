@@ -1,0 +1,84 @@
+---
+config:
+  layout: elk
+  flowchart:
+    curve: linear
+---
+%% Arquitetura atual — Agente de IA para Suporte Acadêmico EAD (v1)
+%% Fonte do diagrama renderizado em arquitetura-agente-ia-suporte-ead-v0.png
+%% Render (mermaid-cli 11 já traz o plugin de layout elk):
+%%   npx -y @mermaid-js/mermaid-cli -i arquitetura-agente-ia-suporte-ead-v0.mmd \
+%%       -o arquitetura-agente-ia-suporte-ead-v0.png -b white -s 2
+flowchart LR
+    %% ===================== INGESTÃO (offline) =====================
+    subgraph ING["Ingestão — offline · scripts/ingest.py + scripts/crawl.py"]
+        direction TB
+        F1["Arquivos locais · data/raw/&lt;assunto&gt;/<br>PDF · TXT · MD · DOCX · XLSX (modelos de e-mail)"]
+        F3["Páginas oficiais · WEB_ALLOWLIST<br>lista fechada por path — PUC-Campinas · Canvas KB · Teams"]
+        L1["loaders/registry.py — fonte → Document<br>crawl.py: sitemap / seeds filtrados por path_prefixes"]
+        C1["chunker.py — 700/150 · dedup Jaccard<br>id determinístico · metadata (idempotente)"]
+        E1["embeddings locais · multilingual-e5-base<br>CPU, offline, sem cota de API"]
+        F1 --> L1
+        F3 -->|"pré-crawl semanal"| L1
+        L1 --> C1 --> E1
+    end
+
+    %% ===================== ARMAZENAMENTO =====================
+    subgraph DB["PostgreSQL + pgvector — nenhuma infra extra"]
+        direction TB
+        V[("langchain_pg_embedding<br>chunks + vetores + metadata")]
+        CACHE[("resposta_cache · resposta_cache_pergunta<br>cache pós / pré-retrieval")]
+        TEL[("telemetria (JSONB) · 7 d / 90 d eval<br>exemplo_perguntas · revisao_veredictos")]
+    end
+    E1 --> V
+
+    %% ===================== RUNTIME (por pergunta) =====================
+    subgraph RUN["Runtime do agente — POST /v1/ask (FastAPI) · app/agent/responder.py"]
+        direction TB
+        Q["pergunta + X-API-Key<br>rate limit · CORS · normalize"]
+        G{"guardrail léxico<br>OWASP LLM Top 10"}
+        TRI{"triagem por assunto<br>ENCAMINHAMENTOS"}
+        PII["mascara PII antes do egress<br>RA · CPF · e-mail · telefone · senha"]
+        PC{"cache pré-retrieval?"}
+        RET["retrieval — 2 estágios<br>E5 bi-encoder → reranker cross-encoder → corte por limiar"]
+        EMPTY{"contexto útil da base?"}
+        OC{"cache pós-retrieval?"}
+        LLM["LLM — cadeia de fallback (4 provedores)<br>gemini → huggingface → groq → openrouter"]
+        WEB["web_fallback.py — busca ao vivo (raro)<br>DuckDuckGo → revalida allowlist → similaridade → veto do LLM"]
+        SEC["encaminha · secretaria / setor certo"]
+        RESP(["resposta + fontes + origem<br>base · web · encaminhado · nenhuma"])
+
+        Q --> G
+        G -->|"abuso"| SEC
+        G -->|"ok"| TRI
+        TRI -->|"outro departamento"| SEC
+        TRI -->|"é do agente"| PII --> PC
+        PC -->|"hit"| RESP
+        PC -->|"miss"| RET --> EMPTY
+        EMPTY -->|"não"| WEB
+        EMPTY -->|"sim"| OC
+        OC -->|"hit"| RESP
+        OC -->|"miss"| LLM
+        LLM -->|"contexto serve"| RESP
+        LLM -->|"contexto insuficiente"| WEB
+        WEB -->|"achou"| LLM
+        WEB -->|"nada"| SEC
+        SEC --> RESP
+    end
+
+    RET -.->|"busca vetorial"| V
+    PC -.-> CACHE
+    LLM -.->|"grava"| CACHE
+    RESP -->|"1 linha por pergunta"| TEL
+
+    %% ===================== OBSERVABILIDADE / AVALIAÇÃO =====================
+    subgraph OBS["Observabilidade e avaliação"]
+        direction TB
+        LAC["scripts/lacunas.py<br>relatório de lacunas de ingestão"]
+        EVR["scripts/eval_run.py<br>dataset × agente real → canal eval"]
+        REV["/revisao — dashboard Chart.js<br>+ conferência de fidelidade"]
+        DEMO["/demo — frontend estático<br>badge de origem · fontes · latência"]
+    end
+    TEL --> LAC
+    TEL --> REV
+    EVR -->|"canal eval"| TEL
