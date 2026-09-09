@@ -1,9 +1,10 @@
-"""CLI de execução do dataset de avaliação — roda cada pergunta de um JSON
-contra o agente de verdade e salva o resultado (origem esperada vs. obtida).
+"""CLI de execução do dataset de avaliação — roda cada pergunta contra o agente
+de verdade e salva o resultado (origem esperada vs. obtida).
 
-    python -m scripts.eval_run
-    python -m scripts.eval_run eval/perguntas/perguntas.jsonc
-    python -m scripts.eval_run --saida eval/resultados/run1.csv --formato csv
+    python -m scripts.eval_run                        # fonte: banco (exemplo_perguntas)
+    python -m scripts.eval_run --grupo teste2         # só um bloco
+    python -m scripts.eval_run --sem-arquivo          # só telemetria, sem JSON local
+    python -m scripts.eval_run --fonte arquivo eval/perguntas/perguntas.jsonc
 
     # só um trecho do dataset (1-based, inclusivo) — aceita "27-50" ou "27 a 50":
     python -m scripts.eval_run --intervalo 1-6
@@ -12,10 +13,14 @@ contra o agente de verdade e salva o resultado (origem esperada vs. obtida).
     # rodada de calibração recomendada (ver eval/analises/analise-telemetria-2026-08-27.md §10):
     python -m scripts.eval_run --intervalo 26-50 -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
 
-O dataset é um JSONC único (`eval/perguntas/perguntas.jsonc`) com todas as perguntas,
-agrupadas por origem em blocos comentados (`// ...`, estilo JSONC — as linhas de
-comentário são removidas na carga). Cada item tem `grupo` (`teste`/`teste2`/
-`teste3`/`owasp-1`/`owasp-2`); o resumo quebra o acerto por grupo.
+FONTE DO DATASET — desde a migração para o banco, o default é `--fonte db`: a
+tabela `exemplo_perguntas` (semeada de `eval/perguntas/perguntas.jsonc` por
+`python -m scripts.seed_perguntas`) é a fonte VIVA, e é onde uma expectativa
+corrigida pela tela `/revisao` ou por `/v1/perguntas` fica gravada. `--fonte
+arquivo` lê o JSONC direto — para reproduzir uma rodada antiga ou rodar sem a
+tabela nova. Nos dois casos cada item tem `grupo` (`teste`/`teste2`/`teste3`/
+`owasp-1`/`owasp-2`) e o resumo quebra o acerto por grupo. No arquivo, as
+linhas `// ...` são comentário de bloco e saem na carga.
 
 Existe para apoiar a calibração de `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` (e,
 com `--modelo`, comparação de modelo): rode o mesmo dataset antes e depois
@@ -38,9 +43,10 @@ Flags que existem por causa de rate limit / cota do tier gratuito:
   responder com um provider diferente a cada pergunta (o do topo estoura a
   cota no meio da rodada) e o resultado deixa de comparar a mesma coisa. Sem
   `-m`, o script avisa.
-- `--limpar-cache/-c` apaga a `resposta_cache` antes de rodar — sem isso a
-  rodada mede o cache, não o pipeline, e a única pergunta não-cacheada pode
-  derrubar tudo num 413.
+- `--limpar-cache/-c` apaga os dois caches de resposta antes de rodar — sem isso
+  a rodada mede o cache, não o pipeline, e a única pergunta não-cacheada pode
+  derrubar tudo num 413. (O cache pré-retrieval já fica desligado no canal
+  `eval`; `-c` ainda limpa o que o tráfego real tenha deixado na tabela.)
 - `--timeout` define `LLM_TIMEOUT` desta execução, e o default é 20s (não os 30
   do `.env`): com o provider do topo sem cota, cada pergunta queima o timeout
   inteiro antes do fallback. Passe `--timeout 30` para medir com o valor de
@@ -79,6 +85,7 @@ from app.core import pii, telemetry
 from app.core.config import settings
 from app.core.models import Answer, Query
 from app.db import telemetry_store
+from app.db.pre_retrieval_cache import clear_pre_retrieval_cache
 from app.db.response_cache import clear_cache
 from app.db.vector_store import aquecer
 from app.providers.base import TodosProvidersFalharam
@@ -196,6 +203,37 @@ def _carregar_dataset(caminho: Path) -> list[dict]:
     return itens
 
 
+def _carregar_do_banco(grupo: str | None) -> list[dict]:
+    """Dataset a partir da tabela `exemplo_perguntas` (a fonte viva).
+
+    Import tardio: a maioria dos usos do módulo (o seed reaprovita
+    `_carregar_dataset`, os testes de harness) não toca no banco, e
+    `perguntas_store` puxa `vector_store` na cadeia.
+    """
+    from app.db import perguntas_store
+
+    itens = [p.como_item() for p in perguntas_store.listar(grupo=grupo, apenas_ativas=True)]
+    if not itens:
+        alvo = f" no grupo {grupo!r}" if grupo else ""
+        raise typer.BadParameter(
+            f"exemplo_perguntas não tem pergunta ativa{alvo}. Rode "
+            "`python -m scripts.seed_perguntas` ou use --fonte arquivo."
+        )
+    return itens
+
+
+def _filtrar_grupo(itens: list[dict], grupo: str | None) -> list[dict]:
+    if grupo is None:
+        return itens
+    filtrados = [i for i in itens if (i.get("grupo") or "") == grupo]
+    if not filtrados:
+        raise typer.BadParameter(
+            f"nenhum item do grupo {grupo!r}. Grupos: "
+            + ", ".join(sorted({i.get('grupo') or '(sem grupo)' for i in itens}))
+        )
+    return filtrados
+
+
 def _aplicar_intervalo(itens: list[dict], intervalo: str | None) -> tuple[list[dict], int]:
     """Recorta o dataset para [início, fim] (1-based, inclusivo).
 
@@ -235,7 +273,10 @@ def _origens_aceitas(item: dict) -> list[str]:
     casos em que a distinção IMPORTA (PII/injeção: aí `nenhuma` significa que o
     payload chegou ao LLM antes da desistência, e continua sendo divergência).
     """
-    return [item["origem_esperada"], *item.get("origem_tambem_ok", ())]
+    # `or ()` e não um default do `.get`: com `--fonte db` a chave SEMPRE vem,
+    # e vem `None` quando não há alias (`PerguntaExemplo.como_item`, que copia
+    # a convenção do JSONC). Um default só cobriria a chave ausente.
+    return [item["origem_esperada"], *(item.get("origem_tambem_ok") or ())]
 
 
 def _capturar_telemetria() -> list[dict]:
@@ -418,10 +459,24 @@ def _resumo(linhas: list[dict]) -> None:
 def main(
     dataset: Path = typer.Argument(
         Path("eval/perguntas/perguntas.jsonc"),
-        help="Dataset (JSONC) com pergunta/assunto/origem_esperada/grupo.",
+        help="Dataset (JSONC) — usado só com --fonte arquivo.",
+    ),
+    fonte: str = typer.Option(
+        "db", "--fonte",
+        help="`db` (tabela exemplo_perguntas, a fonte viva — default) ou `arquivo` "
+             "(o JSONC do argumento). `arquivo` mantém uma rodada antiga reproduzível "
+             "e roda sem Postgres da tabela nova.",
+    ),
+    grupo: str | None = typer.Option(
+        None, "--grupo", "-g", help="Roda só um bloco do dataset (teste/teste2/owasp-1…)."
     ),
     saida: Path | None = typer.Option(
         None, "--saida", "-o", help="Onde salvar (default: eval/resultados/<timestamp>.json)."
+    ),
+    sem_arquivo: bool = typer.Option(
+        False, "--sem-arquivo",
+        help="Não grava eval/resultados/<timestamp>.json — a rodada fica só na "
+             "telemetria (canal `eval`), que é o que a tela /revisao lê.",
     ),
     formato: str = typer.Option("json", "--formato", "-f", help="json ou csv."),
     modelo: str | None = typer.Option(
@@ -429,7 +484,7 @@ def main(
     ),
     limpar_cache: bool = typer.Option(
         False, "--limpar-cache", "-c",
-        help="Apaga a resposta_cache antes de rodar (sem isso a rodada mede o cache).",
+        help="Apaga os caches de resposta antes de rodar (sem isso a rodada mede o cache).",
     ),
     timeout: float = typer.Option(
         20.0, "--timeout",
@@ -446,8 +501,21 @@ def main(
 ) -> None:
     if formato not in ("json", "csv"):
         raise typer.BadParameter("--formato deve ser 'json' ou 'csv'.")
+    if fonte not in ("db", "arquivo"):
+        raise typer.BadParameter("--fonte deve ser 'db' ou 'arquivo'.")
 
-    itens = _carregar_dataset(dataset)
+    if fonte == "db":
+        itens = _carregar_do_banco(grupo)
+        typer.secho(
+            f"fonte: exemplo_perguntas (banco) — {len(itens)} pergunta(s) ativa(s)"
+            + (f" no grupo {grupo!r}" if grupo else ""),
+            fg=typer.colors.CYAN, err=True,
+        )
+    else:
+        itens = _filtrar_grupo(_carregar_dataset(dataset), grupo)
+        typer.secho(f"fonte: {dataset} (arquivo) — {len(itens)} item(ns)",
+                    fg=typer.colors.CYAN, err=True)
+
     total_dataset = len(itens)
     itens, deslocamento = _aplicar_intervalo(itens, intervalo)
     if intervalo:
@@ -483,7 +551,7 @@ def main(
     telemetry.set_canal(_CANAL)
 
     if limpar_cache:
-        removidos = clear_cache()
+        removidos = clear_cache() + clear_pre_retrieval_cache()
         typer.secho(f"cache limpo: {removidos} entrada(s) removida(s).",
                     fg=typer.colors.CYAN, err=True)
 
@@ -495,12 +563,19 @@ def main(
 
     linhas = _rodar(itens, modelo, registros, deslocamento)
 
-    if saida is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        saida = Path("eval/resultados") / f"{timestamp}.{formato}"
-    _salvar(linhas, saida, formato)
+    if sem_arquivo:
+        typer.secho(
+            "\n--sem-arquivo: resultado só na telemetria (canal `eval`). "
+            "Abra /revisao para conferir.",
+            fg=typer.colors.CYAN,
+        )
+    else:
+        if saida is None:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            saida = Path("eval/resultados") / f"{timestamp}.{formato}"
+        _salvar(linhas, saida, formato)
+        typer.secho(f"\nResultado salvo em {saida}", fg=typer.colors.CYAN)
 
-    typer.secho(f"\nResultado salvo em {saida}", fg=typer.colors.CYAN)
     _resumo(linhas)
 
 

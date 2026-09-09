@@ -1,64 +1,33 @@
-# Arquitetura — Agente de IA para Suporte ao Aluno EAD (v0 — modelo inicial simplificado)
+# Arquitetura — Agente de IA para Suporte ao Aluno EAD (v1)
 
 ## Visão geral
 
-Modelo inicial simplificado: RAG (Retrieval-Augmented Generation) consumindo
-arquivos PDF e texto como base de conhecimento, com um fallback de busca em
-páginas públicas oficiais quando o retrieval não encontra nada. Sem ingestão por
-scraping, interpretação de print ou escalonamento. Este documento é o diagrama e a lista
-de componentes; o estado de implementação, contagem de testes e instruções de
-uso ficam no [README.md](README.md) — mantenha os dois em sincronia ao mexer
-na estrutura.
+RAG (Retrieval-Augmented Generation) sobre uma base local (PDF, texto, DOCX e a
+planilha de modelos de e-mail) somada às páginas oficiais da `WEB_ALLOWLIST`
+pré-indexadas pelo crawler (`scripts/crawl.py`); quando nem a base nem o conteúdo
+crawlado cobrem a pergunta, um fallback faz busca ao vivo restrita à mesma
+allowlist antes de encaminhar para a secretaria. Fora do escopo: interpretação de
+print, APIs em tempo real e escalonamento para humano. Este documento é o
+diagrama e a lista de componentes; o estado de implementação, contagem de testes
+e instruções de uso ficam no [README.md](README.md) — mantenha os dois em
+sincronia ao mexer na estrutura.
 
-```mermaid
-flowchart TD
-    subgraph Fontes["Fontes de Dados"]
-        A1[Arquivos PDF]
-        A2[Arquivos de texto/.md/.txt]
-    end
+![Arquitetura atual do agente](Prints/arquitetura-agente-ia-suporte-ead-v0.png)
 
-    subgraph Ingestao["Pipeline de Ingestão"]
-        B1[Extração de conteúdo - PDF → texto]
-        B2[Chunking + Metadata]
-        B3[Embeddings locais - HuggingFace]
-    end
+Fonte do diagrama (mermaid, layout `elk`):
+[Prints/arquitetura-agente-ia-suporte-ead-v0.mmd](Prints/arquitetura-agente-ia-suporte-ead-v0.mmd).
 
-    subgraph Armazenamento["Armazenamento (Postgres)"]
-        C1[(Vector Store - pgvector)]
-        C2[(Cache de resposta - resposta_cache)]
-    end
+O hit **pré-retrieval** devolve `origem="base"` sem tocar em pgvector, reranker
+nem LLM. O hit **pós-retrieval** vem depois da busca e do rerank e só poupa a
+chamada ao LLM. Uma resposta nova de base grava nas duas camadas. Como a chave do
+cache pré-retrieval não tem os ids dos chunks, cada reingestão
+(`pipeline._indexar_chunks`) limpa a tabela inteira — é a invalidação da camada.
 
-    subgraph Externo["Fontes públicas oficiais (allowlist)"]
-        E1[puc-campinas.edu.br]
-        E2[community.instructure.com/en/kb/]
-    end
-
-    subgraph Agente["Camada do Agente"]
-        D1[Recepção da pergunta - texto]
-        D2[Retriever - busca no Vector Store]
-        D5{Retrieval vazio?}
-        D4{Cache hit? - assunto+confiança+chunks}
-        D3[LLM Gemini - resposta com contexto recuperado]
-        D6[Busca externa - allowlist + similaridade]
-        D7[LLM Gemini - síntese com citação de URL]
-        D8[Encaminha para a secretaria]
-    end
-
-    A1 --> B1 --> B2 --> B3 --> C1
-    A2 --> B2
-
-    D1 --> D2 --> C1
-    D2 --> D5
-    D5 -- não --> D4
-    D4 -- não --> D3 --> C2
-    D4 -- sim --> C2
-    D5 -- sim --> D6
-    D6 --> E1
-    D6 --> E2
-    D6 -- achou --> D7
-    D6 -- nada --> D8
-    D7 -- trechos insuficientes --> D8
-```
+Antes do retrieval, dois guardrails léxicos: o **guardrail de entrada**
+(injeção/abuso, OWASP LLM Top 10) e a **triagem por assunto** (perguntas de outro
+departamento), os dois com desfecho `origem="encaminhado"`. Depois deles, o
+**mascaramento de PII** (RA/CPF/e-mail/telefone/senha) roda antes de qualquer
+egress (LLM nos EUA, busca externa).
 
 ## Componentes
 
@@ -76,26 +45,44 @@ flowchart TD
 
 ### 3. Agente (runtime)
 - Recebe a pergunta do usuário (texto)
-- Busca os chunks mais relevantes no vector store (retrieval)
+- **Cache pré-retrieval** (componente 4a): antes do retrieval, checa a chave
+  `pergunta normalizada + assunto`. Em hit, devolve a resposta da base sem
+  tocar em pgvector, reranker nem LLM
+- Em miss, busca os chunks mais relevantes no vector store (retrieval de 2
+  estágios: bi-encoder E5 → reranker cross-encoder)
 - Se nenhum chunk recuperado passa do limiar de relevância, não chama o LLM
   com contexto vazio: aciona a busca externa restrita (componente 5)
-- Antes de chamar o LLM, verifica o cache de resposta pela chave
-  `assunto + confiança + ids dos chunks recuperados` (não pelo texto da
-  pergunta — ver componente 4); em hit, devolve a resposta cacheada com as
-  fontes do retrieval atual
+- Antes de chamar o LLM, verifica o **cache pós-retrieval** (componente 4b)
+  pela chave `pergunta + assunto + ids dos chunks + modelo`; em hit, devolve a
+  resposta cacheada com as fontes do retrieval atual
 - Em miss, envia pergunta + contexto recuperado para o LLM (Gemini) gerar a
-  resposta, e grava o resultado no cache
+  resposta, e grava o resultado **nas duas camadas de cache**
 
-### 4. Cache de resposta
-- Evita chamar o LLM de novo quando perguntas diferentes (inclusive
-  paráfrases) recuperam o mesmo conjunto de chunks no retrieval
-- Chave = `assunto + nível de confiança (is_exact_match) + ids ordenados dos
-  chunks recuperados` — não o texto da pergunta, para não depender de
-  similaridade textual/embedding e não arriscar falso-positivo entre
-  perguntas parecidas mas com resposta diferente
-- Guardado numa tabela própria (`resposta_cache`) no mesmo Postgres da
-  ingestão — nenhum serviço novo. Reingerir um arquivo alterado muda os ids
-  dos chunks recuperados e invalida a chave automaticamente
+### 4. Cache de resposta (duas camadas)
+
+**4a. Pré-retrieval (`resposta_cache_pergunta`)**
+- Chave = `pergunta normalizada + assunto`, sem os ids dos chunks
+- Um hit pula o pipeline inteiro (pgvector + cross-encoder + LLM), não só a
+  chamada ao LLM
+- Só o desfecho `origem="base"` bem-sucedido é gravado (veto de contexto, web e
+  encaminhamento não entram)
+- Como a chave não sabe que a base mudou, a invalidação é **explícita**: toda
+  reingestão (`pipeline._indexar_chunks`, o choke point único de escrita no
+  índice), o `remove_ingested` e o prune do `crawl` limpam a tabela
+- Desligado no canal `eval` (a suíte precisa medir retrieval + rerank) e com
+  `--modelo`/`modelo` (a chave não carrega o modelo)
+- Na telemetria: `cache_pre_retrieval=true`, com `ms_retrieve`/`ms_rerank` nulos
+
+**4b. Pós-retrieval (`resposta_cache`)**
+- Chave = `pergunta + assunto + ids ordenados dos chunks recuperados + modelo`
+- Um hit evita só a chamada ao LLM — a busca e o rerank já rodaram
+- Reingerir um arquivo alterado muda os ids dos chunks recuperados e invalida a
+  chave automaticamente, sem tabela de invalidação
+- A pergunta entra na chave (desde T2.4) para não servir a resposta de uma
+  pergunta à outra que por acaso recuperou os mesmos chunks
+
+Ambas ficam em tabela própria no mesmo Postgres da ingestão — nenhum serviço
+novo. `CACHE_ENABLED` desliga as duas; `scripts/clear_cache.py` apaga as duas.
 
 ### 5. Fallback de busca externa
 - Acionado **apenas** no ramo em que o retrieval volta vazio: as perguntas que a
@@ -114,21 +101,16 @@ flowchart TD
   responderia com confiança aparente e conteúdo errado
 - Qualquer falha da busca (rate limit, mudança no HTML do buscador) degrada para
   o encaminhamento à secretaria — nunca vira erro para o usuário
-- Sem cache: a chave do componente 4 depende de ids de chunk, que não existem
-  aqui, e conteúdo externo muda sem aviso
+- Sem cache: a chave do 4b depende de ids de chunk, que não existem aqui, e o 4a
+  só grava o desfecho `origem="base"`; além disso conteúdo externo muda sem aviso
 - `Answer.grounded` continua `False` quando a web responde (a informação não
   estava na base — sinal de documento faltando na ingestão); `Answer.origem`
   distingue `base` / `web` / `nenhuma`
 
 ## Fora do escopo (por enquanto)
-- Reranker cross-encoder no retrieval (2º estágio, RET-3): encanamento já no
-  código (`app/retrieval/reranker.py`), mas `RERANKER_ENABLED=false` — ligar
-  está travado na suíte de fidelidade. Desenho, relação com o backlog e
-  pré-requisitos em `eval/future_feature/cross-encoder.md`
 - Busca híbrida (BM25 + vetor) — eixo de recall, ortogonal ao reranker
-- Ingestão por web scraping do site da PUC (o fallback busca em tempo real, não
-  indexa)
-- Leitura da página completa dos resultados da busca (hoje só os snippets)
+- Leitura da página completa dos resultados da busca ao vivo (hoje só os snippets;
+  o pré-crawl já indexa o conteúdo inteiro das páginas da allowlist)
 - Interpretação de print/imagem
 - Classificador de intenção / escalonamento para humano
 - Canal de atendimento (WhatsApp, portal, etc.)
@@ -168,15 +150,17 @@ agente-suporte-ead/
 │   │   ├── chunker.py                # divide em chunks + content_hash/chunk_id (função pura)
 │   │   └── pipeline.py               # orquestra load -> chunk -> embed -> indexa (idempotente)
 │   ├── retrieval/
-│   │   └── retriever.py              # busca por similaridade + filtro por assunto + is_exact_match
+│   │   ├── retriever.py              # busca por similaridade (2 estágios) + filtro por assunto
+│   │   └── reranker.py               # 2º estágio: cross-encoder reordena os candidatos do E5
 │   ├── agent/
 │   │   ├── preprocess.py             # normaliza a Query (ponto de entrada p/ anexos no futuro)
 │   │   ├── prompts.py                 # templates de prompt (base, alta confiança e web)
 │   │   ├── web_fallback.py            # busca externa restrita à allowlist de domínios oficiais
-│   │   └── responder.py               # orquestra retrieval -> cache -> prompt -> LLM
+│   │   └── responder.py               # orquestra pré-cache -> retrieval -> pós-cache -> prompt -> LLM
 │   └── db/
 │       ├── vector_store.py            # conexão com pgvector + operações de schema da ingestão
-│       └── response_cache.py          # cache de resposta por conjunto de chunks (mesmo Postgres)
+│       ├── response_cache.py          # cache PÓS-retrieval — por pergunta + assunto + chunks
+│       └── pre_retrieval_cache.py     # cache PRÉ-retrieval — por pergunta + assunto (invalidado na reingestão)
 │
 ├── data/
 │   └── raw/
@@ -191,7 +175,8 @@ agente-suporte-ead/
 ├── tests/
 │   ├── test_chunker.py                # chunking, content_hash, chunk_id determinístico
 │   ├── test_retrieval.py              # corte por limiar, filtro por assunto, is_exact_match
-│   ├── test_responder.py              # guardrail, prompt de alta confiança, hit/miss de cache
+│   ├── test_responder.py              # guardrail, prompt de alta confiança, hit/miss dos dois caches
+│   ├── test_pre_retrieval_cache.py    # store do cache pré-retrieval (round-trip de fontes, INF-11)
 │   └── test_web_fallback.py           # allowlist, corte por similaridade, blocklist, degradação
 │
 ├── docker-compose.yml                 # Postgres + pgvector

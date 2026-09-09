@@ -43,6 +43,7 @@ from langchain_core.documents import Document
 
 from app.agent.web_fallback import fonte_permitida
 from app.core.config import WEB_ALLOWLIST, FonteWeb
+from app.db.pre_retrieval_cache import clear_pre_retrieval_cache
 from app.db.vector_store import delete_by_source, get_vector_store, list_web_sources
 from app.ingestion.pipeline import ingest_documents
 
@@ -316,6 +317,11 @@ def _podar_orfas(
         return {"orfas": len(orfas), "chunks_podados": 0}
 
     removidos = sum(delete_by_source(store, sp) for sp, _ in orfas)
+    if removidos:
+        # A base mudou fora do caminho de ingestão (que já limpa em
+        # `pipeline._indexar_chunks`): invalida o cache pré-retrieval, cuja chave
+        # não tem ids de chunk. Ver app/db/pre_retrieval_cache.py.
+        clear_pre_retrieval_cache(store)
     return {"orfas": len(orfas), "chunks_podados": removidos}
 
 

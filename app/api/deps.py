@@ -13,7 +13,7 @@ from secrets import compare_digest
 from fastapi import Depends, Request, Security
 from fastapi.security import APIKeyHeader
 
-from app.api.errors import NaoAutenticado
+from app.api.errors import NaoAutenticado, SemPermissao
 from app.api.ratelimit import get_rate_limiter
 from app.core.config import settings
 from app.db.vector_store import get_vector_store, list_assuntos
@@ -74,6 +74,30 @@ def get_consumidor(chave: str | None = Security(api_key_header)) -> str:
         raise NaoAutenticado("Chave de API inválida.")
 
     return encontrado
+
+
+def consumidor_de_escrita_de_avaliacao(consumidor: str = Depends(get_consumidor)) -> str:
+    """Autentica E exige que o consumidor seja o de escrita de avaliação.
+
+    Escrever em `/v1/perguntas` muda o dataset que decide se uma rodada passa
+    ou falha. A leitura serve a tela de revisão e vale para qualquer integração
+    autenticada; a escrita, não — em especial não para a chave da demo, que é
+    pública no HTML. `PERGUNTAS_CONSUMIDOR_ESCRITA` nomeia quem pode.
+
+    `API_AUTH_ENABLED=false` (só desenvolvimento local) já devolve "anonimo" de
+    `get_consumidor` e libera tudo — coerente com o resto da borda.
+    """
+    if not settings.api_auth_enabled:
+        return consumidor
+    if consumidor != settings.perguntas_consumidor_escrita:
+        logger.warning(
+            "consumidor %r tentou escrever em /v1/perguntas (permitido: %r)",
+            consumidor, settings.perguntas_consumidor_escrita,
+        )
+        raise SemPermissao(
+            "Este consumidor não pode alterar o dataset de avaliação."
+        )
+    return consumidor
 
 
 def consumidor_com_rate_limit(consumidor: str = Depends(get_consumidor)) -> str:

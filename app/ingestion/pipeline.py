@@ -7,6 +7,7 @@ from pathlib import Path
 from langchain_core.documents import Document
 
 from app.core.config import DATA_RAW_DIR
+from app.db.pre_retrieval_cache import clear_pre_retrieval_cache
 from app.db.vector_store import (
     delete_by_source,
     existing_content_hashes,
@@ -70,6 +71,15 @@ def _indexar_chunks(chunks: list[Document], source_path: str) -> tuple[int, int]
 
     if novos:
         store.add_documents(novos, ids=[chunk_id(c) for c in novos])
+
+    # Invalida o cache PRÉ-RETRIEVAL: a chave dele (`pergunta + assunto`) não tem
+    # os ids dos chunks, então nada o invalida sozinho quando a base muda (o
+    # cache pós-retrieval consegue isso de graça pela troca de id). Esta é a
+    # invalidação — o choke point único de escrita no índice. Limpeza total, não
+    # por `source_path`: uma resposta pode ter vindo de qualquer combinação de
+    # documentos. Ver `app/db/pre_retrieval_cache.py`.
+    clear_pre_retrieval_cache(store)
+
     return len(novos), len(chunks) - len(novos)
 
 

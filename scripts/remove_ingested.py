@@ -18,6 +18,7 @@ inteiro de uma vez.
 
 import typer
 
+from app.db.pre_retrieval_cache import clear_pre_retrieval_cache
 from app.db.vector_store import (
     delete_by_assunto,
     delete_by_source,
@@ -128,6 +129,16 @@ def _confirmar_e_remover(rows, *, resumo: str, yes: bool, remover, rotulo: str =
 
     removidos = remover()
     typer.secho(f"{removidos} chunk(s) removido(s).", fg=typer.colors.GREEN)
+
+    # A base mudou: o cache PRÉ-RETRIEVAL não se invalida sozinho (chave sem ids
+    # de chunk — ver app/db/pre_retrieval_cache.py e a limpeza equivalente em
+    # ingestion.pipeline._indexar_chunks). Sem isto, uma pergunta cujo documento
+    # acabou de ser removido continuaria sendo respondida a partir dele.
+    if removidos:
+        apagados = clear_pre_retrieval_cache()
+        typer.secho(
+            f"cache pré-retrieval limpo: {apagados} entrada(s).", fg=typer.colors.CYAN
+        )
 
 
 if __name__ == "__main__":

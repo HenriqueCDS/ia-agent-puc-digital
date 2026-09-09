@@ -7,7 +7,50 @@ atendimento em `data/raw/email_modelos/`) e as páginas oficiais pré-indexadas
 pelo crawler da allowlist (`scripts/crawl.py`).
 
 Escopo da v1: base local + páginas da allowlist, sem dados sigilosos do aluno.
-Ver [arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md).
+
+## Arquitetura
+
+![Arquitetura atual do agente](Prints/arquitetura-agente-ia-suporte-ead-v0.png)
+
+Ingestão offline (arquivos locais + páginas da allowlist crawladas) → pgvector;
+runtime por pergunta com guardrail, triagem, mascaramento de PII, retrieval de 2
+estágios (E5 + reranker cross-encoder), cache em duas camadas, cadeia de fallback
+entre 4 provedores de LLM e busca externa restrita; cada resposta gera uma linha
+de telemetria que alimenta o relatório de lacunas, a suíte de eval e o dashboard
+`/revisao`. A lista de componentes e as decisões estão em
+[arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md);
+a fonte do diagrama é
+[Prints/arquitetura-agente-ia-suporte-ead-v0.mmd](Prints/arquitetura-agente-ia-suporte-ead-v0.mmd).
+
+## Resumo
+
+Projeto pessoal de um **RAG de produção** (não um notebook de demo): pipeline de
+ingestão idempotente, retrieval com pgvector, cadeia de fallback entre 4
+provedores de LLM, e uma API FastAPI pronta para plugar no AVA da instituição.
+
+**Stack:** Python, FastAPI, PostgreSQL + pgvector, `sentence-transformers`
+(embeddings `e5-base` locais — sem depender de cota de API), `pydantic-settings`,
+Docker Compose, GitHub Actions. Provedores: Gemini / HuggingFace / Groq /
+OpenRouter atrás de uma interface única.
+
+**O que este projeto tenta demonstrar:**
+
+| Tema | Onde ver |
+|---|---|
+| Design para *custo* e *falha* de LLM | cadeia de fallback (erro de pedido propaga, erro de provedor cai p/ o próximo); cache por conjunto de chunks; teto diário + rate limit por consumidor |
+| Segurança de um agente | guardrail léxico (OWASP LLM Top 10) + triagem por assunto + allowlist fechada por *path*, não por domínio; camadas no `SYSTEM` atrás do léxico |
+| LGPD / privacidade | pergunta nunca é gravada (só hash); mascaramento de PII **antes do egress** (LLM nos EUA, busca no DuckDuckGo) e antes da persistência |
+| Observabilidade | 1 linha JSON por pergunta (token, latência por etapa, origem da resposta); telemetria vira relatório de lacunas de ingestão |
+| Idempotência e evolução de schema | id determinístico por chunk; coluna `vector` sem dimensão fixa; metadata desde o dia 1 p/ conviver com scraping/API depois |
+| Rigor de avaliação | dataset de eval versionado rodado contra o agente real; armadilhas documentadas (cache mascara o pipeline; fallback troca o gerador no meio da rodada; ~12% das perguntas oscilam pela busca externa) |
+
+**Números:** 602 testes que rodam **sem banco, sem chave de API e sem rede**
+(dublês de vector store, LLM, cache, busca e relógio); validado ponta a ponta
+contra Postgres real com 1289 chunks.
+
+**Boa porta de entrada para leitura:** a seção
+[Decisões e trade-offs](#decisões-e-trade-offs) — cada bullet é uma escolha com o
+custo do outro lado explicitado.
 
 ## Estado atual do projeto
 
@@ -112,7 +155,7 @@ estão em `ENCAMINHAMENTOS` (`app/core/config.py`); ver `app/agent/triagem.py`.
 substitui as defesas do pipeline (RAG fechado no CONTEXTO, `SYSTEM_WEB`,
 allowlist), é a 1ª linha que evita mandar a entrada hostil para um LLM ou para a
 busca externa. Liga/desliga com `GUARDRAIL_ENABLED`; ver `app/agent/guardrail.py`
-e `eval/analise-telemetria-2026-08-27.md`.
+e `eval/analises/analise-telemetria-2026-08-27.md`.
 
 O léxico não pega paráfrase, outro idioma nem injeção **indireta** (payload
 dentro de um chunk). Camadas atrás dele: (a) `SYSTEM`/`SYSTEM_WEB` tratam o
@@ -123,15 +166,26 @@ recuperados e marca `Registro.contexto_suspeito` — medição, não bloqueio, p
 o corpus é curado (TRI-3); (c) `eh_recusa_de_compliance` converte a recusa do
 próprio modelo no encaminhamento.
 
-**Cache de resposta** — perguntas que recuperam o mesmo conjunto de chunks no
-retrieval (mesmo sendo uma paráfrase uma da outra) reaproveitam a resposta já
-gerada, sem chamar o Gemini de novo. A chave não é o texto da pergunta, é
-`assunto + nível de confiança + ids dos chunks recuperados`; assim, reingerir
-um arquivo alterado muda os ids e invalida o cache sozinho, sem lógica extra de
-limpeza. Guardado numa tabela própria (`resposta_cache`) no mesmo Postgres da
-ingestão — nenhuma infra nova. Liga/desliga com `CACHE_ENABLED`
-(`app/core/config.py`); ver `app/agent/responder.py` (`_cache_key`) e
-`app/db/response_cache.py`.
+**Cache de resposta — duas camadas.** Uma pergunta já respondida pela base não
+paga o pipeline de novo, e o quanto é poupado depende de qual camada responde:
+
+- **Pré-retrieval** (`resposta_cache_pergunta`) — chave `pergunta normalizada +
+  assunto`, **sem** os ids dos chunks. Um hit é checado antes do `retrieve()` e
+  devolve a resposta sem tocar em pgvector, cross-encoder nem LLM — mata o
+  pipeline inteiro. Como a chave não sabe que a base mudou, a invalidação é
+  explícita: toda reingestão (`ingestion.pipeline._indexar_chunks`), o
+  `remove_ingested` e o prune do `crawl` limpam a tabela. Desligado no canal
+  `eval` (a suíte precisa medir retrieval + rerank) e com `--modelo`/`modelo`.
+  Liga/desliga com `PRE_RETRIEVAL_CACHE_ENABLED`; ver `app/db/pre_retrieval_cache.py`.
+- **Pós-retrieval** (`resposta_cache`) — chave `pergunta + assunto + ids dos
+  chunks recuperados + modelo`. Um hit poupa só a chamada ao LLM (a busca e o
+  rerank já rodaram). Reingerir um arquivo alterado muda os ids e invalida esta
+  camada sozinho, sem limpeza. Ver `app/agent/responder.py` (`_cache_key`) e
+  `app/db/response_cache.py`.
+
+As duas gravam na mesma resposta nova, e as duas ficam em tabela própria no
+Postgres da ingestão — nenhuma infra nova. `CACHE_ENABLED` (`app/core/config.py`)
+desliga ambas de uma vez; `scripts/clear_cache.py` apaga as duas.
 
 **Entrypoints** — `scripts/ingest.py` (indexa um ou mais assuntos) e
 `scripts/ask.py` (pergunta, com `--debug` para inspecionar os chunks e scores).
@@ -155,7 +209,7 @@ libera a requisição com WARNING, não derruba o agente.
 **Infra** — `docker-compose.yml` com `pgvector/pgvector:pg16`; configuração via
 `.env` (`pydantic-settings`).
 
-**Testes** — 388 testes cobrindo chunking, ids determinísticos, corte por
+**Testes** — 602 testes cobrindo chunking, ids determinísticos, corte por
 limiar, filtro por assunto, formatação de citação, o guardrail do agente, o
 hit/miss do cache de resposta, a cobertura de loader de toda fonte em
 `data/raw/` (`test_ingestao`), o crawler da allowlist (parsing de sitemap,
@@ -173,7 +227,7 @@ de vector store, de LLM, de cache, de busca e de relógio.
 O caminho completo `ingest → embeddings locais (e5-base) → pgvector →
 retrieve → LLM` já rodou contra um banco real e um corpus de 3 PDFs (1289
 chunks) — ver a rodada de avaliação em
-[`eval/analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md).
+[`eval/analises/analise-telemetria-2026-08-26.md`](eval/analises/analise-telemetria-2026-08-26.md).
 
 O backlog priorizado de calibração e correções — com histórico e o que já foi
 aplicado — está em [`eval/backlog-problemas.md`](eval/backlog-problemas.md).
@@ -258,6 +312,8 @@ Suba a API e abra <http://localhost:8000/demo> (a raiz `/` redireciona para lá)
 É um arquivo HTML estático (`app/static/index.html`), sem build, sem framework e
 **sem nenhum recurso externo** — abre numa máquina sem internet e não manda a
 pergunta do aluno para terceiro nenhum.
+
+![Tela /demo com uma resposta ancorada na base](Prints/demo.png)
 
 O que a demo mostra, e por que cada coisa está lá:
 
@@ -346,21 +402,38 @@ vez de devolver uma janela vazia que pareceria "semana tranquila".
 
 ### Avaliação de qualidade (eval)
 
-Dataset único de perguntas com origem esperada (`eval/perguntas/perguntas.jsonc`,
-125 itens agrupados por origem em blocos comentados) rodado contra o agente de
-verdade, para calibrar `CHUNK_SIZE`/`RELEVANCE_THRESHOLD` e comparar modelo:
+O dataset vive na tabela `exemplo_perguntas` do Postgres. `eval/perguntas/perguntas.jsonc`
+(agrupado por origem em blocos comentados) é a **semente** — versionada, com
+histórico em diff; a fonte **viva** é o banco, onde uma expectativa corrigida
+pela tela `/revisao` ou por `/v1/perguntas` fica gravada.
 
 ```bash
-# -c limpa a resposta_cache; -m fixa um provider (sem fallback); --timeout encurta o tempo morto
-# --intervalo roda só um trecho (1-based, inclusivo) — divide a rodada p/ não estourar a cota
-python -m scripts.eval_run --intervalo 26-50 -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
-python -m scripts.eval_report --dias 1 --detalhe   # audita o que ficou gravado
+python -m scripts.seed_perguntas        # UPSERT idempotente do JSONC → exemplo_perguntas
+python -m scripts.seed_perguntas --dry-run
+
+# -c limpa os dois caches de resposta; -m fixa um provider (sem fallback); --timeout encurta o tempo morto
+# --grupo roda só um bloco; --intervalo roda só um trecho (1-based, inclusivo)
+python -m scripts.eval_run --grupo teste2 -m huggingface:meta-llama/Llama-3.3-70B-Instruct -c --timeout 15
+python -m scripts.eval_run --sem-arquivo          # resultado só na telemetria (canal eval)
+python -m scripts.eval_report --detalhe           # audita o que ficou gravado
 ```
 
-`eval_run` roda o dataset e salva o resultado num arquivo local
-(`eval/resultados/<timestamp>.json`); `eval_report` lê a **mesma** telemetria
-que `scripts.lacunas` usa (canal `eval`), o que permite comparar rodadas
+`eval_run` lê do banco (`--fonte arquivo` volta ao JSONC, p/ reproduzir uma
+rodada antiga), roda o dataset e — por padrão — salva o resultado num arquivo
+local (`eval/resultados/<timestamp>.json`) **e** na telemetria. `eval_report` lê
+a **mesma** telemetria que `scripts.lacunas` usa (canal `eval`, retenção própria
+de `TELEMETRY_RETENTION_DAYS_EVAL`, 90 dias), o que permite comparar rodadas
 passadas sem reexecutar nada.
+
+**`/revisao`** (com `REVISAO_ENABLED=true`) serve um dashboard dessa telemetria —
+distribuição de origem, acerto por grupo, latência p50/p95, tokens por provider,
+tendência por dia — e a conferência à mão da fidelidade de cada resposta
+(satisfeito / insatisfeito / pular), gravando o veredito no banco. A expectativa
+de uma pergunta se ajusta ali mesmo.
+
+![Dashboard /revisao — visão geral](Prints/revisao.png)
+
+![/revisao — aba Conferir, uma pergunta por vez](Prints/revisao-conferir.png)
 
 > **`acertou` mede só o ROTEAMENTO.** Ele compara `resultado.origem` com
 > `origem_esperada` — uma resposta que inventa um prazo ou cita a página errada
@@ -369,21 +442,24 @@ passadas sem reexecutar nada.
 > os três scores do retrieval (`score_top`/`score_min`/`score_mean`), os flags de
 > veto (`base_insuficiente`, `web_insuficiente`, `veto_escapou`) e o `criterio` de
 > conferência manual do dataset. O arquivo é a base da revisão, não o veredito —
-> ver [`eval/plano-testes-2026-08-28.md`](eval/plano-testes-2026-08-28.md) §1.
+> ver [`eval/analises/analise-telemetria-2026-08-28.md`](eval/analises/analise-telemetria-2026-08-28.md).
 >
 > Duas colunas com nomes parecidos, de propósito: `fontes_resposta`/`score_fonte_top`
 > são as fontes **da resposta** (vazias quando a origem é `nenhuma`/`encaminhado`);
 > `chunks_recuperados`/`score_top` são o que o **retrieval** trouxe (quase sempre 5).
 
 As flags existem por causa de armadilhas achadas
-nas rodadas reais ([`analise-telemetria-2026-08-26.md`](eval/analise-telemetria-2026-08-26.md)
-§6, [`-2026-08-27.md`](eval/analise-telemetria-2026-08-27.md) §10):
+nas rodadas reais ([`analise-telemetria-2026-08-26.md`](eval/analises/analise-telemetria-2026-08-26.md)
+§6, [`-2026-08-27.md`](eval/analises/analise-telemetria-2026-08-27.md) §10):
 
-- **Cache mascara o pipeline.** Uma pergunta já respondida antes serve do
-  `resposta_cache` sem tocar retrieval nem LLM — uma rodada assim não mede
-  ajuste nenhum em `CHUNK_SIZE`/`RELEVANCE_THRESHOLD`, e a única pergunta
-  não-cacheada (se for a que gera um prompt grande) pode derrubar a rodada num
-  413. Use `-c`.
+- **Cache mascara o pipeline.** Uma pergunta já respondida antes serve do cache
+  sem tocar no LLM — e, se bater no cache **pré-retrieval**, sem tocar nem em
+  pgvector nem no rerank. Uma rodada assim não mede ajuste nenhum em
+  `CHUNK_SIZE`/`RELEVANCE_THRESHOLD`, e a única pergunta não-cacheada (se for a
+  que gera um prompt grande) pode derrubar a rodada num 413. Use `-c` (limpa as
+  duas camadas). O cache pré-retrieval também fica **desligado no canal `eval`**,
+  então a 2ª rodada da suíte ainda exercita retrieval + rerank; só o
+  `resposta_cache` sobrevive a ela de propósito (a 1ª popula, a 2ª confirma).
 - **A cadeia de fallback troca o gerador no meio da rodada.** Sem `--modelo`,
   a cota do tier gratuito (Gemini: 20 req/dia) estoura no meio e as perguntas
   seguintes saem de outro provider — a rodada compara modelos, não configs. Sem
@@ -440,8 +516,8 @@ Responde às quatro perguntas que importam para eficiência:
 
 | Pergunta | Campos |
 |---|---|
-| Quanto custa? | `input_tokens`, `output_tokens`, `cache_hit` (hit = zero token de API) |
-| Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_rerank` (2º estágio do retrieval, subconjunto de `ms_retrieve`), `ms_llm` (rede), `ms_web` (rede lenta) |
+| Quanto custa? | `input_tokens`, `output_tokens`, `cache_hit` (hit = zero token de API), `cache_pre_retrieval` (hit que também pulou pgvector + rerank) |
+| Onde está a lentidão? | `ms_retrieve` (CPU local), `ms_rerank` (2º estágio do retrieval, subconjunto de `ms_retrieve`), `ms_llm` (rede), `ms_web` (rede lenta) — todos nulos num hit `cache_pre_retrieval` |
 | O guardrail dispara quanto? | `origem` = `base` / `web` / `encaminhado` / `nenhuma`, `base_insuficiente`, `web_insuficiente` |
 | A qualidade caiu? | `n_chunks`, `score_top`/`score_min`/`score_mean` (dispersão do top-k), `score_top_bruto` (score de E5 antes do rerank, quando `reranker_aplicado`) ao longo do tempo |
 
@@ -521,11 +597,13 @@ nomeia por perto, telefone fixo ficou de fora, e a senha só conta quando vem
 seguida de um valor com cara de credencial (`senha: X`, `senha é Aluno@2026`),
 nunca só a palavra.
 
-**Limite conhecido:** a tabela `resposta_cache` guarda o texto gerado pelo LLM,
-que em tese poderia ecoar um identificador vindo da pergunta. Não é mascarado
-porque isso corromperia a resposta servida ao aluno, e o risco é baixo: desde
-T2.4 a chave do cache inclui a pergunta, então uma entrada com dado pessoal só é
-recuperada por quem digitar exatamente o mesmo texto.
+**Limite conhecido:** as tabelas `resposta_cache` e `resposta_cache_pergunta`
+guardam o texto gerado pelo LLM, que em tese poderia ecoar um identificador
+vindo da pergunta. Não é mascarado porque isso corromperia a resposta servida ao
+aluno, e o risco é baixo: as duas chaves incluem a pergunta, então uma entrada
+com dado pessoal só é recuperada por quem digitar exatamente o mesmo texto. O
+`pergunta_norm` gravado como metadado no cache pré-retrieval já passou pela
+máscara de PII (a derivação da chave roda depois de `_sem_pii`).
 
 **Ligar/desligar:** `TELEMETRY_STDERR_ENABLED` controla o log no terminal e
 `TELEMETRY_DB_ENABLED` a gravação no banco — independentes. O par usual em uso
@@ -556,13 +634,15 @@ pergunta ── preprocess.py ── guardrail.py ──► ataque/abuso?
                                   │              origem="encaminhado"
                             é do agente
                                   │
+          cache PRÉ-retrieval? ──hit──► origem="base" (pula pgvector+rerank+LLM)
+                                  │ miss
                             retriever.py ─────────────────┘
                                   │
                     ┌─────────────┴─────────────┐
                 achou algo                   vazio
                     │                           │
                     ▼                           │
-      cache? (assunto+confiança+chunks)         │
+   cache PÓS-retrieval? (pergunta+assunto+chunks+modelo)  │
        │                    │                   │
       hit                  miss                 │
        │                    ▼                   │
@@ -591,6 +671,13 @@ diferentes: `origem="encaminhado"` é assunto de outro departamento (nunca vai
 ser indexado aqui), enquanto `origem="nenhuma"` é documento faltando na base —
 o sinal que vira pauta de ingestão.
 
+O cache tem **duas camadas** no caminho da base (ver _Cache de resposta — duas
+camadas_ acima): o hit **pré-retrieval** responde antes do `retriever.py` e não
+toca em pgvector, cross-encoder nem LLM; o hit **pós-retrieval** vem depois da
+busca e do rerank e só evita a chamada ao LLM. Uma resposta nova grava nas duas.
+Na telemetria, `cache_pre_retrieval=true` distingue o primeiro caso (com
+`ms_retrieve`/`ms_rerank` nulos) do segundo.
+
 ## Organização
 
 | Caminho | Responsabilidade |
@@ -610,16 +697,24 @@ o sinal que vira pauta de ingestão.
 | `app/agent/guardrail.py` | encaminha pedido de ataque/abuso antes do RAG (léxico, OWASP LLM Top 10) |
 | `app/agent/web_fallback.py` | busca externa restrita à allowlist de domínios oficiais |
 | `app/db/vector_store.py` | conexão com pgvector |
-| `app/db/response_cache.py` | cache de resposta por conjunto de chunks (mesmo Postgres) |
-| `app/db/telemetry_store.py` | tabela `telemetria` (JSONB), retenção de 7 dias e a consulta de lacunas |
+| `app/db/response_cache.py` | cache PÓS-retrieval — resposta por `pergunta + assunto + chunks` (poupa o LLM) |
+| `app/db/pre_retrieval_cache.py` | cache PRÉ-retrieval — resposta por `pergunta + assunto` (poupa o pipeline inteiro; invalidado a cada reingestão) |
+| `app/db/telemetry_store.py` | tabela `telemetria` (JSONB), retenção por canal (7d real / 90d eval) e a consulta de lacunas |
+| `app/db/perguntas_store.py` | tabela `exemplo_perguntas` — o dataset de avaliação (UPSERT idempotente, delete lógico) |
+| `app/db/revisao_store.py` | tabela `revisao_veredictos` + o cruzamento dataset × telemetria × veredito |
 | `app/core/pii.py` | detecção e mascaramento de RA/CPF/e-mail/telefone/senha (LGPD) — persistência e saída p/ LLM |
 | `app/api/routers/demo.py` | rota `/demo` — injeta a chave da demo no HTML |
+| `app/api/routers/revisao.py` | rota `/revisao` — dashboard + conferência de fidelidade sobre a telemetria |
+| `app/api/routers/perguntas.py` | CRUD `/v1/perguntas` do dataset de avaliação (escrita só p/ o consumidor de avaliação) |
 | `app/static/index.html` | o frontend de demonstração (1 arquivo, sem build) |
+| `app/static/revisao.html` | dashboard (Chart.js) + revisão de avaliação — 1 arquivo, sem build |
+| `app/static/vendor/chart.umd.min.js` | Chart.js vendorizado (servido de `/revisao/chart.js`, não de CDN) |
 | `scripts/` | CLIs de ingestão, de pergunta, relatório de lacunas e avaliação |
 | `scripts/crawl.py` | indexa as páginas da `WEB_ALLOWLIST` no pgvector (KB-3); rodar semanal |
-| `scripts/eval_run.py` | roda um dataset de eval contra o agente de verdade, salva local |
+| `scripts/seed_perguntas.py` | UPSERT do `perguntas.jsonc` na tabela `exemplo_perguntas` (idempotente) |
+| `scripts/eval_run.py` | roda o dataset (do banco) contra o agente de verdade, salva local + telemetria |
 | `scripts/eval_report.py` | audita, na telemetria já gravada, o mesmo dataset (sem reexecutar) |
-| `scripts/clear_cache.py` | apaga `resposta_cache` — necessário antes de toda rodada de calibração |
+| `scripts/clear_cache.py` | apaga os dois caches (`resposta_cache` + `resposta_cache_pergunta`) — necessário antes de toda rodada de calibração |
 | `scripts/clear_logs.py` | apaga a tabela `telemetria` |
 | `eval/` | datasets de avaliação, análises de telemetria e `backlog-problemas.md` (fila priorizada de correções) |
 
@@ -688,10 +783,13 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
   expiração.
 - **Passos explícitos no `responder.py`** em vez de uma chain fechada: dá para
   inspecionar o contexto recuperado (`--debug`) antes da chamada ao LLM.
-- **Cache por conjunto de chunks, não pelo texto da pergunta**: duas perguntas
-  parafraseadas que recuperam o mesmo topo do retrieval caem na mesma chave, e
-  reingerir um arquivo alterado muda os ids recuperados e invalida a chave
-  sozinho — sem tabela de invalidação nem TTL manual. Guardado no mesmo
+- **Cache em duas camadas**: o **pós-retrieval** (`resposta_cache`) tem chave
+  `pergunta + assunto + ids dos chunks + modelo` — reingerir um arquivo alterado
+  muda os ids e invalida a chave sozinho, sem tabela de invalidação nem TTL. O
+  **pré-retrieval** (`resposta_cache_pergunta`) tem chave só `pergunta + assunto`
+  e um hit pula o `retrieve()` inteiro; como a chave não carrega os ids, a
+  invalidação é explícita — toda reingestão limpa a tabela (o choke point de
+  escrita no índice é um só, `pipeline._indexar_chunks`). As duas ficam no
   Postgres da ingestão, sem infra nova.
 
 ## Próximos passos sugeridos
