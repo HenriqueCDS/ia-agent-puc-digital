@@ -399,8 +399,8 @@ def test_contexto_recuperado_entra_no_prompt(monkeypatch):
 
 def test_pii_da_pergunta_e_mascarada_antes_de_ir_para_o_prompt(monkeypatch):
     """PII-1/PII-2: CPF, RA e senha que o aluno cola no texto não podem chegar
-    crus ao provedor de LLM (EUA). `_sem_pii` mascara em `_responder`, antes do
-    retrieval — todo caminho de egress (LLM, web) já vê a versão limpa."""
+    crus ao provedor de LLM (EUA). `_sem_pii` mascara em `_responder`, antes de
+    guardrail/triagem/retrieval — todo caminho abaixo já vê a versão limpa."""
     monkeypatch.setattr(responder.settings, "triagem_enabled", False)
     monkeypatch.setattr(responder.settings, "guardrail_enabled", False)
     monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
@@ -415,40 +415,6 @@ def test_pii_da_pergunta_e_mascarada_antes_de_ir_para_o_prompt(monkeypatch):
     assert "12345678" not in prompt and "529.982.247-25" not in prompt
     assert "Aluno@2026" not in prompt
     assert "[ra]" in prompt and "[cpf]" in prompt and "[senha]" in prompt
-
-
-def test_pii3_guardrail_e_triagem_veem_o_texto_original(monkeypatch):
-    """PII-3 (T-10): `_sem_pii` roda DEPOIS do guardrail e da triagem — os dois
-    são `if` léxico e não fazem egress, então precisam do texto ORIGINAL. Trava
-    a ordem: se `_sem_pii` voltar para o topo de `_responder`, um guardrail/
-    triagem preso a um trecho que `pii.mascarar` consome deixaria de casar."""
-    vistos = []
-    real_deve_encaminhar = responder.guardrail.deve_encaminhar
-    real_classificar = responder.classificar
-
-    def espia_guardrail(texto):
-        vistos.append(("guardrail", texto))
-        return real_deve_encaminhar(texto)
-
-    def espia_triagem(texto):
-        vistos.append(("triagem", texto))
-        return real_classificar(texto)
-
-    monkeypatch.setattr(responder.guardrail, "deve_encaminhar", espia_guardrail)
-    monkeypatch.setattr(responder, "classificar", espia_triagem)
-    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(page=1)])
-    llm = FakeLLM()
-
-    pergunta = "meu e-mail é aluno@puc-campinas.edu.br e meu cpf 529.982.247-25, ajuda"
-    responder.answer(Query(text=pergunta), llm=llm)
-
-    # guardrail e triagem receberam o texto CRU
-    assert ("guardrail", pergunta) in vistos
-    assert ("triagem", pergunta) in vistos
-    # mas o que foi para o LLM está mascarado
-    prompt = "\n".join(str(m.content) for m in llm.mensagens)
-    assert "aluno@puc-campinas.edu.br" not in prompt and "529.982.247-25" not in prompt
-    assert "[email]" in prompt and "[cpf]" in prompt
 
 
 def test_pii_da_pergunta_e_mascarada_antes_da_busca_web(monkeypatch):

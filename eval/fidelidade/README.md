@@ -46,10 +46,41 @@ No Windows/PowerShell: `$env:RERANKER_ENABLED="true"; python -m scripts.eval_run
 | Fidelidade | `resposta` × `resposta_referencia` / `criterio` | igual ou melhor; **nenhuma** piora |
 | Latência | `ms_total`, telemetria `ms_retrieve` | +130–260ms no retrieval, aceitável |
 
+## Calibrar `RERANKER_THRESHOLD` (RET-7, defesa b)
+
+Com o reranker ligado o corte final é `RERANKER_THRESHOLD` (escala sigmoid do
+cross-encoder, **não** comparável com o ~0.82 do E5). O default `0.0` não corta
+nada — pergunta fora de domínio (Q4 fotossíntese) atravessa os dois estágios.
+Calibrar é a defesa (b) do RET-7.
+
+Não precisa da `resposta_referencia` (isso é o LLM-judge, outra coisa): um `T`
+só muda o roteamento quando derruba **todos** os chunks, i.e. `score_top < T`.
+A varredura usa só `score_top` + `origem_esperada`, que o `eval_run` já grava.
+
+```bash
+# 1. rode PT + EN com o reranker LIGADO, 2-3x (a mediana por pergunta é o sinal)
+RERANKER_ENABLED=true python -m scripts.eval_run eval/perguntas/perguntas.jsonc \
+  -m gemini:gemini-3.6-flash -c -o eval/resultados/reranker-ON-pt-1.json
+RERANKER_ENABLED=true python -m scripts.eval_run eval/fidelidade/canvas-en.jsonc \
+  -m gemini:gemini-3.6-flash -c -o eval/resultados/reranker-ON-en-1.json
+# ... repita para -2, -3
+
+# 2. varra os thresholds (sem reprocessar — só lê os JSON)
+python -m scripts.calibrar_reranker eval/resultados/reranker-ON-*.json
+
+# 3. confirme o valor recomendado no dataset inteiro
+RERANKER_THRESHOLD=<T> python -m scripts.eval_run eval/perguntas/perguntas.jsonc -m <modelo> -c
+```
+
+Se o `calibrar_reranker` disser que **não há threshold limpo** (o lixo fora de
+domínio pontua acima do menor acerto real), a escala do cross-encoder não separa
+os dois casos sozinha → cair para a defesa (a): piso de E5 no 1º estágio de
+`retriever.retrieve`.
+
 ## Portão para virar `RERANKER_ENABLED=true` por padrão
 
 Só se o ON mostrar os itens EN **melhores** (chunk certo ranqueado acima,
 fidelidade igual ou melhor) e **nenhuma regressão** nos grupos PT de
 `eval/perguntas/perguntas.jsonc` (rodar os dois datasets). Registrar a rodada em
 `eval/analises/analise-reranker-<data>.md` na convenção dos `analise-telemetria-*`,
-e calibrar `RERANKER_THRESHOLD` na escala nova antes de fechar.
+com o `RERANKER_THRESHOLD` calibrado acima antes de fechar.

@@ -146,6 +146,55 @@ def test_reranker_ligado_respeita_top_k(monkeypatch, reranker_ligado):
     assert len(chunks) == settings.top_k
 
 
+# --- RET-8 / T-9: rerank que falha não derruba o retrieval ------------------
+
+
+def test_rerank_que_estoura_cai_para_bi_encoder(monkeypatch):
+    """Cross-encoder que estoura a RAM da VM (o caso que `config.py` admite) não
+    propaga: o retrieval volta à ordem do E5 e ao corte de `relevance_threshold`,
+    como se o 2º estágio estivesse desligado."""
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "reranker_candidates", 30)
+    monkeypatch.setattr(settings, "reranker_threshold", 0.0)  # deixaria tudo passar
+
+    def rerank_que_estoura(pergunta, chunks):
+        raise RuntimeError("CUDA/CPU out of memory")
+
+    monkeypatch.setattr("app.retrieval.reranker.rerank", rerank_que_estoura)
+    store = FakeStore(
+        [
+            _resultado("relevante", settings.relevance_threshold + 0.05),
+            _resultado("ruído", settings.relevance_threshold - 0.05),
+        ]
+    )
+
+    chunks = retrieve(Query(text="x"), store=store)
+
+    # caiu para o corte do E5 (não o reranker_threshold=0.0, que passaria os 2)
+    assert [c.document.page_content for c in chunks] == ["relevante"]
+    # sem score do 1º estágio preservado -> `responder` lê como reranker_aplicado=False
+    assert all(c.score_bruto is None for c in chunks)
+
+
+def test_rerank_que_estoura_dentro_de_answer_ainda_registra(monkeypatch):
+    """Mesmo com o rerank falhando, a pergunta é respondida e a linha sai."""
+    from app.core import telemetry
+
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+
+    def rerank_que_estoura(pergunta, chunks):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.retrieval.reranker.rerank", rerank_que_estoura)
+    store = FakeStore([_resultado("c", 0.9)])
+
+    with telemetry.registrar(assunto=None, pergunta="x", chat_model="m") as registro:
+        chunks = retrieve(Query(text="x"), store=store)
+
+    assert chunks  # não propagou
+    assert registro.erro is None
+
+
 # --- INF-9: latência do 2º estágio isolada em `telemetry.ms_rerank` ---------
 
 

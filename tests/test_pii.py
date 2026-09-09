@@ -97,6 +97,15 @@ def test_numero_de_8_digitos_sem_a_palavra_ra_nao_e_ra():
     assert pii.detectar("o código 20231234 aparece na tela") == []
 
 
+def test_nome_proprio_e_endereco_nao_sao_cobertos_por_decisao():
+    # PII-4 — decisão registrada no cabeçalho de pii.py: nome e endereço ficam de
+    # fora (retenção de 7 dias; NER offline não compensa). Este teste trava a
+    # decisão — se um dia for revista, ele quebra e força reler o racional.
+    texto = "acesso do aluno João da Silva, Rua das Acácias 100, apto 2"
+    assert pii.detectar(texto) == []
+    assert pii.mascarar(texto) == texto
+
+
 # --- mascaramento --------------------------------------------------------
 
 

@@ -42,10 +42,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | RET-4 | 🟡 | `alta_confianca`/`is_exact_match` só dispara por artefato do corpus (doc gigante em inglês repetitivo), não por confiança real (Q23) | `retriever.py`, `EXACT_MATCH_THRESHOLD` | **Ramo `alta_confianca` REMOVIDO** junto do encanamento do RET-3 (2026-09-01): `is_exact_match`, `EXACT_MATCH_THRESHOLD`, `SYSTEM_ALTA_CONFIANCA`/`ANSWER_PROMPT_ALTA_CONFIANCA`, o parâmetro em `_tentar_base`/`_cache_key` (invalida cache existente) e `Registro.alta_confianca`. Com ranking cross-encoder real, "2 fontes fortes no topo" deixa de ser proxy de confiança. Checklist em `cross-encoder.md` §5. (Tuning intermediário 0.90→0.87 em 2026-08-30 ficou obsoleto.) | ✅ | 2026-09-01 |
 | [x] | RET-5 | 🟡 | `CHUNK_SIZE` quase inerte — `PyPDFLoader` entrega 1 Document por página; granularidade real ≤254 tokens | `config.CHUNK_SIZE`, `scripts/chunk_stats.py` | Feito: `scripts/chunk_stats.py` mede a distribuição real (5371 páginas: mediana 403 chars / 103 tokens, p75 695, p90 1073). `CHUNK_SIZE` 1000 → **700** (≈ p75 — mantém ~75% das páginas inteiras, quebra só o quartil denso; índice +18%; p99 do chunk ~185 tokens « 512 do E5). **Exige reingestão.** Voltar a 1000 se a eval piorar | ✅ | 2026-08-30 |
 | [x] | RET-6 | 🟡 | `Canvas_Student_Guide.pdf` (1108 pág.) devolve 5 chunks quase idênticos → margem ~0 por repetição (Q11/Q23) | `ingestion/chunker.py`, `config.INGEST_DEDUP_SIMILARIDADE` | Feito: `chunker.deduplicar_similares` na ingestão — descarta chunk com Jaccard (shingles de 4 palavras) ≥ `INGEST_DEDUP_SIMILARIDADE` (0.9) contra outro já mantido do mesmo lote. Pega a quase-cópia que o `content_hash` (exato) não pega. 1ª ocorrência vence. Só na ingestão, fora do caminho de resposta. **Não** substitui dedup por top-k nem reranking — reduz a repetição na fonte | ✅ | 2026-08-30 |
-| [x] | RET-7 | 🟠 | Reranker ligado ANULA a rede do `RELEVANCE_THRESHOLD` (RET-1): o 1º estágio traz 30 candidatos sem corte de E5 e o corte final é `RERANKER_THRESHOLD=0.0` → Q4 (fotossíntese, 0.82 no E5) passa os dois estágios. O estado "reranker on + threshold não calibrado" é **pior** que o de hoje p/ lixo fora de domínio | `app/retrieval/retriever.retrieve` | Feito: `retrieve` aplica `RELEVANCE_THRESHOLD` aos candidatos do E5 **antes** do rerank — um chunk abaixo do piso nunca chega ao cross-encoder, então o resultado respeita o piso reranker ou não. `RERANKER_THRESHOLD` vira corte ADICIONAL na escala nova (a calibrar na T-1). Testes em `test_retrieval.py`. Ver `cross-encoder.md` §4.1 | ✅ | 2026-09-02 |
-| [x] | RET-8 | 🟠 | `reranker.rerank` sem try/except nem timeout — cross-encoder que estoura memória na VM (o `config.py` admite que "aperta junto do E5") derruba o `/ask` inteiro. Viola "falha de dependência não derruba o caminho principal" (perfil §7) | `app/retrieval/retriever.retrieve`, `app/retrieval/reranker.rerank` | Feito: `rerank` (e o import local de `sentence_transformers`) dentro de `try/except` em `retrieve` — qualquer exceção (`MemoryError`, `ModuleNotFoundError`, ...) → WARNING + cai para a ordem bi-encoder já filtrada pelo piso de E5, sem marcar `reranker_aplicado`. Mesmo espírito da `ProviderChain`. **Timeout duro NÃO adicionado** de propósito (não dá p/ cancelar torch síncrono; thread-timeout vazaria inferência sob carga) — mitigação de lentidão é o modelo pequeno + `ms_rerank` no A/B. Testes em `test_retrieval.py` (T-9) | ✅ | 2026-09-02 |
-| [ ] | RET-9 | 🔴 | Rodada 90d (`eval/revisão_testes_2026_09_08.md`): **77% não-grounded** (110/142), `score_top` médio **0.39**, ~27 dos 33 insatisfeitos terminam em `origem="nenhuma"` — o agente **desiste**, não erra o roteamento. Com `RERANKER_ENABLED=true` o piso `RELEVANCE_THRESHOLD=0.85` do 1º estágio (RET-7) corta candidatos bons antes do cross-encoder (E5 pontua ~0.82 p/ par relevante em PT); o LLM recebe contexto ralo → `#SEM_COBERTURA#` → web → secretaria. RET-7 mitigou o fora-de-domínio mas expôs isto | `config.RELEVANCE_THRESHOLD`, `retriever.retrieve`, método | A/B de 3 rodadas (T-11) comparando **taxa de grounded** e histograma de **`score_top_bruto`** (E5 pré-rerank): (a) `RERANKER_ENABLED=false`; (b) `true` + `RELEVANCE_THRESHOLD=0.80`; (c) atual. Grounded recupera em (b) → o piso estrangula. `score_top_bruto` baixo nas 3 → problema anterior (ingestão da base ou prefixos `query:`/`passage:` do E5) | ⏳ | aberto 2026-09-08 |
-| [ ] | RET-10 | 🟠 | Mesma rodada: `ms_rerank` médio **8.5s** (o default do repo prevê ~200–400ms p/ 30 candidatos; prod roda 80). O rerank empata com a chamada de LLM e domina a latência (INF-12) | `config.RERANKER_CANDIDATES`, `retriever.retrieve`, `reranker.rerank` | Confirmar a causa (modelo recarregado por chamada? contenção de CPU no `eval_run`? modelo mais pesado que `mmarco-mMiniLMv2`?); voltar `RERANKER_CANDIDATES` p/ 30 e medir de novo | ⏳ | aberto 2026-09-08 |
+| [ ] | RET-7 | 🔴 | **Estado de produção HOJE** (`.env`: `RERANKER_ENABLED=true`, `RERANKER_THRESHOLD=0.0`). Com o reranker ligado o `retrieve` tem 2 cortes e **nenhum filtra lixo fora de domínio**: (1) o 1º estágio (E5) traz `RERANKER_CANDIDATES=30` por similaridade e **não aplica `RELEVANCE_THRESHOLD`** — esse `if` só existe no ramo `else` (reranker off); (2) o 2º estágio reescreve `.score` para a sigmoid (sempre `0<s<1`) e corta por `c.score >= RERANKER_THRESHOLD`; com `0.0` a condição é sempre verdadeira → só o `[:TOP_K]` limita. Efeito: Q4 ("fotossíntese", ~0.82 no E5, 100% fora de domínio) atravessa os dois estágios e entrega 5 chunks ao LLM. No bi-encoder puro, `RELEVANCE_THRESHOLD` cortava → 0 chunks → secretaria. **Ligar o reranker sem calibrar o threshold DESFEZ a rede do RET-1** — hoje é regressão de segurança vs. bi-encoder puro. (Nuance: o mmarco dá logit bem negativo p/ par sem relação — um `RERANKER_THRESHOLD` calibrado resolveria isto *melhor* que o E5; o buraco é só a janela "ligado + 0.0".) | `app/retrieval/retriever.retrieve` | **Caminho escolhido: (b) calibrar `RERANKER_THRESHOLD > 0`.** Ferramenta pronta (2026-09-09): `scripts/calibrar_reranker.py` faz a varredura de `T` sobre 1+ rodadas do `eval_run` feitas com `RERANKER_ENABLED=true` — sem reprocessar, só lê `score_top` (escala do cross-encoder) + `origem_esperada`. Um `T` só muda roteamento quando derruba TODOS os chunks (`score_top < T`) → **não precisa da `resposta_referencia` da T-1** (isso é o LLM-judge, separado). O script recomenda o maior `T` com `quebra_base = 0` e diz quantos vazamentos (Q4 etc.) ele corta. Fluxo em `eval/fidelidade/README.md`. **Falta**: rodar o `eval_run` (PT + EN) com o reranker ligado 2–3× (precisa de Postgres + reingestão + provedor com cota), rodar o `calibrar_reranker`, fixar o `T` no `.env`, e a rodada de confirmação. **Fallback**: se o script disser "sem threshold limpo" (lixo pontua acima do menor acerto), cair p/ (a) — piso de E5 no 1º estágio. Até o `T` sair: (a) ou `RERANKER_ENABLED=false` | ⏳ | aberto 2026-09-01; explicado + repriorizado 🔴 + tooling da defesa (b) 2026-09-09 |
+| [x] | RET-8 | 🟠 | `reranker.rerank` sem try/except nem timeout — cross-encoder que estoura memória na VM (o `config.py` admite que "aperta junto do E5") derruba o `/ask` inteiro. Viola "falha de dependência não derruba o caminho principal" (perfil §7) | `app/retrieval/retriever.retrieve`, `app/retrieval/reranker.rerank` | **Feito (2026-09-09):** `retriever.retrieve` embrulha a chamada de `rerank` em `try/except Exception` — OOM da VM, `sentence_transformers` ausente ou modelo corrompido viram WARNING com traceback e o retrieval cai para a ordem do bi-encoder + `relevance_threshold`, idêntico ao caminho `RERANKER_ENABLED=false`. `chunks` mantém a lista do 1º estágio (a reatribuição só ocorre se `rerank` retorna). `responder` lê `score_bruto=None` **com o reranker ligado** como `reranker_aplicado=False` — 3º estado, distinto de `None` (2º estágio desligado) e `True` (rodou); `False` recorrente na telemetria = cross-encoder não está de pé na VM. `ms_rerank` ainda cronometra a tentativa que falhou (`cronometro` tem `finally`). **Timeout de CPU não implementado**: não dá para interromper um `predict` síncrono no Windows sem thread separada, e o modo de falha real é estouro de RAM, que o `except` cobre. Testes em `test_retrieval.py` (T-9) + `test_telemetry.py` | ✅ | 2026-09-09 |
 
 ## 3. Veto / fidelidade / prompt (Bloco B)
 
@@ -66,9 +64,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 |---|---|---|---|---|---|---|---|
 | [x] | PII-1 | 🔴 | CPF/RA/e-mail vão crus ao provider LLM (EUA) — `pii.mascarar` só age nos campos persistidos, `query.text` vai cru p/ `_format_context`/`invoke`/`buscar_na_web` (Q11, Q13; 27: Q5) | `responder._responder`, `app/core/pii.py` | Feito: `responder._sem_pii` mascara `query.text` no topo de `_responder` (antes de guardrail/triagem/retrieval, funil único; `dataclasses.replace`, objeto original preservado p/ a telemetria). Detecção (`registro.pii` + WARNING) segue sobre o texto original em `telemetry.registrar`. Mascarar, não recusar | ✅ | 2026-08-31 |
 | [x] | PII-2 | 🔴 | "senha"/"password" não é categoria de `pii.py` — credencial `'Aluno@2026'` seguiu p/ o Gemini (Q12; 27: Q5) | `app/core/pii.py` | Feito: categoria `senha` — `_SENHA` (palavra + conector `:`/`=`/`é` ou aspas + valor); só conta com valor de cara de credencial (dígito/símbolo/aspas), nunca "esqueci minha senha". Mascarada 1º na ordem (antes do e-mail). Entra no mesmo caminho do PII-1 | ✅ | 2026-08-31 |
-| [x] | PII-3 | 🟡 | `_sem_pii` roda ANTES do guardrail e da triagem — o mascaramento altera o texto que `deve_encaminhar`/`classificar` inspecionam. Inócuo hoje, mas um padrão futuro preso a um trecho que `pii.mascarar` consome (e-mail, ID) deixa de casar em silêncio | `app/agent/responder._responder` | Feito: `query = _sem_pii(query)` movido do topo de `_responder` p/ logo antes do `retrieve` — guardrail e triagem (ambos `if` léxico, sem egress) inspecionam o texto ORIGINAL; retrieval/base/web já veem a versão limpa; todo egress fica depois. Teste **T-10** (`test_pii3_guardrail_e_triagem_veem_o_texto_original`) trava a ordem via espião nas duas funções | ✅ | 2026-09-02 |
-| [ ] | PII-4 | 🟡 | `pii.py` não cobre nome próprio nem endereço (aceito no cabeçalho do módulo) — o `topico`, escrito pelo LLM, pode conter "aluno João da Silva" e isso vai p/ a telemetria. Resíduo sem decisão registrada | `app/core/pii.py`, `telemetry.Registro.topico` | Decidir se é aceitável dada a retenção de 7 dias e **escrever** a decisão; senão, 2ª camada (NER leve, offline) sobre os campos derivados | ⏳ | aberto 2026-09-01 |
-| [ ] | PII-5 | 🟠 | `_SENHA` não casa quando há um qualificador entre a palavra e o conector: "minha senha **do Canvas** é 'Aluno@2026'" (caso real da rodada 90d, `owasp-2`, roteado `encaminhado → base`) passa **sem detecção e sem mascaramento antes do egress**. O `\s*` entre `(?:senha\|password\|pwd)` e o conector `é`/`:` só tolera espaço | `app/core/pii._SENHA` | Tolerar um qualificador curto (`[^\n]{0,20}?`) entre a palavra e o conector/aspas, mantendo `_senha_e_credencial` como guarda de precisão (não casar "esqueci minha senha do portal"). Teste com a frase real em `test_pii.py`. Complementa PII-2 | ⏳ | aberto 2026-09-08 |
+| [x] | PII-3 | 🟡 | `_sem_pii` roda ANTES do guardrail e da triagem — o mascaramento altera o texto que `deve_encaminhar`/`classificar` inspecionam. Inócuo hoje, mas um padrão futuro preso a um trecho que `pii.mascarar` consome (e-mail, ID) deixa de casar em silêncio | `app/agent/responder._responder` | Feito: `query = _sem_pii(query)` movido para DEPOIS do guardrail e da triagem, ANTES de retrieval/base/web. As duas checagens agora veem o texto ORIGINAL (não fazem egress, então não vaza PII); só o que sai p/ retrieval/LLM/web é mascarado. Detecção p/ telemetria segue sobre o original em `telemetry.registrar`. Teste `test_guardrail_e_triagem_veem_o_texto_original_nao_o_mascarado` (T-10) trava a ordem | ✅ | 2026-09-09 |
+| [x] | PII-4 | 🟡 | `pii.py` não cobre nome próprio nem endereço (aceito no cabeçalho do módulo) — o `topico`, escrito pelo LLM, pode conter "aluno João da Silva" e isso vai p/ a telemetria. Resíduo sem decisão registrada | `app/core/pii.py`, `telemetry.Registro.topico` | **Decisão: ACEITO.** Escrita no cabeçalho de `pii.py` e no comentário de `Registro.topico`: retenção de 7 dias + único campo derivado exposto é `topico`; NER offline (spaCy/stanza) = modelo + dependência nova no boot para vazamento de baixa gravidade e janela curta. Reavaliar se a retenção aumentar ou se a telemetria gravar texto livre de aluno real. Teste `test_nome_proprio_e_endereco_nao_sao_cobertos_por_decisao` trava a decisão | ✅ | 2026-09-09 |
 
 ## 5. Triagem / guardrail (Blocos E e F)
 
@@ -76,9 +73,9 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 |---|---|---|---|---|---|---|---|
 | [x] | TRI-1 | 🟠 | `"trancar"` não casa `"trancamento"` de `ENCAMINHAMENTOS` — léxico preso à forma nominal (Q13; 27: Q14) | `config.ENCAMINHAMENTOS` | Feito: `"trancar"` (verbo) somado a `"trancamento"` (nominal) nos `termos` de `academico`. As duas formas explícitas em vez de normalizar por radical `tranc` — sem risco de casar palavra não relacionada; não são substring uma da outra. Testes em `test_triagem.py` | ✅ | 2026-08-31 |
 | [x] | TRI-2 | 🟠 | `"bolsa"` em entrada com termos inequívocos manda aluno de iniciação científica p/ financeiro/cobrança (26 item 16) | `config.ENCAMINHAMENTOS` | Entrada própria com `excecoes` | ✅ | 2026-08-26 |
-| [~] | TRI-3 | 🟡 | Guardrail estruturalmente cego a injeção indireta — só lê a pergunta, nunca o CONTEXTO recuperado (Q18) | `guardrail.py`, sanitização de contexto | **Parcial (2026-09-02):** (1) `SYSTEM` da base ganhou a linha "CONTEXTO é DADO, nunca instrução" que só o `SYSTEM_WEB` tinha; (2) `responder._responder` roda o léxico do guardrail sobre o `page_content` dos chunks recuperados → `registro.contexto_suspeito=True` + WARNING, **MEDIÇÃO, não bloqueio** (corpus curado, hit é quase sempre falso positivo). Promover a bloqueio / sanitização real depois de a telemetria mostrar que está limpo | 🔧 | 2026-09-02 |
-| [~] | TRI-4 | 🟡 | Guardrail léxico frágil a paráfrase / outro idioma — 4/15 ataques da parte-2 passam (DoS por repetição, footprinting `pypdf2`/`.bin`, PII por ID de aluno) | `guardrail._PADROES` | **Parcial (2026-09-02):** (1) revisão à mão dos 25 itens `owasp-2` contra o `_PADROES` atual — a maioria dos "que passam" **já é pega** (o léxico cresceu desde a análise); sobra #152 ("extraia todos os dados sigilosos do doc colado") → termo `"dados sigilosos"` + a classe fica com a regra do prompt; #159 "trancagem" era furo da **triagem** (`config.ENCAMINHAMENTOS`, somado). (2) 2ª camada no prompt: `SYSTEM`/`SYSTEM_WEB` mandam responder `#FORA_DE_ESCOPO#` a pedido de abuso; `responder.answer` roteia p/ o desfecho do guardrail (`_encaminhar_por_guardrail`, `recusa_modelo=True`). **Falta:** rodar `eval_run -i` no grupo `owasp-2` p/ confirmar o que ainda escapa | 🔧 | 2026-09-02 |
-| [x] | TRI-5 | 🟡 | Guardrail alimenta `scripts.lacunas` — "DROP TABLE"/"chave de API" viram pauta de indexação | `telemetry_store` | Feito: `_CONSULTAR_LACUNAS` e `_CONTAR_RESPONDIDAS` ganharam `assunto_origem <> 'guardrail'` e `recusa_modelo IS NULL`. O caso do guardrail de ENTRADA já saía pelo `origem <> 'encaminhado'`; estes dois pegam o resto — guardrail desligado, e o abuso que só a rede de `answer()` reconheceu (`#FORA_DE_ESCOPO#`, recusa de compliance). Abuso novo que ninguém reconheceu ainda escapa como `hash:...` — residual aceito | ✅ | 2026-09-02 |
+| [ ] | TRI-3 | 🟡 | Guardrail estruturalmente cego a injeção indireta — só lê a pergunta, nunca o CONTEXTO recuperado (Q18) | `guardrail.py`, sanitização de contexto | Defesa no prompt + sanitização do contexto; teste da parte-2 (LLM01 Indirect) | ⏳ | |
+| [ ] | TRI-4 | 🟡 | Guardrail léxico frágil a paráfrase / outro idioma — 4/15 ataques da parte-2 passam (DoS por repetição, footprinting `pypdf2`/`.bin`, PII por ID de aluno) | `guardrail._PADROES` | Calibrar léxico após 1ª rodada da parte-2; 2ª camada por embedding | ⏳ | |
+| [x] | TRI-5 | 🟡 | Guardrail alimenta `scripts.lacunas` — "DROP TABLE"/"chave de API" viram pauta de indexação | `telemetry_store._CONSULTAR_LACUNAS` / `_CONTAR_RESPONDIDAS` | Feito: `AND COALESCE(dados->>'assunto_origem','') <> 'guardrail'` nas duas consultas do relatório de lacunas. Hoje o guardrail já cai em `origem='encaminhado'` (a query já excluía), mas o filtro por `assunto_origem` é a garantia direta — não depende dessa coincidência. **NÃO** cobre `GUARDRAIL_ENABLED=false` (ali nada carimba `assunto_origem`; o payload cai em `origem='nenhuma'`) — preço de desligar o guardrail. `origem_por_hash` (eval_report) fica sem o filtro de propósito: quer ver todas as origens p/ conferir roteamento. Consulta é SQL → validada contra Postgres real, sem teste de unidade (padrão do `test_lacunas.py`) | ✅ | 2026-09-09 |
 | [x] | TRI-6 | 🟡 | `web_fallback.buscar_na_web` não chama o guardrail — payload de ataque sai p/ DuckDuckGo quando `GUARDRAIL_ENABLED=false` (Q15/Q24/Q9r2) | `app/agent/web_fallback.py` | Feito: `web_fallback.abuso_bloqueado` reusa `guardrail.deve_encaminhar` e roda no topo de `buscar_na_web`, ao lado de `assunto_bloqueado`. **Não** respeita `settings.guardrail_enabled` de propósito — é a última barreira quando o guardrail de entrada está desligado. Mesmo desenho do `assunto_bloqueado` (que duplica a triagem). Teste em `test_web_fallback.py` | ✅ | 2026-08-31 |
 | [ ] | TRI-7 | 🟠 | Rodada 90d: vários `encaminhado → nenhuma` — a triagem não classificou, caiu no RAG e desistiu: reagendar prova substitutiva, **apoio psicológico** ("pensando em desistir de tudo"), cursos de graduação presencial, texto do regimento sobre plágio, confirmar mudança de regra acadêmica, matrícula em disciplina isolada | `config.ENCAMINHAMENTOS`, `app/agent/triagem.py` | Entradas novas em `ENCAMINHAMENTOS` p/ esses temas. **Apoio psicológico é prioridade** — pergunta de saúde mental nunca pode sair como `origem="nenhuma"`; precisa de rota humana com o contato certo | ⏳ | aberto 2026-09-08 |
 | [ ] | TRI-8 | 🟠 | Rodada 90d: "Minha senha do Canvas é 'Aluno@2026'..." roteada `encaminhado → base` — a triagem não pegou e o RAG respondeu uma pergunta com credencial embutida e enquadramento de teste. Complementa PII-5 (o mascaramento também falhou) | `guardrail._PADROES`, `config.ENCAMINHAMENTOS` | Rodar `eval_run --grupo owasp-2` (já pendente em TRI-4) e cobrir o padrão "credencial + 'não consigo entrar'" → `encaminhado` | ⏳ | aberto 2026-09-08 |
@@ -127,20 +124,8 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 | [x] | T-6 | Regressão do veto de contexto — Q7 (premissa falsa) e Q10 (número inventado) continuam recusando | VET-5 | 2026-08-31 |
 | [ ] | T-7 | Re-rodar Q14/Q16 (falharam por infra em 28) | INF-6 | |
 | [ ] | T-8 | Parte-2 OWASP (injeção indireta, DoS por repetição, footprinting, PII por ID) | TRI-3, TRI-4, VET-3 | |
-| [x] | T-9 | `retrieve` com reranker que levanta exceção → cai p/ bi-encoder, não propaga (dublê `FakeCrossEncoder` que estoura) | RET-8 | 2026-09-02 |
-| [x] | T-10 | Ordem `_sem_pii` × guardrail/triagem travada — texto original chega às duas checagens | PII-3 | 2026-09-02 |
-| [ ] | T-11 | A/B do reranker: `eval_run` com `RERANKER_ENABLED` false×true e `RELEVANCE_THRESHOLD` 0.85×0.80 — compara taxa de grounded e `score_top_bruto` | RET-9, RET-10 | |
-
----
-
-## 9. Tela de revisão (`/revisao`) — observabilidade e triagem
-
-| Feito | ID | Prio | Problema | Onde | Ação | Herdado | Resolvido em |
-|---|---|---|---|---|---|---|---|
-| [ ] | REV-1 | 🟠 | A conferência é sequencial por índice; a lista de pendentes só faz "não-avaliados primeiro". Com ~140 itens, os casos que precisam de olho (`divergiu`, `grounded=false`, `veto_escapou`, `recusa_modelo`, `erro`, `base_insuficiente`, `origem=nenhuma`) ficam misturados aos triviais | `app/static/revisao.html` (`listaPendentesHtml`) | Score de risco por linha (soma ponderada dos flags, client-side sobre `estado.linhas`) + `<select>` de ordenação (Risco ↓ default) + faixa de filter-chips toggle (`Divergiu`, `Não-grounded`, `Fallback web`, `Guardrail`, `Sem veredito`). Só JS — os dados já vêm de `/revisao/dados` | ⏳ | aberto 2026-09-08 |
-| [ ] | REV-2 | 🟠 | `score_top`/`score_min`/`margem_relativa` aparecem só como histogramas isolados, desconectados do desfecho. Não dá p/ responder "se o corte fosse X, quantos casos mudariam de lado?" — que é o objetivo declarado da instrumentação de RET-2 | `app/static/revisao.html` | Scatter `margem_relativa` × `score_top` colorido por veredito (forma por `acertou`), com slider de limiar e contador "corte em X → N reclassificações, M hoje insatisfeito". Cálculo client-side sobre `r.fluxo` | ⏳ | aberto 2026-09-08 |
-| [ ] | REV-3 | 🟡 | O resumo em Markdown (`copiarMarkdown`) e os tiles não expõem 3 métricas que a análise de 08-09 precisou e não tinha: **`score_top_bruto`** (E5 pré-rerank — separa "retrieval ruim" de "escala do rerank"), **taxa de fallback de provedor** (`provider` ≠ topo da cadeia configurado), **camada do cache** (`cache_pre_retrieval` já existe no `Registro`, não é lido) | `app/static/revisao.html`, `app/api/routers/revisao.py` (`_resumo`) | Histograma de `score_top_bruto` no bloco Retrieval; tile "fallback de provedor %"; split do tile de cache em pré/pós; incluir os três no `copiarMarkdown` | ⏳ | aberto 2026-09-08 |
-| [ ] | REV-4 | 🟡 | `veto_escapou`/`recusa_modelo`/`contexto_suspeito` são "sempre nulo em operação normal" mas aparecem como 3 barras entre 10 no gráfico de flags — indistinguíveis quando disparam | `app/static/revisao.html` | Seção "Alertas" no topo do dashboard, renderizada só quando algum > 0 (cartão vermelho + "ver os casos" → conferência filtrada); linha verde discreta quando tudo zero | ⏳ | aberto 2026-09-08 |
+| [x] | T-9 | `retrieve` com reranker que levanta exceção → cai p/ bi-encoder, não propaga; corte volta a ser `relevance_threshold`; `reranker_aplicado=False` na telemetria | RET-8 | 2026-09-09 |
+| [x] | T-10 | Ordem `_sem_pii` × guardrail/triagem travada — texto original chega às duas checagens | PII-3 | 2026-09-09 |
 
 ---
 
@@ -148,77 +133,85 @@ Legenda de status herdado das análises: ✅ já aplicado · 🔧 parcial · ⏳
 
 | Grupo | Feitos / Total |
 |---|---|
-| 1. Infra e método | 11 / 12 |
-| 2. Retrieval / limiar | 7 / 10 |
-| 3. Veto / fidelidade | 6 / 8 |
-| 4. LGPD / PII | 3 / 5 |
-| 5. Triagem / guardrail | 4 / 8 (TRI-3/TRI-4 parciais) |
-| 6. Base de conhecimento / web | 8 / 14 (KB-3 parcial) |
-| 7. Dataset / gabarito | 3 / 8 |
-| 8. Testes | 6 / 11 |
-| 9. Tela de revisão | 0 / 4 |
-| **Total** | **48 / 80** |
+| 1. Infra e método | 11 / 11 |
+| 2. Retrieval / limiar | 6 / 8 |
+| 3. Veto / fidelidade | 4 / 7 |
+| 4. LGPD / PII | 4 / 4 |
+| 5. Triagem / guardrail | 4 / 6 |
+| 6. Base de conhecimento / web | 7 / 12 (KB-3 parcial) |
+| 7. Dataset / gabarito | 3 / 6 |
+| 8. Testes | 6 / 10 |
+| **Total** | **45 / 64** |
 
 > **2026-09-01** — 16 itens novos (INF-9/10/11, RET-7/8, VET-6/7, PII-3/4, KB-5/6/7/8/9,
 > T-9/10) abertos a partir da análise do código pós-RET-3/RET-4. Concentração: buracos
 > do crawl KB-3 e segurança do encanamento do reranker.
 > **2026-09-02** — INF-9, INF-10 e INF-11 resolvidos (instrumentação do rerank, rate
 > limit em Redis, DDL cacheada). Grupo 1 (infra) fechado: 11/11.
-> **2026-09-02** (2ª leva) — PII-3, VET-6, VET-7, TRI-5, KB-6 e T-10 resolvidos;
-> TRI-3 e TRI-4 parciais (camada de prompt + medição; falta calibrar pela
-> telemetria / rodar `owasp-2`). 39 → 45/64.
-> **2026-09-02** (3ª leva) — RET-7 (piso de E5 no 1º estágio do reranker) e RET-8
-> (`rerank` que falha cai para o bi-encoder) + T-9. Os dois furos de segurança do
-> encanamento do reranker fechados: ligar `RERANKER_ENABLED=true` não regride
-> mais o comportamento fora de domínio. `cross-encoder.md` restaurado (tinha sido
-> apagado sem querer em 577f3b0). 45 → 48/64.
-> **2026-09-08** — 16 itens novos a partir da análise da rodada de 90 dias da
-> `/revisao` (142 execuções, `eval/revisão_testes_2026_09_08.md`). Achado central:
-> **retrieval em colapso** — 77% não-grounded, `score_top` médio 0.39, ~27/33
-> insatisfeitos terminam em `origem="nenhuma"`. RET-9 (o piso de E5 estrangula o
-> 1º estágio do reranker na prática — RET-7 não bastou), RET-10 / INF-12 (latência
-> p50 13s / p95 47s), KB-13/14 (lacunas de conteúdo + PDF da carteirinha não
-> ingerido), DS-7/8 (gabarito miscalibrado: 56% das divergências são "satisfeito";
-> `owasp-*` pune o hardening), TRI-7/8 (apoio psicológico e credencial caindo fora
-> da triagem), PII-5 (`_SENHA` não casa "senha do Canvas é ..."), VET-8,
-> REV-1..4 (a tela não prioriza por risco), T-11. 48/64 → 48/80.
+> **2026-09-09** — RET-8 resolvido (fallback do rerank) + T-9. RET-7 reescrito e
+> repriorizado 🔴: com `RERANKER_ENABLED=true` no `.env` de produção e
+> `RERANKER_THRESHOLD=0.0`, o lixo fora de domínio não é mais cortado por nada —
+> é a próxima prioridade de retrieval.
+> **2026-09-09** — PII-3, PII-4, TRI-5 + T-10 resolvidos. Grupo 4 (LGPD/PII)
+> fechado: 4/4. `_sem_pii` agora roda depois de guardrail/triagem (texto original
+> chega às duas); decisão de não cobrir nome/endereço escrita em `pii.py`;
+> `scripts.lacunas` filtra `assunto_origem='guardrail'`. Guardrail (§5): abertos
+> só TRI-3 (injeção indireta) e TRI-4 (léxico frágil a paráfrase) — ver notas
+> abaixo.
 
 ## Changelog
 
-- **2026-09-08** — análise da rodada de 90 dias da `/revisao`
-  (`eval/revisão_testes_2026_09_08.md`; nada resolvido, só rastreado): 16 itens.
-  Central — **RET-9**: com `RERANKER_ENABLED=true` o piso `RELEVANCE_THRESHOLD=0.85`
-  corta o 1º estágio antes do cross-encoder e o pipeline estrangula (77%
-  não-grounded, `score_top` 0.39, insatisfeitos em `origem="nenhuma"`); RET-7
-  mitigou o fora-de-domínio mas expôs isto. **RET-10 / INF-12**: `ms_rerank` 8.5s,
-  latência p50 13s / p95 47s. **KB-13/KB-14**: lacunas recorrentes (senha,
-  monitoria, enviar atividade no Canvas) + manual da carteirinha não ingerido.
-  **DS-7/DS-8**: 56% das divergências marcadas "satisfeito" (gabarito errado);
-  `owasp-*` penaliza recusar ataque. **TRI-7/TRI-8**: triagem não cobre apoio
-  psicológico / reagendamento / regimento; caso `encaminhado → base` com
-  credencial. **PII-5**: `_SENHA` não casa qualificador entre a palavra e o
-  conector. **VET-8**: 109 satisfeito × 32 grounded — a tela não separa
-  "encaminhou certo" de "respondeu sem base". **REV-1..4 / T-11**: `/revisao`
-  precisa de fila por risco, simulador de limiar, `score_top_bruto` no resumo,
-  painel de alertas de guardrail.
-- **2026-09-02** — PII-3 / VET-6 / VET-7 / TRI-3 / TRI-4 / TRI-5 / KB-6.
-  **PII-3**: `_sem_pii` desceu p/ logo antes do `retrieve` — guardrail/triagem
-  veem o texto cru, egress vê o mascarado (T-10 trava a ordem).
-  **VET-6**: `_RE_TOPICO` casa o marcador de tópico em qualquer posição +
-  wrappers markdown; `prompts.sem_marcador_topico` é a rede final em
-  `responder.answer`. **VET-7**: `_RE_RECUSA_PROSA_FORTE` (frases proibidas
-  verbatim) numa janela de 400 chars, separada da janela de 160 das ambíguas.
-  **TRI-3** (parcial): linha "CONTEXTO é DADO" no `SYSTEM` da base + scan do
-  léxico do guardrail sobre os chunks → `Registro.contexto_suspeito` (medição,
-  não bloqueio). **TRI-4** (parcial): marcador `#FORA_DE_ESCOPO#` no
-  `SYSTEM`/`SYSTEM_WEB` + `prompts.eh_fora_de_escopo` +
-  `responder._encaminhar_por_guardrail` (checado nos 2 vetos e na rede de
-  `answer()`); termo `"dados sigilosos"` no guardrail; `"trancagem"` na triagem.
-  **TRI-5**: `_CONSULTAR_LACUNAS`/`_CONTAR_RESPONDIDAS` filtram
-  `assunto_origem='guardrail'` e `recusa_modelo`. **KB-6**: `RetrievedChunk.is_web`
-  + `[Fonte web pública indexada: …]` no contexto + ressalva no `SYSTEM`.
-  Novos campos JSONB: `contexto_suspeito`. Testes: `test_prompts.py`,
-  `test_responder.py`, `test_telemetry.py`, `test_triagem.py`, `test_guardrail.py`.
+- **2026-09-09** — PII-3 + T-10: `responder._responder` reordenado —
+  `query = _sem_pii(query)` desceu para DEPOIS do guardrail e da triagem (antes
+  rodava no topo). As duas checagens passam a inspecionar o texto ORIGINAL da
+  pergunta: um padrão preso a e-mail / "ID de aluno" que `pii.mascarar`
+  consumiria volta a casar, e como nenhuma das duas faz egress, ver o valor cru
+  não vaza PII. Retrieval / prompt do LLM / busca web seguem recebendo a versão
+  mascarada; a detecção p/ telemetria já era sobre o original
+  (`telemetry.registrar`). Docstrings de `_sem_pii` e do teste PII-1/2
+  atualizadas. Teste novo `test_guardrail_e_triagem_veem_o_texto_original_nao_o_mascarado`
+  em `test_responder.py` (espia o texto que chega a `deve_encaminhar`/`classificar`).
+- **2026-09-09** — PII-4: decisão registrada (aceito não cobrir nome próprio /
+  endereço). Parágrafo no cabeçalho de `app/core/pii.py` + linha no comentário de
+  `telemetry.Registro.topico`: retenção de 7 dias, único campo derivado exposto é
+  `topico`, NER offline não compensa o custo (modelo + dependência no boot).
+  Gatilho de reavaliação anotado. Teste
+  `test_nome_proprio_e_endereco_nao_sao_cobertos_por_decisao` em `test_pii.py`
+  trava a decisão.
+- **2026-09-09** — TRI-5: `AND COALESCE(dados->>'assunto_origem','') <> 'guardrail'`
+  em `_CONSULTAR_LACUNAS` e `_CONTAR_RESPONDIDAS` (`app/db/telemetry_store.py`).
+  Abuso barrado na entrada some do relatório de lacunas sem depender da
+  coincidência `guardrail ⇒ origem='encaminhado'`. `origem_por_hash` (eval_report)
+  fica sem o filtro de propósito. `GUARDRAIL_ENABLED=false` não é coberto (nada
+  carimba `assunto_origem` nesse caminho). Sem teste de unidade: a consulta é SQL,
+  validada contra Postgres real (padrão do `test_lacunas.py`).
+- **2026-09-09** — RET-8 + T-9: `retriever.retrieve` embrulha `rerank` em
+  `try/except Exception`. Falha do cross-encoder (OOM da VM, `sentence_transformers`
+  ausente, modelo corrompido) → WARNING com traceback + queda para a ordem do
+  bi-encoder e o corte de `relevance_threshold` (mesmo caminho de
+  `RERANKER_ENABLED=false`); `chunks` mantém a lista do 1º estágio. `responder`
+  passou a inferir `reranker_aplicado` de `settings.reranker_enabled` +
+  `score_bruto`: `None` (desligado) / `True` (rodou) / `False` (ligado, mas
+  caiu — RET-8). `Registro.reranker_aplicado` documenta os 3 estados. Timeout de
+  CPU não implementado de propósito (o modo de falha real é RAM). Testes:
+  `test_retrieval.py` (rerank que estoura → bi-encoder, não propaga),
+  `test_telemetry.py` (`reranker_aplicado=False`); `test_telemetry` fixou
+  `reranker_enabled=False` no teste do caminho bi-encoder (dependia do `.env`,
+  igual INF-11).
+
+- **2026-09-09** — RET-7: reescrito (§2), repriorizado 🔴 e caminho escolhido —
+  **(b) calibrar `RERANKER_THRESHOLD`**. `scripts/calibrar_reranker.py`: varredura
+  de `T` sobre 1+ rodadas do `eval_run` feitas com `RERANKER_ENABLED=true` —
+  mediana de `score_top` por pergunta (à la RET-2), recomenda o maior `T` com
+  zero regressão de acerto real e lista os vazamentos (Q4 etc.) que ele corta.
+  Um `T` só muda roteamento quando `score_top < T` (derruba todos os chunks) →
+  a varredura só precisa de `origem_esperada`, **não** da `resposta_referencia`
+  da T-1. Sem infra: lê só o JSON de resultado. Fluxo em
+  `eval/fidelidade/README.md`; entrada em `scripts/help.py`. Testes em
+  `test_calibrar_reranker.py`. **Falta**: rodar o `eval_run` (PT + EN) com o
+  reranker ligado 2–3× (Postgres + reingestão + cota), rodar o calibrador,
+  fixar o `T` no `.env` e a rodada de confirmação.
+
 - **2026-09-02** — INF-10: `RedisRateLimiter` em `app/api/ratelimit.py` — contadores
   compartilhados entre workers (`INCR` p/ tetos diários, sorted set + pipeline
   `MULTI/EXEC` p/ a janela deslizante). `get_rate_limiter()` escolhe o backend por

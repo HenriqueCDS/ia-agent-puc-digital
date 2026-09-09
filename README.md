@@ -225,9 +225,8 @@ de vector store, de LLM, de cache, de busca e de relógio.
 ### Validado ponta a ponta
 
 O caminho completo `ingest → embeddings locais (e5-base) → pgvector →
-retrieve → LLM` já rodou contra um banco real e um corpus de 3 PDFs (1289
-chunks) — ver a rodada de avaliação em
-[`eval/analises/analise-telemetria-2026-08-26.md`](eval/analises/analise-telemetria-2026-08-26.md).
+retrieve → LLM` já rodou contra um banco real e um corpus de 152 arquivo(s) (7840
+chunks) 
 
 O backlog priorizado de calibração e correções — com histórico e o que já foi
 aplicado — está em [`eval/backlog-problemas.md`](eval/backlog-problemas.md).

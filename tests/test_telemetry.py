@@ -88,6 +88,11 @@ def registros(caplog, monkeypatch):
 
 
 def test_resposta_da_base_registra_custo_qualidade_e_latencia(monkeypatch, registros):
+    # Caminho bi-encoder: fixa o setting para não depender do `.env` de quem
+    # roda a suíte (em prod `RERANKER_ENABLED=true`). Mesmo motivo em test_retrieval.
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "reranker_enabled", False)
     monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(), _chunk(chunk_id="c2")])
     telemetry.set_canal("cli")
 
@@ -119,6 +124,22 @@ def test_o_texto_da_pergunta_nunca_e_registrado(monkeypatch, registros):
     linha = json.dumps(reg, ensure_ascii=False)
     assert "boleto" not in linha and "12345" not in linha
     assert reg["pergunta_hash"] == telemetry.hash_pergunta(sensivel)
+
+
+def test_reranker_aplicado_false_quando_ligado_mas_o_rerank_falhou(monkeypatch, registros):
+    """RET-8 — 2º estágio ligado + chunks sem `score_bruto` = o rerank caiu para
+    o bi-encoder. `reranker_aplicado=False`, distinto de `None` (desligado)."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    # chunks sem `score_bruto` — o que `retriever` devolve quando `rerank` falha
+    monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk(), _chunk(chunk_id="c2")])
+
+    responder.answer(Query(text=PERGUNTA, assunto="canvas"), llm=FakeLLM())
+
+    (reg,) = registros
+    assert reg["reranker_aplicado"] is False
+    assert reg["score_top_bruto"] is None
 
 
 def test_hash_agrupa_a_mesma_pergunta_e_separa_perguntas_diferentes():

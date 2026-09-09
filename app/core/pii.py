@@ -22,6 +22,16 @@ o aluno cola no texto ("minha senha é Aluno@2026, não entra"). A senha não é
 LGPD no sentido estrito, mas é credencial — e o pior lugar para ela parar é o
 prompt que segue para o provedor de LLM (ver `responder._sem_pii`, PII-1/PII-2).
 
+NOME PRÓPRIO e ENDEREÇO ficam de fora — decisão registrada (PII-4). O único
+campo derivado que poderia carregá-los é `topico` (escrito pelo LLM a partir da
+pergunta: "acesso do aluno João da Silva"), e a telemetria tem retenção de 7
+dias (`TELEMETRY_RETENTION_DAYS`). O risco — um nome sobreviver uma semana no
+JSONB — é ACEITO: cobri-lo exigiria um NER offline (spaCy/stanza) sobre os
+campos derivados, ou seja um modelo e uma dependência novos no boot, para um
+vazamento de baixa gravidade e janela curta. Reavaliar se a retenção aumentar,
+ou se a telemetria passar a gravar texto livre de aluno real (hoje só
+`scripts/eval_run.py` grava `resposta`, e só com dataset sintético).
+
 FALSO NEGATIVO É ACEITÁVEL, FALSO POSITIVO NÃO. Um alerta que dispara em número
 de protocolo ou em ano ("2024 2025") vira ruído e é ignorado em duas semanas —
 por isso o CPF sem pontuação é validado pelos dígitos verificadores e o telefone

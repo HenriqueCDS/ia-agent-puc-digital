@@ -198,7 +198,10 @@ class Registro:
     # Tema da pergunta em poucas palavras, escrito pelo próprio modelo na última
     # linha da resposta (ver `prompts.separar_topico`). Enquanto `assunto` diz
     # "canvas", isto diz "envio de atividade com prazo expirado" — é o que vira
-    # pauta de trabalho. Nulo quando não houve chamada ao LLM.
+    # pauta de trabalho. Nulo quando não houve chamada ao LLM. Passa por
+    # `pii.mascarar` no `finally` de `registrar` (CPF/RA/e-mail/telefone/senha);
+    # nome próprio e endereço NÃO são cobertos, por decisão — ver o cabeçalho de
+    # `app/core/pii.py` (PII-4).
     topico: str | None = None
 
     origem: str | None = None
@@ -209,7 +212,10 @@ class Registro:
     score_top: float | None = None
 
     # RET-3 — o 2º estágio (cross-encoder) rodou nesta pergunta? `None` quando
-    # `RERANKER_ENABLED=false` (o caminho bi-encoder de sempre).
+    # `RERANKER_ENABLED=false` (o caminho bi-encoder de sempre); `True` quando
+    # rodou; `False` (RET-8) quando estava ligado mas `rerank` falhou e o
+    # retrieval caiu para o bi-encoder. `False` recorrente = o cross-encoder
+    # não está de pé na VM.
     reranker_aplicado: bool | None = None
     # `score_top` do BI-ENCODER (E5), antes do rerank. Mantém a série histórica
     # comparável (o `score_top` abaixo passa a ser o do cross-encoder quando ele

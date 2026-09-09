@@ -33,18 +33,14 @@ def retrieve(query: Query, store: PGVector | None = None) -> list[RetrievedChunk
     (subconjunto de `ms_retrieve`) — é a métrica que o A/B do RET-3 precisa
     (INF-9). Fora de `answer()` a medição é um no-op.
 
-    RET-7 — o piso de E5 no 1º estágio: com o reranker ligado, o corte final é
-    `RERANKER_THRESHOLD` (default 0.0, a calibrar). Sem o piso de E5, "reranker
-    ligado + threshold não calibrado" deixaria passar lixo fora de domínio que o
-    caminho bi-encoder cortava (Q4 fotossíntese, 0.82 no E5 < 0.85). Então um
-    candidato que o E5 pontua abaixo de `RELEVANCE_THRESHOLD` nunca chega ao
-    cross-encoder — o resultado sempre respeita o piso, reranker ou não.
-
-    RET-8 — o rerank não derruba o `/ask`: o cross-encoder pode estourar memória
-    na VM (o `config.py` admite que "aperta junto do E5"). Se `rerank` levantar
-    qualquer exceção, cai para a ordem bi-encoder já filtrada pelo piso de E5,
-    com WARNING e sem marcar `reranker_aplicado` — mesmo espírito da
-    `ProviderChain` (falha de dependência degrada, não propaga).
+    **RET-8** — o cross-encoder é uma dependência que pode falhar em runtime
+    (estoura a RAM da VM junto do E5, `sentence_transformers` ausente, modelo
+    corrompido). Se `rerank` levanta, o retrieval NÃO propaga o erro: cai para
+    a ordem do bi-encoder e o corte de `relevance_threshold`, como se
+    `RERANKER_ENABLED=false` — perfil §7, mesmo espírito da `ProviderChain`. A
+    telemetria distingue os três estados por `reranker_aplicado`: `None` (2º
+    estágio desligado), `True` (rodou), `False` (ligado, mas falhou e caiu) —
+    ver `responder._responder`.
     """
     store = store or get_vector_store()
 
@@ -83,16 +79,24 @@ def retrieve(query: Query, store: PGVector | None = None) -> list[RetrievedChunk
         from app.retrieval.reranker import rerank
 
         # INF-9 — cronometra só o 2º estágio, para o A/B do RET-3 medir o custo
-        # do cross-encoder isolado. Fora de `answer()` `telemetry.etapa` é no-op.
-        with telemetry.etapa("ms_rerank"):
-            rerankeados = rerank(query.text, candidatos)
-    except Exception:  # noqa: BLE001 - degradar é o comportamento desejado (RET-8)
-        logger.warning(
-            "reranker falhou; caindo para a ordem bi-encoder (piso de E5 mantido)",
-            exc_info=True,
-        )
-        return candidatos[: settings.top_k]
+        # do cross-encoder isolado. Fora de `answer()` (teste de unidade daqui)
+        # `telemetry.etapa` é no-op.
+        try:
+            with telemetry.etapa("ms_rerank"):
+                chunks = rerank(query.text, chunks)
+            limiar = settings.reranker_threshold
+        except Exception:
+            # RET-8 — falha do cross-encoder não derruba o `/ask`. Cai para a
+            # ordem do bi-encoder (E5 já devolve os candidatos ordenados) e o
+            # corte de `relevance_threshold`, o mesmo do caminho desligado.
+            # `chunks` segue com a lista do 1º estágio: a atribuição acima só
+            # acontece se `rerank` retorna. `score_bruto` fica `None`, o que
+            # `responder` lê como `reranker_aplicado=False`.
+            logger.warning(
+                "rerank falhou; retrieval caiu para a ordem bi-encoder", exc_info=True
+            )
+            limiar = settings.relevance_threshold
+    else:
+        limiar = settings.relevance_threshold
 
-    return [c for c in rerankeados if c.score >= settings.reranker_threshold][
-        : settings.top_k
-    ]
+    return [c for c in chunks if c.score >= limiar][: settings.top_k]
