@@ -1,0 +1,97 @@
+flowchart TB
+
+    %% ===================== INGESTÃO (offline) =====================
+    subgraph ING["📥 INGESTÃO — offline · scripts/ingest.py + scripts/crawl.py"]
+        direction LR
+        ING_FILES["Arquivos locais\ndata/raw/&lt;assunto&gt;/\nPDF · TXT · MD · DOCX · XLSX"]
+        ING_WEB["Páginas oficiais\nWEB_ALLOWLIST (fechada por path)\nPUC-Campinas · Canvas KB · Teams"]
+        ING_LOADER["loaders/registry.py\nfonte → Document"]
+        ING_CHUNK["chunker.py\n700/150 · dedup Jaccard\nid determinístico"]
+        ING_EMBED["embeddings locais\nmultilingual-e5-base\nCPU · sem cota de API"]
+
+        ING_FILES --> ING_LOADER
+        ING_WEB -- "pré-crawl semanal\n(GitHub Actions)" --> ING_LOADER
+        ING_LOADER --> ING_CHUNK --> ING_EMBED
+    end
+
+    %% ===================== RUNTIME DO AGENTE =====================
+    subgraph RUN["⚙️ RUNTIME DO AGENTE — POST /v1/ask · app/agent/responder.py"]
+        direction LR
+        R_IN["pergunta + X-API-Key\nrate limit · CORS · normalize"]
+        R_GUARD{{"guardrail léxico\nOWASP LLM Top 10"}}
+        R_TRIAGEM{{"triagem por assunto\nENCAMINHAMENTOS"}}
+        R_MASK["máscara de PII antes do egress\nRA · CPF · e-mail · telefone · senha"]
+        R_CACHE1{{"cache\npré-retrieval?"}}
+        R_RETRIEVE["retrieval — 2 estágios\nE5 bi-encoder → reranker\ncross-encoder → corte por limiar"]
+        R_USEFUL{{"contexto útil\nda base?"}}
+        R_CACHE2{{"cache\npós-retrieval?"}}
+        R_LLM["LLM — cadeia de fallback (4 provedores)\ngemini → huggingface → groq → openrouter"]
+        R_WEB["web_fallback.py\nbusca ao vivo (rara) · DuckDuckGo\nrevalida allowlist → similaridade → veto do LLM"]
+        R_ESCALATE(["encaminha → secretaria /\nsetor certo"])
+        R_ANSWER(["resposta + fontes + origem\nbase · web · encaminhado · nenhuma"])
+
+        R_IN --> R_GUARD
+        R_GUARD -- abuso --> R_ESCALATE
+        R_GUARD -- ok --> R_TRIAGEM
+        R_TRIAGEM -- "outro depto" --> R_ESCALATE
+        R_TRIAGEM -- "é do agente" --> R_MASK
+        R_MASK --> R_CACHE1
+        R_CACHE1 -- hit --> R_ANSWER
+        R_CACHE1 -- miss --> R_RETRIEVE
+        R_RETRIEVE --> R_USEFUL
+        R_USEFUL -- sim --> R_CACHE2
+        R_USEFUL -- não --> R_WEB
+        R_CACHE2 -- hit --> R_ANSWER
+        R_CACHE2 -- miss --> R_LLM
+        R_LLM -- "contexto serve" --> R_ANSWER
+        R_LLM -- "contexto insuficiente" --> R_WEB
+        R_WEB -- achou --> R_LLM
+        R_WEB -- nada --> R_ESCALATE
+    end
+
+    %% ===================== ARMAZENAMENTO =====================
+    subgraph DB["🗄️ POSTGRESQL + PGVECTOR — nenhuma infra extra"]
+        direction TB
+        DB_VEC[("langchain_pg_embedding\nchunks + vetores + metadata")]
+        DB_CACHE[("resposta_cache ·\nresposta_cache_pergunta\ncache pós / pré-retrieval")]
+        DB_TELE[("telemetria (JSONB)\n7d real / 90d eval\nexemplo_perguntas · revisao_veredictos")]
+    end
+
+    %% ===================== OBSERVABILIDADE =====================
+    subgraph OBS["📊 OBSERVABILIDADE E AVALIAÇÃO"]
+        direction LR
+        OBS_EVAL["scripts/eval_run.py\ndataset × agente real → canal eval"]
+        OBS_LACUNAS["scripts/lacunas.py\nrelatório de lacunas de ingestão"]
+        OBS_REVISAO["/revisao — dashboard (Chart.js)\n+ conferência de fidelidade"]
+        OBS_DEMO["/demo — frontend estático\nbadge de origem · fontes · latência"]
+    end
+
+    %% ===================== CONEXÕES ENTRE BLOCOS =====================
+    ING_EMBED ==> DB_VEC
+    R_RETRIEVE -.-> DB_VEC
+    R_CACHE1 -.-> DB_CACHE
+    R_CACHE2 -.-> DB_CACHE
+    R_ANSWER ==>|"1 linha por pergunta"| DB_TELE
+    R_ESCALATE ==>|"1 linha por pergunta"| DB_TELE
+
+    DB_TELE -.-> OBS_LACUNAS
+    DB_TELE -.->|"canal eval"| OBS_EVAL
+    DB_TELE -.-> OBS_REVISAO
+    R_ANSWER -.-> OBS_DEMO
+
+    %% ===================== ESTILOS =====================
+    classDef ingest fill:#DCEEFB,stroke:#2C5F8A,stroke-width:1.4px,color:#1B2733;
+    classDef process fill:#EAF2FB,stroke:#2C5F8A,stroke-width:1.4px,color:#1B2733;
+    classDef decision fill:#FDF3E3,stroke:#B8860B,stroke-width:1.4px,color:#4A3B0A;
+    classDef store fill:#F3E8FB,stroke:#7B4FA1,stroke-width:1.4px,color:#3A2650;
+    classDef answer fill:#E5F6EA,stroke:#2E8B57,stroke-width:1.6px,color:#1B3A26;
+    classDef escalate fill:#FBE5E5,stroke:#B02C2C,stroke-width:1.4px,color:#4A1414;
+    classDef obs fill:#EFEAFB,stroke:#5B4B8A,stroke-width:1.4px,color:#2A2140;
+
+    class ING_FILES,ING_WEB,ING_LOADER,ING_CHUNK,ING_EMBED ingest;
+    class R_IN,R_MASK,R_RETRIEVE,R_LLM,R_WEB process;
+    class R_GUARD,R_TRIAGEM,R_CACHE1,R_USEFUL,R_CACHE2 decision;
+    class DB_VEC,DB_CACHE,DB_TELE store;
+    class R_ANSWER answer;
+    class R_ESCALATE escalate;
+    class OBS_EVAL,OBS_LACUNAS,OBS_REVISAO,OBS_DEMO obs;

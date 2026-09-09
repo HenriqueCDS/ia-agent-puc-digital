@@ -20,7 +20,7 @@ de telemetria que alimenta o relatório de lacunas, a suíte de eval e o dashboa
 `/revisao`. A lista de componentes e as decisões estão em
 [arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md);
 a fonte do diagrama é
-[Prints/arquitetura-agente-ia-suporte-ead-v0.mmd](Prints/arquitetura-agente-ia-suporte-ead-v0.mmd).
+[Prints/arquitetura-agente-ia-suporte-ead-v0.mermaid](Prints/arquitetura-agente-ia-suporte-ead-v0.mermaid).
 
 ## Resumo
 

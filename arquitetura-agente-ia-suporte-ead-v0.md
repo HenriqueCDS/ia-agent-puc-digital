@@ -14,8 +14,8 @@ sincronia ao mexer na estrutura.
 
 ![Arquitetura atual do agente](Prints/arquitetura-agente-ia-suporte-ead-v0.png)
 
-Fonte do diagrama (mermaid, layout `elk`):
-[Prints/arquitetura-agente-ia-suporte-ead-v0.mmd](Prints/arquitetura-agente-ia-suporte-ead-v0.mmd).
+Fonte do diagrama (mermaid):
+[Prints/arquitetura-agente-ia-suporte-ead-v0.mermaid](Prints/arquitetura-agente-ia-suporte-ead-v0.mermaid).
 
 O hit **pré-retrieval** devolve `origem="base"` sem tocar em pgvector, reranker
 nem LLM. O hit **pós-retrieval** vem depois da busca e do rerank e só poupa a
