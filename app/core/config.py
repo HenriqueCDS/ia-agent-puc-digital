@@ -106,6 +106,19 @@ WEB_ALLOWLIST: tuple[FonteWeb, ...] = (
             "/prograd/proaces/",
             "/parcerias-e-convenios/",
             "/protecao-de-dados-pessoais/",
+            "/especializacao-de-administracao-publica/",
+            "/ciencia-de-dados-e-machine-learning/",
+            "/especializacao-em-data-science-para-negocios/",
+            "/direito-contratual/",
+            "/direito-de-familia-e-sucessoes/",
+            "/criminologia-direito-penal-e-processual-penal-teoria-e-pratica-avancada/",
+            "/direito-tributario/",
+            "/especializacao-em-genomica-clinica/",
+            "/especializacao-em-gerenciamento-de-projetos/",
+            "/gerontologia-e-geriatria/",
+            "/especializacao-em-gestao-de-negocios/",
+            "/especializacao-em-gestao-de-pessoas/",
+            "/industrias-e-servicos/"
         ),
         termos="PUC Campinas",
         assunto="puc-campinas",
@@ -225,7 +238,43 @@ secretaria acadêmica ou com o suporte da instituição ({email})."
 # A regra vale para termo que seja substring de outro. Se um dia "matricula"
 # entrar aqui, ele tem que vir DEPOIS de "rematricula" (e com `excecoes`),
 # senão toda rematrícula cairia na entrada errada.
+
+# Contato de apoio psicológico. O CVV (188, 24h, gratuito, nacional) é o
+# recurso verificável e imediato; a rota institucional aponta para a coordenação
+# / suporte, que encaminha ao serviço interno. SUBSTITUIR o trecho institucional
+# pelo e-mail/telefone do serviço de apoio psicológico da PUC-Campinas quando ele
+# estiver confirmado — não inventar endereço aqui (TRI-7).
+_APOIO_PSICOLOGICO = (
+    "Sinto muito que você esteja passando por isso — e você não precisa lidar com "
+    "isso sozinho(a). Procure a coordenação do seu curso ou o suporte da "
+    "instituição (puc.digital@puc-campinas.edu.br) para ser encaminhado(a) ao "
+    "serviço de apoio psicológico ao estudante. Se quiser falar com alguém agora, "
+    "o CVV (Centro de Valorização da Vida) atende 24 horas, de graça, pelo "
+    "telefone 188 e em https://cvv.org.br."
+)
+
 ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
+    # PRIMEIRA entrada de propósito (TRI-7): saúde mental / risco não pode
+    # depender de nenhuma outra categoria casar antes, nem cair no RAG e sair
+    # como `origem="nenhuma"`. Os termos são distintivos — ninguém pergunta
+    # "apoio psicológico" de passagem num suporte de Canvas. `psicologo`/
+    # `psicologa` não são substring de `psicologia` (o curso), então "quero
+    # cursar psicologia" não casa aqui.
+    CategoriaEncaminhada(
+        assunto="apoio ao estudante",
+        resposta=_APOIO_PSICOLOGICO,
+        termos=(
+            "saude mental",
+            "apoio psicologico",
+            "acompanhamento psicologico",
+            "atendimento psicologico",
+            "ajuda psicologica",
+            "psicologo",
+            "psicologa",
+            "pensando em desistir de tudo",
+            "vontade de desistir de tudo",
+        ),
+    ),
     CategoriaEncaminhada(
         assunto="financeiro",
         resposta=_CONTATO.format(email="dcr@puc-campinas.edu.br"),
@@ -282,7 +331,28 @@ ENCAMINHAMENTOS: tuple[CategoriaEncaminhada, ...] = (
         # radical `tranc` — mais explícito e sem risco de casar palavra não
         # relacionada. Nenhuma é substring da outra, a ordem entre elas não
         # importa (ver regra de substring no topo de ENCAMINHAMENTOS).
-        termos=("rematricula", "historico escolar", "trancamento", "trancar", "trancagem"),
+        #
+        # TRI-7 (rodada 90d, vários `encaminhado → nenhuma`): "prova
+        # substitutiva"/"segunda chamada" (depende de deferimento), "regimento
+        # interno" (texto normativo, não está na base e o snippet web nunca traz
+        # o artigo literal) e "disciplina isolada" (pedido de matrícula que
+        # depende do caso concreto — diferente de "matrícula" genérica, que segue
+        # para o RAG). Termos específicos o bastante para não colidir com dúvida
+        # de procedimento no Canvas.
+        termos=(
+            "rematricula", "historico escolar", "trancamento", "trancar", "trancagem",
+            "prova substitutiva", "segunda chamada", "regimento interno",
+            "regimento geral", "disciplina isolada", "disciplinas isoladas",
+        ),
+    ),
+    # TRI-7 — este assistente atende cursos a distância; oferta de graduação
+    # PRESENCIAL é de outro setor (vestibular / secretaria geral). Termos presos
+    # a "presencial" + curso/graduação para não casar "prova presencial" de um
+    # curso EAD.
+    CategoriaEncaminhada(
+        assunto="cursos presenciais",
+        resposta=_CONTATO.format(email="puc.digital@puc-campinas.edu.br"),
+        termos=("graduacao presencial", "cursos presenciais", "curso presencial"),
     ),
     # Ambígua, por isso em entrada PRÓPRIA (mesmo assunto e mesmo e-mail da
     # anterior, e não termo dela): "minha nota" tanto pede o valor da nota, que

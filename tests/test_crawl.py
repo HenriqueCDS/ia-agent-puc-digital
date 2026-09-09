@@ -173,6 +173,54 @@ def test_crawl_fonte_com_seeds_crawla_a_lista(monkeypatch):
     assert indexadas == [seed] and stats["paginas"] == 1
 
 
+def test_crawl_fonte_apenas_novos_pula_url_ja_indexada(monkeypatch):
+    nova = "https://www.puc-campinas.edu.br/mestrado-e-doutorado/nova/"
+    velha = "https://www.puc-campinas.edu.br/biblioteca/servicos/"
+    monkeypatch.setattr(crawl, "descobrir_urls", lambda s, f: ([nova, velha], True))
+    monkeypatch.setattr(crawl, "get_vector_store", lambda: object())
+    monkeypatch.setattr(crawl, "list_web_sources", lambda store: [(velha, 4)])
+    indexadas = []
+    monkeypatch.setattr(
+        crawl, "ingest_documents", lambda docs, sp: indexadas.append(sp) or (1, 0)
+    )
+    html = (
+        "<html><head><title>Nova</title></head><body><main>"
+        + "conteudo de procedimento academico da pagina nova " * 20
+        + "</main></body></html>"
+    )
+    sessao = FakeSessao({nova: _resp(text=html)})
+
+    stats = crawl._crawl_fonte(
+        _FONTE, sessao=sessao, limite=0, delay=0, dry_run=False, apenas_novos=True
+    )
+
+    assert indexadas == [nova]  # a já indexada nem foi buscada
+    assert velha not in sessao.pedidos
+    assert stats["urls"] == 1 and stats["paginas"] == 1
+
+
+def test_crawl_fonte_apenas_novos_com_prune_ainda_compara_sitemap_inteiro(monkeypatch):
+    """--apenas-novos filtra só o que vai ser buscado; o prune continua olhando
+    o sitemap inteiro, então página já indexada que está no sitemap não vira órfã."""
+    a = f"{_ALLOW}/a/"
+    b = f"{_ALLOW}/b/"
+    monkeypatch.setattr(crawl, "descobrir_urls", lambda s, f: ([a, b], True))
+    monkeypatch.setattr(crawl, "get_vector_store", lambda: object())
+    monkeypatch.setattr(crawl, "list_web_sources", lambda store: [(a, 1), (b, 1)])
+    monkeypatch.setattr(crawl, "ingest_documents", lambda *x, **k: (0, 0))
+    monkeypatch.setattr(
+        crawl, "delete_by_source", lambda *x: pytest.fail("nada saiu do sitemap")
+    )
+
+    stats = crawl._crawl_fonte(
+        _FONTE, sessao=FakeSessao({}), limite=0, delay=0,
+        dry_run=False, prune=True, apenas_novos=True,
+    )
+
+    assert stats["urls"] == 0  # a e b já indexadas -> nada para buscar
+    assert stats["orfas"] == 0
+
+
 def test_extrair_tira_menu_e_rodape():
     html = """
     <html><head><title>Calendário Acadêmico</title></head>

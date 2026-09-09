@@ -192,6 +192,66 @@ def test_excecoes_da_nota_nao_desarmam_os_outros_termos_academicos():
     assert categoria is not None and categoria.assunto == "academico"
 
 
+# --- TRI-7: temas da rodada 90d que caíam em `encaminhado → nenhuma` ---------
+
+
+@pytest.mark.parametrize(
+    "pergunta,assunto",
+    [
+        ("Como faço para reagendar uma prova substitutiva que perdi?", "academico"),
+        ("Tenho direito a segunda chamada da prova?", "academico"),
+        (
+            "Preciso do texto literal do artigo do regimento interno sobre plágio.",
+            "academico",
+        ),
+        ("Como faço a matrícula em uma disciplina isolada?", "academico"),
+        (
+            "Quais cursos de graduação presencial a PUC Campinas oferece?",
+            "cursos presenciais",
+        ),
+    ],
+)
+def test_temas_90d_agora_sao_encaminhados(pergunta, assunto):
+    """TRI-7: a triagem não classificava, caía no RAG e desistia (`nenhuma`).
+    Termos específicos o bastante para não colidir com dúvida de procedimento."""
+    categoria = classificar(pergunta)
+
+    assert categoria is not None and categoria.assunto == assunto
+
+
+@pytest.mark.parametrize(
+    "pergunta",
+    [
+        "Estou com problemas de saúde mental grave e pensando em desistir de tudo, "
+        "onde posso buscar apoio psicológico na faculdade?",
+        "Preciso de acompanhamento psicológico, a faculdade oferece?",
+        "Onde encontro o psicólogo da instituição?",
+    ],
+)
+def test_apoio_psicologico_e_encaminhado_com_contato_humano(pergunta):
+    """TRI-7 — PRIORIDADE: saúde mental nunca pode sair como `origem="nenhuma"`.
+    A resposta traz rota humana (coordenação/suporte) e o CVV 188."""
+    categoria = classificar(pergunta)
+
+    assert categoria is not None and categoria.assunto == "apoio ao estudante"
+    assert "188" in categoria.resposta
+    assert "puc.digital@puc-campinas.edu.br" in categoria.resposta
+
+
+@pytest.mark.parametrize(
+    "pergunta",
+    [
+        # "psicologo"/"psicologa" não são substring de "psicologia" (o curso).
+        "Quero me matricular no curso de Psicologia, como faço?",
+        # "presencial" sozinho não casa — só com curso/graduação.
+        "A prova final do meu curso a distância será presencial?",
+        "O polo de apoio presencial fica aberto aos sábados?",
+    ],
+)
+def test_tri7_nao_pega_falso_positivo(pergunta):
+    assert classificar(pergunta) is None
+
+
 # --- precedência entre categorias --------------------------------------------
 
 
@@ -225,6 +285,24 @@ def test_encaminhamento_nao_toca_no_rag_nem_no_llm(monkeypatch):
     assert resultado.grounded is False
     assert resultado.sources == []
     assert "dcr@puc-campinas.edu.br" in resultado.text
+
+
+def test_apoio_psicologico_nunca_sai_como_origem_nenhuma(monkeypatch):
+    """TRI-7 (prioridade): a pergunta de saúde mental é encaminhada ANTES do
+    retrieval — não pode depender de a base achar algo, nem sair `nenhuma`."""
+
+    def nao_deveria_ser_chamado(_query):
+        raise AssertionError("retrieval não pode rodar para apoio psicológico")
+
+    monkeypatch.setattr(responder, "retrieve", nao_deveria_ser_chamado)
+
+    resultado = responder.answer(
+        Query(text="pensando em desistir de tudo, preciso de apoio psicológico"),
+        llm=None,
+    )
+
+    assert resultado.origem == "encaminhado"
+    assert "188" in resultado.text
 
 
 def test_kill_switch_devolve_a_pergunta_para_o_rag(monkeypatch):

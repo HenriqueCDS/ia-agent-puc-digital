@@ -12,6 +12,7 @@ quando nem o conteúdo crawlado cobre.
     python -m scripts.crawl --host puc-campinas.edu.br
     python -m scripts.crawl --dry-run           # lista as URLs, não indexa
     python -m scripts.crawl --limite 40 --delay 1.5
+    python -m scripts.crawl --apenas-novos      # só as URLs ainda NÃO indexadas (não rebusca página já no índice)
     python -m scripts.crawl --prune             # re-crawl + remove do índice a página que saiu do sitemap (KB-5)
 
 O job semanal (`.github/workflows/recrawl.yml`) roda `--prune`. O prune só age
@@ -334,12 +335,30 @@ def _crawl_fonte(
     dry_run: bool,
     prune: bool = False,
     prune_force: bool = False,
+    apenas_novos: bool = False,
 ) -> dict:
     rp = _robots(sessao, fonte.host)
     urls_todas, sitemap_confiavel = descobrir_urls(sessao, fonte)
     urls = urls_todas[:limite] if limite else urls_todas
 
-    de_quantas = "" if not limite else f" (de {len(urls_todas)} no sitemap)"
+    # --apenas-novos: pula a URL que já tem chunks no índice. Não rebusca para
+    # ver se o conteúdo mudou (para isso é o re-crawl completo) — serve para
+    # quando a allowlist/seeds ganhou páginas e só elas precisam entrar. O prune
+    # segue comparando contra o sitemap INTEIRO (`urls_todas`), então filtrar
+    # aqui não faz página já indexada virar órfã.
+    ja_indexadas = 0
+    if apenas_novos:
+        indexadas = {sp for sp, _ in list_web_sources(get_vector_store())}
+        antes = len(urls)
+        urls = [u for u in urls if u not in indexadas]
+        ja_indexadas = antes - len(urls)
+
+    partes = []
+    if limite:
+        partes.append(f"de {len(urls_todas)} no sitemap")
+    if ja_indexadas:
+        partes.append(f"{ja_indexadas} já indexada(s) puladas")
+    de_quantas = f" ({'; '.join(partes)})" if partes else ""
     typer.secho(
         f"\n{fonte.host}  ({', '.join(fonte.path_prefixes)})  ->  {len(urls)} URL(s){de_quantas}",
         fg=typer.colors.CYAN,
@@ -440,6 +459,13 @@ def main(
         help="Confirma o prune mesmo quando mais da metade das páginas indexadas sumiu do "
         "sitemap (em geral sinal de migração de URL, não remoção).",
     ),
+    apenas_novos: bool = typer.Option(
+        False,
+        "--apenas-novos",
+        help="Só crawla a URL que ainda NÃO tem chunks no índice. Não rebusca página já "
+        "indexada (para atualizar conteúdo, rode o crawl completo). Útil quando a "
+        "allowlist/seeds ganhou páginas novas.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Log página a página."),
 ) -> None:
     logging.basicConfig(level=logging.INFO if verbose else logging.WARNING, format="%(message)s")
@@ -462,6 +488,7 @@ def main(
         s = _crawl_fonte(
             fonte, sessao=sessao, limite=limite, delay=delay,
             dry_run=dry_run, prune=prune, prune_force=prune_force,
+            apenas_novos=apenas_novos,
         )
         for k in total:
             total[k] += s[k]
