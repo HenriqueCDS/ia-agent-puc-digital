@@ -1,0 +1,102 @@
+[
+  {
+    "assunto": "Alteração de e-mail cadastrado",
+    "texto_modelo": "Olá, {{nome}}!\n\nEm relação ao seu e-mail pessoal cadastrado, pedimos, por gentileza, que entre em contato diretamente com o PUC Digital pelo e-mail puc-digital@puc-campinas.edu.br para solicitar a alteração.\n\nCaso a solicitação seja referente ao seu e-mail institucional, informamos que não é possível realizar a alteração, pois esse endereço é gerado automaticamente a partir do seu RA (Registro Acadêmico).\n\nAgradecemos a compreensão e permanecemos à disposição.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como altero o meu e-mail cadastrado no sistema acadêmico", "RES: Alteração de e-mail", "Trocar e-mail de contato"],
+    "redirecionado": false
+  },
+
+  {
+    "assunto": "Envio de atividade no Canvas com prazo expirado",
+    "texto_modelo": "Olá, {{nome}}!\n\nO Canvas só permite o envio após a data limite quando o professor mantém a atividade aberta para envios atrasados. Se o botão de envio ainda estiver disponível, você pode enviar normalmente e o sistema registrará a entrega como atrasada.\n\nCaso o envio já esteja bloqueado, entre em contato diretamente com o professor da disciplina para avaliar a reabertura do prazo ou uma forma alternativa de entrega. O puc-digital@puc-campinas dá suporte à plataforma, mas não altera prazos de atividades.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como envio uma atividade no Canvas cujo prazo já expirou", "Enviar tarefa atrasada no Canvas"],
+    "redirecionado": false
+  },
+  {
+    "assunto": "Envio de tarefas com atraso por motivo médico",
+    "texto_modelo": "Olá, {{nome}}!\n\nA entrega de atividades fora do prazo por motivo de saúde depende da avaliação do professor da disciplina e das normas acadêmicas do seu curso. Orientamos:\n\n1. Comunicar o professor o quanto antes, anexando o atestado médico.\n2. Protocolar o atestado junto à Secretaria ou Coordenação do seu curso, setor responsável por validar a justificativa e orientar sobre reposição.\n\nO PUC Digital presta suporte à plataforma \n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Qual é o procedimento para envio de tarefas com atraso por motivo médico"],
+    "redirecionado": true
+  },
+  {
+    "assunto": "Visualizar a grade curricular do curso",
+    "texto_modelo": "Olá, {{nome}}!\n\nA grade curricular (matriz do curso) pode ser consultada no portal acadêmico, na área do aluno, na seção de curso / histórico, e também na página do seu curso no site da PUC-Campinas.\n\nNo Canvas aparecem apenas as disciplinas em que você está matriculado no período atual, e não a matriz completa. Se precisar da matriz oficial para algum trâmite, solicite à Secretaria do seu curso.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como faço para visualizar a grade curricular do meu curso no ambiente virtual", "Onde vejo a matriz curricular"],
+    "redirecionado": false
+  },
+
+  {
+    "assunto": "Recuperação de senha e acesso à conta institucional",
+    "texto_modelo": "Olá, {{nome}}!\n\nO acesso ao Canvas e ao portal acadêmico usa a mesma conta institucional da PUC-Campinas. Se você esqueceu a senha e não tem mais acesso ao e-mail de recuperação, a redefinição precisa ser feita pelo PUC Digital:\n\n- E-mail: puc-digital@puc-campinas.edu.br\n- Informe nome completo, RA e curso para a confirmação de identidade.\n\nPor segurança da sua conta, não é possível redefinir a senha institucional sem essa validação.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como posso resetar a senha do meu portal acadêmico se esqueci meu e-mail de recuperação", "Esqueci minha senha e não consigo entrar no Canvas, como faço para recuperar o acesso", "Reset de senha sem e-mail de recuperação"],
+    "redirecionado": true
+  },
+  {
+    "assunto": "Consultar notas de semestres anteriores",
+    "texto_modelo": "Olá, {{nome}}!\n\nAs notas de períodos anteriores ficam no portal acadêmico, na área do aluno, na seção de Disciplina / histórico  / notas e frequência, com filtro por semestre.\n\nO Canvas mantém apenas as notas lançadas nas disciplinas do período corrente; o registro oficial e histórico é o do portal acadêmico. Se precisar de um histórico com validade oficial, solicite à Secretaria do seu curso.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como eu consulto minhas notas do semestre passado"],
+    "redirecionado": false
+  },
+  {
+    "assunto": "Suporte do Canvas para navegador não suportado",
+    "texto_modelo": "Olá, {{nome}}!\n\nO Canvas é compatível com as duas versões mais recentes dos principais navegadores (Google Chrome, Mozilla Firefox, Microsoft Edge e Safari). Se aparecer o aviso de navegador não suportado:\n\n1. Atualize o navegador para a versão mais recente ou instale um dos navegadores acima.\n2. Limpe o cache e os cookies e faça login novamente.\n3. Teste em uma janela anônima ou em outro dispositivo para isolar o problema.\n\nSe o aviso persistir mesmo com o navegador atualizado, escreva para puc-digital@puc-campinas.edu.br informando navegador, versão e sistema operacional, com uma captura de tela.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como funciona o suporte técnico do Canvas para navegador não suportado"],
+    "redirecionado": false
+  },
+  {
+    "assunto": "Pontuação de Atividades Complementares (AACC)",
+    "texto_modelo": "Olá, {{nome}}!\n\nAs regras de Atividades Acadêmico-Científico-Culturais (AACC) — carga horária total exigida, categorias aceitas, limites por tipo de atividade e forma de comprovação — são definidas pelo Projeto Pedagógico de cada curso.\n\nPara o seu caso, consulte o regulamento de AACC do seu curso (disponível com a Coordenação) e faça o registro e a validação das horas junto à Secretaria ou Coordenação. O PUC Digital não faz o cômputo dessas horas.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como funciona a pontuação por Atividades Complementares (AAC) no meu curso"],
+    "redirecionado": true
+  },
+  {
+    "assunto": "Trancamento de disciplina ou do curso",
+    "texto_modelo": "Olá, {{nome}}!\n\nInformamos que não é possível realizar o trancamento individual de uma disciplina nem o trancamento do curso.\n\nCaso o aluno não possa continuar os estudos, é possível solicitar o cancelamento do curso. Posteriormente, caso queira retornar, poderá realizar uma nova matrícula no curso e solicitar o aproveitamento das disciplinas que já foram concluídas e aprovadas, conforme as regras da instituição.\n\nDessa forma, as disciplinas já realizadas e aprovadas poderão ser consideradas no retorno, não sendo necessário cursá-las novamente, desde que atendam aos critérios de aproveitamento.\n\nEm caso de dúvidas sobre o cancelamento ou uma futura rematrícula, recomendamos entrar em contato com a Secretaria do curso.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": [
+      "Posso trancar uma disciplina?",
+      "É possível trancar o curso?",
+      "Quero trancar minha pós-graduação",
+      "Como faço para trancar uma matéria?"
+    ],
+    "redirecionado": true
+  },
+  {
+    "assunto": "Reagendamento de prova substitutiva",
+    "texto_modelo": "Olá, {{nome}}!\n\nA solicitação e o agendamento de prova substitutiva (segunda chamada) são feitos junto ao professor da disciplina e à Secretaria ou Coordenação do seu curso, dentro do prazo previsto no regulamento, geralmente mediante justificativa e documento comprobatório.\n\nO PUC Digital dá suporte à plataforma, mas não agenda avaliações. Procure a Secretaria do seu curso o quanto antes.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como faço para reagendar uma prova substitutiva que perdi"],
+    "redirecionado": true
+  },
+  {
+    "assunto": "Matrícula em disciplina isolada",
+    "texto_modelo": "Olá, {{nome}}!\n\nA matrícula em disciplina  — cursos que a oferecem, período de solicitação, número de vagas e valores — é tratada pela Secretaria Acadêmica e pela coordenação do curso responsável pela disciplina.\n\nEntre em contato com puc-digital@puc-campinas.edu.br de interesse para verificar a disponibilidade e o procedimento no período vigente.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Como faço a matrícula de uma depedencia", "Solicito DP"],
+    "redirecionado": true
+  },
+  
+  {
+    "assunto": "Datas do calendário acadêmico",
+    "texto_modelo": "Olá, {{nome}}!\n\nAs datas oficiais do calendário acadêmico são publicadas no site da PUC-Campinas nesse link:https://www.puc-campinas.edu.br/calendario/. A Puc-digital também pode informar as datas específicas.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Quais são as datas exatas do calendário acadêmico deste semestre"],
+    "redirecionado": true
+  },
+  {
+    "assunto": "Nota de corte",
+    "texto_modelo": "Olá, {{nome}}! Bom dia!\n\nNas disciplinas dos cursos de Pós-Graduação EAD da PUC-Campinas, a nota mínima para aprovação é 7,0.\n\nCaso o aluno obtenha uma nota inferior a 7,0, será considerado reprovado na disciplina e deverá realizar a dependência da matéria para concluir o curso e, posteriormente, emitir o diploma de conclusão.\n\nAgradecemos a compreensão.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["Nota de aprovação", "nota minima para aprovacao"],
+    "redirecionado": false
+  }
+ 
+]
