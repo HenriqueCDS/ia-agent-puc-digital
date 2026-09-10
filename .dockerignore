@@ -1,0 +1,35 @@
+# Segredos — NUNCA na imagem (injetar via env/Secrets Manager)
+.env
+.env.*
+!.env.example
+
+# Ambiente local e caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Git e metadados
+.git/
+.github/
+.gitignore
+.claude/
+
+# Documentos de origem da ingestão — vão para o S3, não para a imagem
+# (a ingestão roda como task separada; ver comentário no Dockerfile)
+data/raw/
+data/processed/
+
+# Artefatos de avaliação e prints
+eval/resultados/
+Prints/
+*.ipynb
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
