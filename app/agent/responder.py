@@ -499,22 +499,41 @@ def _responder(
                 text=categoria.resposta, sources=[], grounded=False, origem="encaminhado"
             )
 
+    # Cache PRÉ-RETRIEVAL: um hit numa pergunta já respondida pela base devolve a
+    # resposta sem tocar em pgvector nem no cross-encoder — mata o `retrieve()`
+    # inteiro, não só a chamada ao LLM (que o cache pós-retrieval já poupa). Só o
+    # caminho `origem="base"` bem-sucedido é gravado (ver `_tentar_base`).
+    #
+    # Fica DEPOIS de guardrail/triagem/PII (léxico sobre o texto original, sem
+    # egress) e ANTES do retrieval. A chave não tem os ids dos chunks, então a
+    # invalidação é explícita: cada reingestão limpa a tabela
+    # (`ingestion.pipeline._indexar_chunks`). Desligado no canal `eval` (a suíte
+    # precisa medir retrieval + rerank) e com `query.modelo` (a chave não carrega
+    # o modelo — mesma razão do cache pós-retrieval).
+    pre_cache_key = None
+    if (
+        settings.cache_enabled
+        and settings.pre_retrieval_cache_enabled
+        and not query.modelo
+        and registro.canal != "eval"
+    ):
+        pre_cache_key = _pre_retrieval_cache_key(query)
+        cacheado = get_cached_pre_retrieval(pre_cache_key)
+        if cacheado is not None:
+            bruto, fontes_json = cacheado
+            logger.info("cache pré-retrieval hit (%s...)", pre_cache_key[:8])
+            registro.cache_hit = True
+            registro.cache_pre_retrieval = True
+            fontes = [_fonte_de_json(f) for f in fontes_json]
+            _registrar_scores(registro, fontes)
+            _registrar_assunto(registro, _assunto_dos_chunks(fontes), "metadata")
+            texto, registro.topico = separar_topico(bruto)
+            return Answer(text=texto, sources=fontes, grounded=True, cached=True)
+
     with telemetry.cronometro(registro, "ms_retrieve"):
         chunks = retrieve(query)
 
-    registro.n_chunks = len(chunks)
-    registro.score_top = round(chunks[0].score, 4) if chunks else None
-    # Dispersão do top-k junto do topo: é o par que permite testar a margem
-    # relativa depois, sem guardar os k scores. Ver `telemetry.Registro`.
-    if chunks:
-        registro.score_min = round(chunks[-1].score, 4)
-        registro.score_mean = round(sum(c.score for c in chunks) / len(chunks), 4)
-        # RET-3 — quando o reranker rodou, `chunks[*].score` é do cross-encoder
-        # (outra escala); `score_bruto` traz o score de E5 do 1º estágio, e é o
-        # que mantém a série `score_top` histórica comparável.
-        if chunks[0].score_bruto is not None:
-            registro.reranker_aplicado = True
-            registro.score_top_bruto = round(chunks[0].score_bruto, 4)
+    _registrar_scores(registro, chunks)
     _registrar_assunto(registro, _assunto_dos_chunks(chunks), "metadata")
 
     # Guardrail: em suporte acadêmico, não responder é melhor que alucinar um

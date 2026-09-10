@@ -1,0 +1,15 @@
+[
+  {
+    "assunto": "Nota de corte",
+    "texto_modelo": "Olá, {{nome}}! Bom dia!\n\nNas disciplinas dos cursos de Pós-Graduação EAD da PUC-Campinas, a nota mínima para aprovação é 7,0.\n\nCaso o aluno obtenha uma nota inferior a 7,0, será considerado reprovado na disciplina e deverá realizar a dependência da matéria para concluir o curso e, posteriormente, emitir o diploma de conclusão.\n\nAgradecemos a compreensão.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "assuntos_variantes": ["RES: Nota de corte", "ENC: nota minima para aprovacao"],
+    "redirecionado": false
+  },
+  {
+    "assunto": "Contato da secretaria de estágios",
+    "texto_modelo": "Olá, {{nome}}!\n\nPara assuntos relacionados a estágio, o atendimento é feito diretamente pela Secretaria de Estágios, pelo e-mail estagios@puc-campinas.edu.br.\n\nAtenciosamente,",
+    "slots": ["nome"],
+    "redirecionado": true
+  }
+]

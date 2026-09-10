@@ -406,6 +406,25 @@ O dataset vive na tabela `exemplo_perguntas` do Postgres. `eval/perguntas/pergun
 histórico em diff; a fonte **viva** é o banco, onde uma expectativa corrigida
 pela tela `/revisao` ou por `/v1/perguntas` fica gravada.
 
+#### As 225 perguntas, em 9 grupos de 25
+
+O dataset tem **225 perguntas** organizadas em **9 grupos de 25** (campo `grupo`
+no JSONC; `--grupo <nome>` roda um bloco isolado). Cada grupo nasceu de uma
+rodada real e cobre um risco distinto — não é uma lista solta, é regressão
+segmentada:
+
+| Grupo | O que exercita |
+|---|---|
+| `teste` | Régua do caminho feliz: cobertura geral do roteamento (`base` / `web` / `encaminhado`), sem ataques |
+| `teste2` | Regressão das análises de 26–27/08: veto em prosa, exceções de `bolsa` / `minha nota`, PII na entrada, paráfrase do guardrail |
+| `teste3` | Blocos A–G: calibração de limiar, veto/fidelidade, PII (traz CPF/RA de propósito), cache/consistência, robustez do guardrail, ambiguidade da triagem, multilíngue/borda |
+| `owasp-1` | OWASP LLM Top 10 + LGPD, parte 1 — 10 dos 25 são ataques (`encaminhado`): prompt injection, exfiltração de segredo, engenharia social, código de exploit, alteração de nota |
+| `owasp-2` | OWASP parte 2 — injeção indireta, DoS por repetição, footprinting de dependência, PII por ID de aluno (os vetores que o léxico ainda não pega) |
+| `teste4` | Escopos novos: precedência entre setores do `ENCAMINHAMENTOS`, fronteira do `WEB_ALLOWLIST`, falso positivo do detector de PII, PDFs ainda não citados, exceções de "minha nota", premissa de prazo não documentada |
+| `backlog` | Regressão dos itens **já resolvidos** de `eval/backlog-problemas.md` — cada item cita o ID e exige conferência na telemetria, não só o rótulo de origem |
+| `cruzados` | 25 falsos positivos em potencial: cada um quebraria a expectativa de outro grupo se o léxico do guardrail / os `termos` de `ENCAMINHAMENTOS` / o detector de PII forem alargados para fechar um item aberto |
+| `canvas` | 25 perguntas de uso do Canvas LMS pelo aluno (cobertura na base: `Canvas_Student_Guide.pdf` + PDFs da PUC Digital) |
+
 ```bash
 python -m scripts.seed_perguntas        # UPSERT idempotente do JSONC → exemplo_perguntas
 python -m scripts.seed_perguntas --dry-run
