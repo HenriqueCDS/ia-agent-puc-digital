@@ -46,7 +46,7 @@ OpenRouter atrás de uma interface única.
 
 **Números:** 602 testes que rodam **sem banco, sem chave de API e sem rede**
 (dublês de vector store, LLM, cache, busca e relógio); validado ponta a ponta
-contra Postgres real com 1289 chunks.
+contra Postgres real 165 arquivo(s), 8100 chunk(s) no total..
 
 **Boa porta de entrada para leitura:** a seção
 [Decisões e trade-offs](#decisões-e-trade-offs) — cada bullet é uma escolha com o
