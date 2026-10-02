@@ -181,6 +181,12 @@ def test_2a_camada_no_prompt_pega_o_abuso_parafraseado(monkeypatch, resposta_do_
     veto de contexto) roteia para o MESMO desfecho do guardrail — sem tentar a
     web, mesmo quando a recusa vem embrulhada numa frase que triparia o veto."""
     monkeypatch.setattr(responder, "retrieve", lambda q: [_chunk_qualquer()])
+    # Cache-miss explícito: sem isto, `_tentar_base` cai no caminho real de
+    # `get_cached_answer` -> `get_vector_store` -> `get_embeddings`, que tenta
+    # carregar o e5 de verdade (rede/HF Hub) — mesmo mock que toda outra
+    # pergunta nova feita a `responder.answer` nos testes já usa (ver
+    # test_telemetry.py, test_responder.py, test_providers.py).
+    monkeypatch.setattr(responder, "get_cached_answer", lambda k: None)
 
     def nao_deveria_buscar(q):
         raise AssertionError("pedido fora de escopo não deve acionar a busca web")

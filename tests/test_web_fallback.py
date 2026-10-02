@@ -42,6 +42,7 @@ def _resultado(href, body="conteúdo RELEVANTE", title="titulo"):
         "https://www.puc-campinas.edu.br/biblioteca/servicos/",
         "https://www.puc-campinas.edu.br/secretaria-geral/matriculas/",
         "https://www.puc-campinas.edu.br/atualizacao/idiomas/",
+        "https://www.puc-campinas.edu.br/graduacao/direito/",  # TRI-7: graduação presencial entrou na allowlist
     ],
 )
 def test_url_oficial_e_permitida(url):
@@ -56,7 +57,6 @@ def test_url_oficial_e_permitida(url):
         "https://community.instructure.com/en/all-guides",
         # portal institucional fora dos paths curados (KB-2): vestibular,
         # avaliação institucional, notícia e landing page de campanha
-        "https://www.puc-campinas.edu.br/graduacao/direito/",
         "https://vestibular.puc-campinas.edu.br/curso/",
         "https://www.puc-campinas.edu.br/avaliacao-institucional/avaliacao-do-ensino/",
         "https://www.puc-campinas.edu.br/termo-aceite-dados-pessoais-lp/",
@@ -168,7 +168,7 @@ def test_assunto_limita_as_fontes_consultadas():
     canvas = web_fallback._fontes_para("canvas")
     assert canvas and all(f.host == "community.instructure.com" for f in canvas)
 
-    puc = web_fallback._fontes_para("puc-digital")
+    puc = web_fallback._fontes_para("puc-campinas")
     assert puc and all("puc-campinas" in f.host for f in puc)
 
 

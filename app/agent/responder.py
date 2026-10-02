@@ -221,6 +221,12 @@ def _registrar_scores(registro: telemetry.Registro, chunks: list[RetrievedChunk]
         if chunks[0].score_bruto is not None:
             registro.reranker_aplicado = True
             registro.score_top_bruto = round(chunks[0].score_bruto, 4)
+        elif settings.reranker_enabled:
+            # RET-8: 2º estágio ligado mas o chunk não trouxe `score_bruto` —
+            # o rerank caiu para o bi-encoder puro. `False` é distinto de
+            # `None` (reranker desligado), para não confundir os dois casos
+            # no dashboard de /revisao.
+            registro.reranker_aplicado = False
 
 
 def _rotulo_do_modelo(registro: telemetry.Registro) -> str:
