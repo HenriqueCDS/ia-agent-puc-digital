@@ -1,0 +1,73 @@
+name: CI
+
+# Verificação (lint + testes + build da imagem). Nada aqui toca o banco de
+# produção — o runner da Actions não tem rota até o Postgres (ver
+# .claude/.../memory kb3), então jobs que escrevem lá (recrawl, deploy) ficam
+# fora do GitHub de propósito.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint + testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # CPU-only, mesmo motivo do Dockerfile: sem isso o pip resolve o torch
+      # default (CUDA, ~2GB) que o runner não tem GPU para usar.
+      - name: Instala torch CPU-only
+        run: pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2,<3"
+
+      - name: Instala dependências (produção + dev)
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (só erro grave — sintaxe, nome indefinido, import quebrado)
+        run: ruff check --select=E9,F63,F7,F82 .
+
+      # A suíte não toca banco/API/rede (ver tests/conftest.py e os dublês de
+      # vector store, LLM, cache e busca) — OFFLINE força isso: se algum teste
+      # tentar baixar o modelo de embeddings, falha na hora em vez de travar
+      # o job minutos baixando 1GB.
+      - name: Testes
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: pytest -q
+
+  build-imagem:
+    name: Build da imagem Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Só valida que a imagem sobe (Dockerfile não quebrou, dependências
+      # resolvem) — não publica em registry nenhum.
+      - name: Build (sem push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

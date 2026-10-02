@@ -10,7 +10,7 @@ Escopo da v1: base local + páginas da allowlist, sem dados sigilosos do aluno.
 
 ## Arquitetura
 
-![Arquitetura atual do agente](Prints/arquitetura-agente-ia-suporte-ead-v0.png)
+![Arquitetura atual do agente](docs/arquitetura-agente-ia-suporte-ead-v0.png)
 
 Ingestão offline (arquivos locais + páginas da allowlist crawladas) → pgvector;
 runtime por pergunta com guardrail, triagem, mascaramento de PII, retrieval de 2
@@ -20,7 +20,7 @@ de telemetria que alimenta o relatório de lacunas, a suíte de eval e o dashboa
 `/revisao`. A lista de componentes e as decisões estão em
 [arquitetura-agente-ia-suporte-ead-v0.md](arquitetura-agente-ia-suporte-ead-v0.md);
 a fonte do diagrama é
-[Prints/arquitetura-agente-ia-suporte-ead-v0.mermaid](Prints/arquitetura-agente-ia-suporte-ead-v0.mermaid).
+[docs/arquitetura-agente-ia-suporte-ead-v0.mermaid](docs/arquitetura-agente-ia-suporte-ead-v0.mermaid).
 
 ## Resumo
 
@@ -305,6 +305,18 @@ teste nenhum — só na fatura.
 
 Testes: `pytest` (não precisa de banco nem de chave de API).
 
+### CI (`.github/workflows/ci.yml`)
+
+Roda em todo push/PR: `ruff check` (só erro grave — sintaxe, nome indefinido,
+import quebrado; sem regra de estilo ainda), a suíte `pytest` inteira (sem
+banco/rede, `HF_HUB_OFFLINE=1` força isso) e o build da imagem do `Dockerfile`
+(sem publicar, só valida que ela sobe). Dependências de lint/dev ficam em
+`requirements-dev.txt`, separado do `requirements.txt` que vai para a imagem.
+
+Nada nesse workflow escreve no Postgres de produção — de propósito: o runner
+do GitHub Actions não tem rota até o Supabase (ver re-crawl semanal, acima,
+que por isso roda fora do GitHub).
+
 ### Demo web (`/demo`)
 
 Suba a API e abra <http://localhost:8000/demo> (a raiz `/` redireciona para lá).
@@ -312,7 +324,7 @@ Suba a API e abra <http://localhost:8000/demo> (a raiz `/` redireciona para lá)
 **sem nenhum recurso externo** — abre numa máquina sem internet e não manda a
 pergunta do aluno para terceiro nenhum.
 
-![Tela /demo com uma resposta ancorada na base](Prints/demo.png)
+![Tela /demo com uma resposta ancorada na base](docs/screenshots/demo.png)
 
 O que a demo mostra, e por que cada coisa está lá:
 
@@ -377,10 +389,16 @@ python -m scripts.crawl --prune              # + remove do índice a página que
 python -m scripts.remove_ingested --web      # apaga TODO o conteúdo crawlado (o que --assunto não toca)
 ```
 
-O re-crawl semanal roda sozinho em `.github/workflows/recrawl.yml` (`--prune`,
-segunda 04:15 UTC, escrevendo direto no Supabase — precisa dos secrets
-`DATABASE_URL` e `HF_TOKEN`). Sem GitHub, agende `python -m scripts.crawl --prune`
-no Agendador de Tarefas do Windows (receita no cabeçalho do YAML).
+O re-crawl semanal **não roda via GitHub Actions**: o runner da Actions não tem
+rota até o Postgres (Supabase atrás de IP allowlist / rede interna), então um
+workflow lá escrevendo `DATABASE_URL` direto no banco não é viável. Agende
+`python -m scripts.crawl --prune` numa máquina que tenha acesso à rede do banco,
+por exemplo via Agendador de Tarefas do Windows:
+
+```
+schtasks /create /tn "recrawl-allowlist" /sc weekly /d MON /st 04:15 ^
+  /tr "cmd /c cd /d C:\caminho\ia-agent-puc-digital && .venv\Scripts\python -m scripts.crawl --prune"
+```
 
 ```
     n  dist  assunto        situação          tema
@@ -449,9 +467,9 @@ tendência por dia — e a conferência à mão da fidelidade de cada resposta
 (satisfeito / insatisfeito / pular), gravando o veredito no banco. A expectativa
 de uma pergunta se ajusta ali mesmo.
 
-![Dashboard /revisao — visão geral](Prints/revisao.png)
+![Dashboard /revisao — visão geral](docs/screenshots/revisao.png)
 
-![/revisao — aba Conferir, uma pergunta por vez](Prints/revisao-conferir.png)
+![/revisao — aba Conferir, uma pergunta por vez](docs/screenshots/revisao-conferir.png)
 
 > **`acertou` mede só o ROTEAMENTO.** Ele compara `resultado.origem` com
 > `origem_esperada` — uma resposta que inventa um prazo ou cita a página errada
@@ -742,7 +760,7 @@ Cada feature futura tem um lugar já definido — nenhuma exige reescrever a bas
 
 | Feature | Onde entra | O que muda |
 |---|---|---|
-| ~~**Web scraping** da allowlist~~ | `scripts/crawl.py` | **feito** (KB-3): sitemap → `path_prefixes` → `pipeline.ingest_documents`; re-crawl semanal em `.github/workflows/recrawl.yml` |
+| ~~**Web scraping** da allowlist~~ | `scripts/crawl.py` | **feito** (KB-3): sitemap → `path_prefixes` → `pipeline.ingest_documents`; re-crawl semanal agendado fora do GitHub (Actions não alcança o banco) |
 | **APIs públicas** (calendário acadêmico, API do Canvas) | mesmo registry, ou fonte de contexto extra em `responder.py` | novo loader; com 3+ fontes assim, o roteamento vira tool calling tendo `retrieve` e `buscar_na_web` como tools |
 | **FAQ estruturado** (match exato, sem LLM) | antes do `retrieve` em `responder.py` | responde as perguntas de altíssima frequência com texto aprovado, latência ~0 |
 | **Abertura de chamado** | onde hoje está `_encaminhar_para_secretaria` | transforma o encaminhamento em ação: abre o ticket já com a pergunta |

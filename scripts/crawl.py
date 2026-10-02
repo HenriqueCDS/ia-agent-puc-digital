@@ -15,9 +15,11 @@ quando nem o conteúdo crawlado cobre.
     python -m scripts.crawl --apenas-novos      # só as URLs ainda NÃO indexadas (não rebusca página já no índice)
     python -m scripts.crawl --prune             # re-crawl + remove do índice a página que saiu do sitemap (KB-5)
 
-O job semanal (`.github/workflows/recrawl.yml`) roda `--prune`. O prune só age
-numa fonte cujo sitemap respondeu por completo, e pára se fosse apagar mais da
-metade das páginas indexadas dela (--prune-force ignora esse teto).
+O re-crawl semanal (`--prune`) deve rodar fora do GitHub Actions: o runner não
+tem rota até o Postgres, então precisa de uma máquina com acesso à rede do
+banco (ex.: Agendador de Tarefas do Windows). O prune só age numa fonte cujo
+sitemap respondeu por completo, e pára se fosse apagar mais da metade das
+páginas indexadas dela (--prune-force ignora esse teto).
 
 CATEGORIA: cada página vira chunks com `source_type="web"` e `categoria="web"` na
 metadata (é isso que separa conteúdo crawlado de PDF oficial). O `assunto`

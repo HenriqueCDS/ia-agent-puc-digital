@@ -1,0 +1,5 @@
+# Deps de desenvolvimento/CI, por cima do requirements.txt de produção.
+# Separado para a imagem Docker (prod) não carregar ferramenta de lint à toa.
+-r requirements.txt
+
+ruff>=0.6,<1.0
